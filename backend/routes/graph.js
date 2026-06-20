@@ -206,4 +206,30 @@ router.post('/:blueprintId/options/:optionId/unfreeze', async (req, res, next) =
   }
 });
 
+// Persist a group's canvas position after the user drags it.
+router.patch('/:blueprintId/groups/:groupId/position', async (req, res, next) => {
+  try {
+    const { blueprintId, groupId } = req.params;
+    await assertEditable(blueprintId, req.user.id);
+
+    const { positionX, positionY } = req.body || {};
+    if (typeof positionX !== 'number' || typeof positionY !== 'number') {
+      return res.status(400).json({ error: 'positionX and positionY must be numbers' });
+    }
+
+    const { data, error } = await supabase
+      .from('node_groups')
+      .update({ position_x: positionX, position_y: positionY })
+      .eq('id', groupId)
+      .eq('blueprint_id', blueprintId)
+      .select()
+      .single();
+    if (error) throw error;
+
+    res.json({ group: data });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
