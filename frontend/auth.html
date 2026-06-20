@@ -48,7 +48,7 @@
   <div class="toast" id="toast"></div>
 
   <script type="module">
-    import { supabase } from './js/supabaseClient.js';
+    import { supabasePromise } from './js/supabaseClient.js';
 
     let mode = 'signin';
     const tabSignin = document.getElementById('tabSignin');
@@ -63,6 +63,13 @@
       toast.classList.toggle('error', isError);
       toast.classList.add('show');
       setTimeout(() => toast.classList.remove('show'), 3200);
+    }
+
+    let supabase;
+    try {
+      supabase = await supabasePromise;
+    } catch (err) {
+      showToast(err.message || 'Could not reach the backend', true);
     }
 
     function setMode(next) {
@@ -109,9 +116,11 @@
     });
 
     // Already signed in? Skip straight to the dashboard.
-    supabase.auth.getSession().then(({ data }) => {
-      if (data?.session) window.location.href = 'dashboard.html';
-    });
+    if (supabase) {
+      supabase.auth.getSession().then(({ data }) => {
+        if (data?.session) window.location.href = 'dashboard.html';
+      });
+    }
   </script>
 </body>
 </html>
