@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ThinkMaps — Build your perfect app idea blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F0EEE6;
+    --surface:#FAF9F5;
+    --surface-2:#E7E2D5;
+    --ink:#1F1B16;
+    --ink-muted:#6B6358;
+    --accent:#D97757;
+    --accent-deep:#BD5B3A;
+    --accent-soft:rgba(217,119,87,0.12);
+    --line:#DAD5C7;
+    --frozen:#AEA99D;
+    --frozen-bg:#E3DFD3;
+
+    --font-display:'Fraunces', serif;
+    --font-body:'Inter', sans-serif;
+    --font-mono:'IBM Plex Mono', monospace;
+
+    --maxw:1120px;
+  }
+
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--font-body);
+    font-size:16px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  img,svg{ display:block; max-width:100%; }
+  a{ color:inherit; }
+  :focus-visible{ outline:2px solid var(--accent-deep); outline-offset:3px; border-radius:4px; }
+
+  .wrap{ max-width:var(--maxw); margin:0 auto; padding:0 28px; }
+  .eyebrow{
+    font-family:var(--font-mono);
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--accent-deep);
+    font-weight:500;
+  }
+  h1,h2,h3{ font-family:var(--font-display); font-weight:600; margin:0; color:var(--ink); }
+  p{ margin:0; }
+  .muted{ color:var(--ink-muted); }
+
+  /* ---------- NAV ---------- */
+  header.site{
+    position:sticky; top:0; z-index:50;
+    background:rgba(240,238,230,0.92);
+    backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  nav.bar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:18px 28px; max-width:var(--maxw); margin:0 auto;
+  }
+  .logo{
+    display:flex; align-items:center; gap:8px;
+    font-family:var(--font-mono); font-weight:500; font-size:15px;
+    letter-spacing:0.02em;
+  }
+  .logo-mark{ width:18px; height:18px; }
+  .nav-links{ display:flex; gap:32px; font-size:14px; }
+  .nav-links a{ text-decoration:none; color:var(--ink-muted); }
+  .nav-links a:hover{ color:var(--ink); }
+  .nav-cta{ display:flex; align-items:center; gap:18px; }
+  @media (max-width:720px){ .nav-links{ display:none; } }
+
+  .btn{
+    font-family:var(--font-body); font-weight:600; font-size:14px;
+    padding:11px 20px; border-radius:8px; border:1px solid transparent;
+    cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:8px;
+    transition:transform .15s ease, box-shadow .15s ease;
+  }
+  .btn-primary{ background:var(--accent); color:#FAF6F1; }
+  .btn-primary:hover{ background:var(--accent-deep); }
+  .btn-ghost{ background:transparent; color:var(--ink); border-color:var(--line); }
+  .btn-ghost:hover{ border-color:var(--ink-muted); }
+  @media (prefers-reduced-motion:no-preference){ .btn:hover{ transform:translateY(-1px); } }
+
+  /* ---------- HERO ---------- */
+  .hero{ padding:88px 0 40px; }
+  .hero-inner{ text-align:center; max-width:760px; margin:0 auto; }
+  .hero h1{
+    font-size:clamp(34px, 5.4vw, 58px);
+    line-height:1.06;
+    margin:18px 0 20px;
+    letter-spacing:-0.01em;
+  }
+  .hero .sub{ font-size:18px; color:var(--ink-muted); max-width:560px; margin:0 auto 30px; }
+  .hero-ctas{ display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-bottom:64px; }
+  .hint-link{ font-size:14px; color:var(--ink-muted); text-decoration:none; align-self:center; }
+  .hint-link:hover{ color:var(--ink); }
+
+  /* ---------- GRAPH DEMO ---------- */
+  .graph-demo{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:20px;
+    padding:36px 24px 28px;
+    max-width:920px; margin:0 auto;
+    box-shadow:0 1px 0 rgba(0,0,0,0.02);
+  }
+  .graph-canvas{ position:relative; min-height:300px; }
+  .graph-lines{ position:absolute; top:0; left:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+  .graph-lines path{
+    fill:none; stroke:var(--accent); stroke-width:1.6; stroke-linecap:round;
+  }
+  .node-row{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; position:relative; z-index:2; }
+  .node-pill{
+    font-family:var(--font-mono); font-size:13px;
+    background:var(--surface); border:1px solid var(--line); color:var(--ink);
+    padding:9px 16px; border-radius:999px; cursor:pointer;
+    transition:border-color .15s ease, background .15s ease, color .15s ease;
+  }
+  .node-pill:hover{ border-color:var(--accent); }
+  .node-pill.active{ background:var(--accent); border-color:var(--accent); color:#FAF6F1; }
+  .child-row{ display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:56px; min-height:64px; position:relative; z-index:2; }
+  .child-card{
+    background:var(--surface); border:1px solid var(--accent); border-radius:10px;
+    padding:10px 14px; width:168px; text-align:left;
+    opacity:0; transform:translateY(6px);
+  }
+  .child-card.in{ opacity:1; transform:translateY(0); transition:opacity .35s ease, transform .35s ease; }
+  .child-card .k{ font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--accent-deep); text-transform:uppercase; }
+  .child-card .v{ font-size:13.5px; margin-top:3px; }
+  .frozen-lane{ display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:30px; min-height:30px; }
+  .frozen-pill{
+    font-family:var(--font-mono); font-size:11.5px;
+    background:var(--frozen-bg); border:1px dashed var(--frozen); color:var(--ink-muted);
+    padding:6px 12px; border-radius:999px; cursor:pointer;
+  }
+  .frozen-pill:hover{ color:var(--ink); border-color:var(--ink-muted); }
+  .frozen-pill span{ color:var(--frozen); margin:0 2px; }
+  .graph-caption{ text-align:center; font-size:13px; color:var(--ink-muted); margin-top:22px; }
+
+  @media (prefers-reduced-motion:reduce){
+    .child-card{ transition:none !important; opacity:1; transform:none; }
+  }
+
+  /* ---------- STEPS ---------- */
+  .section{ padding:84px 0; }
+  .section-head{ max-width:560px; margin-bottom:48px; }
+  .section-head h2{ font-size:clamp(26px,3.4vw,36px); margin-top:14px; }
+
+  .steps{ display:grid; grid-template-columns:repeat(4,1fr); gap:28px; }
+  @media (max-width:900px){ .steps{ grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:560px){ .steps{ grid-template-columns:1fr; } }
+  .step{ border-top:1px solid var(--line); padding-top:18px; }
+  .step .num{ font-family:var(--font-mono); font-size:12px; color:var(--frozen); }
+  .step h3{ font-size:18px; margin:10px 0 8px; }
+  .step p{ font-size:14.5px; color:var(--ink-muted); }
+  .step svg{ width:32px; height:32px; margin-bottom:14px; }
+
+  /* ---------- FEATURES ---------- */
+  .features{ background:var(--surface); border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  .feature-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  @media (max-width:860px){ .feature-grid{ grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:560px){ .feature-grid{ grid-template-columns:1fr; } }
+  .feature{ background:var(--surface); padding:28px 24px; }
+  .feature .eyebrow{ display:block; margin-bottom:10px; }
+  .feature h3{ font-size:17px; margin-bottom:8px; }
+  .feature p{ font-size:14px; color:var(--ink-muted); }
+
+  /* ---------- IDEA CARD ---------- */
+  .idea-wrap{ display:grid; grid-template-columns:1.1fr 0.9fr; gap:40px; align-items:start; }
+  @media (max-width:860px){ .idea-wrap{ grid-template-columns:1fr; } }
+  .idea-card{
+    background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:28px;
+  }
+  .idea-tag{ font-family:var(--font-mono); font-size:11px; color:var(--accent-deep); text-transform:uppercase; letter-spacing:.08em; }
+  .idea-card h3{ font-size:22px; margin:8px 0 4px; }
+  .idea-oneliner{ color:var(--ink-muted); font-size:14.5px; margin-bottom:18px; }
+  .idea-block{ margin-bottom:16px; }
+  .idea-block .lbl{ font-family:var(--font-mono); font-size:11px; color:var(--ink-muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px; }
+  .idea-block p{ font-size:14px; }
+  .idea-note{ font-size:12px; color:var(--frozen); font-family:var(--font-mono); margin-top:18px; }
+
+  .radar-panel{ background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:24px; text-align:center; }
+  .radar-panel h4{ font-family:var(--font-mono); font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-muted); margin-bottom:18px; }
+  .radar-legend{ display:flex; flex-wrap:wrap; gap:8px 14px; justify-content:center; margin-top:14px; }
+  .radar-legend span{ font-size:11.5px; color:var(--ink-muted); font-family:var(--font-mono); }
+  .radar-legend b{ color:var(--ink); }
+
+  /* ---------- PRICING ---------- */
+  .pricing-grid{ display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  @media (max-width:700px){ .pricing-grid{ grid-template-columns:1fr; } }
+  .plan{ border:1px solid var(--line); border-radius:16px; padding:30px; background:var(--surface); }
+  .plan.pro{ border-color:var(--accent); position:relative; }
+  .plan .ptag{ font-family:var(--font-mono); font-size:11px; color:var(--ink-muted); text-transform:uppercase; letter-spacing:.08em; }
+  .plan h3{ font-size:22px; margin:10px 0 2px; }
+  .plan .price{ font-family:var(--font-display); font-size:36px; margin:10px 0 18px; }
+  .plan .price sup{ font-family:var(--font-body); font-size:14px; color:var(--ink-muted); font-weight:500; }
+  .plan ul{ list-style:none; padding:0; margin:0 0 22px; display:flex; flex-direction:column; gap:9px; }
+  .plan li{ font-size:14px; color:var(--ink-muted); padding-left:20px; position:relative; }
+  .plan li::before{ content:"—"; position:absolute; left:0; color:var(--accent-deep); }
+  .plan .btn{ width:100%; justify-content:center; }
+
+  /* ---------- CTA / FOOTER ---------- */
+  .cta-band{ text-align:center; padding:90px 0; }
+  .cta-band h2{ font-size:clamp(26px,4vw,38px); margin:14px 0 26px; max-width:600px; margin-inline:auto; }
+  footer{ border-top:1px solid var(--line); padding:36px 0; }
+  .foot-row{ display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px; }
+  .foot-links{ display:flex; gap:22px; font-size:13px; color:var(--ink-muted); }
+  .foot-links a{ text-decoration:none; }
+  .foot-links a:hover{ color:var(--ink); }
+  .foot-fine{ font-size:12px; color:var(--frozen); margin-top:18px; }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <nav class="bar">
+    <div class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </div>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#idea">Output</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <div class="nav-cta">
+      <a href="#" class="btn btn-ghost">Sign in</a>
+      <a href="#pricing" class="btn btn-primary">Start a blueprint</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap hero-inner">
+      <span class="eyebrow">An ideation canvas for builders</span>
+      <h1>Map your next app, before you build the wrong one.</h1>
+      <p class="sub">ThinkMaps turns app-idea hunting into a visual, branching graph — grounded in real research instead of guesses — so you validate before you write a line of code.</p>
+      <div class="hero-ctas">
+        <a href="#pricing" class="btn btn-primary">Start your blueprint free</a>
+        <a href="#demo" class="hint-link">See how branching works ↓</a>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="graph-demo" id="demo">
+        <div class="graph-canvas" id="graphCanvas">
+          <svg class="graph-lines" id="graphLines"></svg>
+          <div class="node-row" id="rootRow">
+            <button class="node-pill" data-niche="fitness" aria-pressed="false">Fitness</button>
+            <button class="node-pill" data-niche="finance" aria-pressed="false">Finance &amp; Commerce</button>
+            <button class="node-pill" data-niche="productivity" aria-pressed="false">Productivity</button>
+            <button class="node-pill" data-niche="entertainment" aria-pressed="false">Entertainment</button>
+          </div>
+          <div class="child-row" id="childRow"></div>
+        </div>
+        <div class="frozen-lane" id="frozenLane"></div>
+        <p class="graph-caption" id="graphCaption">Click a niche to branch the graph — pick another, and this one freezes in place, not gone.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section" id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">How a blueprint grows</span>
+        <h2>Four moves, repeated until the graph knows what you're building.</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="8" r="3" fill="#D97757"/><circle cx="6" cy="24" r="2.4" stroke="#1F1B16"/><circle cx="16" cy="24" r="2.4" stroke="#1F1B16"/><circle cx="26" cy="24" r="2.4" stroke="#1F1B16"/><path d="M16 11V20M16 20L6 22M16 20L26 22" stroke="#AEA99D"/></svg>
+          <div class="num">01</div>
+          <h3>Pick a niche</h3>
+          <p class="muted">Start from six AI-suggested niches, or type your own to take the graph somewhere nobody's mapped yet.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="13" width="9" height="6" rx="2" stroke="#1F1B16"/><rect x="19" y="13" width="9" height="6" rx="2" stroke="#1F1B16"/><path d="M13 16H19" stroke="#D97757"/></svg>
+          <div class="num">02</div>
+          <h3>Add context</h3>
+          <p class="muted">Connect to Sub-Niche, Audience, and Monetization groups — each click narrows the graph toward something real.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="8" cy="16" r="3" fill="#D97757"/><circle cx="24" cy="8" r="2.4" stroke="#AEA99D"/><circle cx="24" cy="24" r="2.4" stroke="#1F1B16"/><path d="M11 16L24 8" stroke="#AEA99D" stroke-dasharray="2 2"/><path d="M11 16L24 24" stroke="#D97757"/></svg>
+          <div class="num">03</div>
+          <h3>Branch freely</h3>
+          <p class="muted">Explore a path, then rewind and try another. The old branch grays out and waits — it's never deleted.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 6a7 7 0 0 0-4 12.7V22h8v-3.3A7 7 0 0 0 16 6Z" stroke="#1F1B16"/><path d="M13 26h6" stroke="#1F1B16"/></svg>
+          <div class="num">04</div>
+          <h3>Catch the insight</h3>
+          <p class="muted">As the graph fills in, insight bubbles surface the pain points your path keeps running into.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section features" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Everything past the first sketch</span>
+        <h2>The graph is the start. Validation and shipping are built in.</h2>
+      </div>
+      <div class="feature-grid">
+        <div class="feature">
+          <span class="eyebrow">Personal context</span>
+          <h3>Founder Profile</h3>
+          <p>Your skills, stack, time, and risk tolerance sit in a floating panel and quietly steer every suggestion toward something you can actually build.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Memory</span>
+          <h3>Version history &amp; snapshots</h3>
+          <p>Name a snapshot any time. Roll back, diff two versions side by side, and read an AI summary of what changed and why it matters.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Together</span>
+          <h3>Real-time collaboration</h3>
+          <p>Invite a co-founder into the same graph. Everyone edits, comments, and branches live, with clear marks for who touched what.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Stress test</span>
+          <h3>Red Team mode</h3>
+          <p>Hand any idea a brutally honest review — market risk, technical traps, validation gaps — before you fall in love with it.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Sources</span>
+          <h3>Research transparency</h3>
+          <p>Every claim traces back to a Reddit thread, an App Store review, or a forum post. Raw quotes and confidence scores, always visible.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Ship it</span>
+          <h3>Export superpowers</h3>
+          <p>One click out to Notion, Obsidian, Markdown, a polished PDF, or a prompt that's ready to paste into Cursor or Lovable.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- IDEA OUTPUT -->
+  <section class="section" id="idea">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">From graph to idea</span>
+        <h2>What comes out the other end of a finished blueprint.</h2>
+      </div>
+      <div class="idea-wrap">
+        <div class="idea-card">
+          <span class="idea-tag">Sample idea card — illustrative</span>
+          <h3>Shiftwell</h3>
+          <p class="idea-oneliner">Recovery and sleep tracking built around rotating shifts, not a fixed 9-to-5.</p>
+
+          <div class="idea-block">
+            <div class="lbl">Core problem</div>
+            <p class="muted">Existing fitness apps assume a regular daytime schedule. Shift workers fall out of every streak, every reminder, every "morning routine" — the app is fighting their clock instead of reading it.</p>
+          </div>
+          <div class="idea-block">
+            <div class="lbl">10x upgrade</div>
+            <p class="muted">A schedule-aware engine that re-times reminders, fasting windows, and sleep targets around the next shift, not the calendar date.</p>
+          </div>
+          <div class="idea-block">
+            <div class="lbl">Monetization</div>
+            <p class="muted">Free tracking, paid schedule-sync with wearables and employer roster imports — tested at $6.99 and $9.99.</p>
+          </div>
+          <p class="idea-note">Scoped MVP, validation kit, and build prompts included with every generated idea.</p>
+        </div>
+
+        <div class="radar-panel">
+          <h4>Scored against the 10-question framework</h4>
+          <svg viewBox="0 0 200 200" aria-hidden="true">
+            <polygon points="100,30 160,65 160,135 100,170 39,135 39,65" fill="none" stroke="#DAD5C7"/>
+            <polygon points="100,53 140,77 140,123 100,147 60,123 60,77" fill="none" stroke="#DAD5C7"/>
+            <polygon points="100,77 120,88 120,112 100,123 80,112 80,88" fill="none" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="30" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="65" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="170" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="65" stroke="#DAD5C7"/>
+            <polygon points="100,37 142,76 149,128 100,142 52,128 58,76" fill="#D97757" fill-opacity="0.22" stroke="#D97757" stroke-width="2"/>
+          </svg>
+          <div class="radar-legend">
+            <span>Problem severity <b>9</b></span>
+            <span>Differentiation <b>7</b></span>
+            <span>Founder fit <b>8</b></span>
+            <span>Monetization <b>6</b></span>
+            <span>Market timing <b>8</b></span>
+            <span>Feasibility <b>7</b></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section class="section" id="pricing">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Pricing</span>
+        <h2>Map for free. Pay when you need the whole toolkit.</h2>
+      </div>
+      <div class="pricing-grid">
+        <div class="plan">
+          <span class="ptag">Free</span>
+          <h3>One blueprint, one week</h3>
+          <div class="price">$0</div>
+          <ul>
+            <li>One full Blueprint Graph</li>
+            <li>Seven days of access, then it locks</li>
+            <li>Unlimited new blueprints, same limit</li>
+            <li>Core idea generation</li>
+          </ul>
+          <a href="#" class="btn btn-ghost">Start free</a>
+        </div>
+        <div class="plan pro">
+          <span class="ptag">Pro</span>
+          <h3>For builders who iterate</h3>
+          <div class="price">$12<sup>/month</sup></div>
+          <ul>
+            <li>Unlimited blueprints, no expiry</li>
+            <li>Deep research &amp; Red Team mode</li>
+            <li>Real-time collaboration</li>
+            <li>Full version history</li>
+            <li>All export formats</li>
+            <li>Priority support</li>
+          </ul>
+          <a href="#" class="btn btn-primary">Go Pro</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-band">
+    <div class="wrap">
+      <span class="eyebrow">Ready when you are</span>
+      <h2>Stop scrolling app-idea threads. Start mapping one.</h2>
+      <a href="#pricing" class="btn btn-primary">Start your blueprint free</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <div class="logo">ThinkMaps</div>
+    <div class="foot-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#">Gallery</a>
+    </div>
+  </div>
+  <div class="wrap foot-fine">© 2026 ThinkMaps. Built for builders.</div>
+</footer>
+
+<script>
+(function(){
+  const nicheData = {
+    fitness: { label:"Fitness", children:[
+      {k:"Sub-niche", v:"Recovery &amp; sleep tracking"},
+      {k:"Audience", v:"Shift workers"},
+      {k:"Monetization", v:"Subscription + wearables"}
+    ]},
+    finance: { label:"Finance & Commerce", children:[
+      {k:"Sub-niche", v:"Cash-flow visualization"},
+      {k:"Audience", v:"Freelancers"},
+      {k:"Monetization", v:"Freemium → Pro tier"}
+    ]},
+    productivity: { label:"Productivity", children:[
+      {k:"Sub-niche", v:"Async team rituals"},
+      {k:"Audience", v:"Remote managers"},
+      {k:"Monetization", v:"Per-seat pricing"}
+    ]},
+    entertainment: { label:"Entertainment", children:[
+      {k:"Sub-niche", v:"Local live-show discovery"},
+      {k:"Audience", v:"College students"},
+      {k:"Monetization", v:"Ticketing commission"}
+    ]}
+  };
+
+  const canvas = document.getElementById('graphCanvas');
+  const linesSvg = document.getElementById('graphLines');
+  const rootRow = document.getElementById('rootRow');
+  const childRow = document.getElementById('childRow');
+  const frozenLane = document.getElementById('frozenLane');
+  const caption = document.getElementById('graphCaption');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let activeNiche = null;
+  const frozen = []; // niche keys explored before the current one
+
+  function clearChildren(){
+    childRow.innerHTML = '';
+    linesSvg.innerHTML = '';
+  }
+
+  function renderFrozenLane(){
+    frozenLane.innerHTML = '';
+    frozen.forEach(key => {
+      const data = nicheData[key];
+      const btn = document.createElement('button');
+      btn.className = 'frozen-pill';
+      btn.innerHTML = data.label + ' <span>→</span> ' + data.children[1].v;
+      btn.addEventListener('click', () => selectNiche(key));
+      frozenLane.appendChild(btn);
+    });
+  }
+
+  function drawLines(rootBtn, cards){
+    linesSvg.innerHTML = '';
+    const canvasRect = canvas.getBoundingClientRect();
+    const rootRect = rootBtn.getBoundingClientRect();
+    const startX = rootRect.left + rootRect.width/2 - canvasRect.left;
+    const startY = rootRect.bottom - canvasRect.top;
+
+    cards.forEach(card => {
+      const r = card.getBoundingClientRect();
+      const endX = r.left + r.width/2 - canvasRect.left;
+      const endY = r.top - canvasRect.top;
+      const midY = (startY + endY) / 2;
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d', `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`);
+      linesSvg.appendChild(path);
+
+      if(!reduceMotion){
+        const len = path.getTotalLength();
+        path.style.strokeDasharray = len;
+        path.style.strokeDashoffset = len;
+        path.style.transition = 'stroke-dashoffset .5s ease';
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          path.style.strokeDashoffset = '0';
+        }));
+      }
+    });
+  }
+
+  function selectNiche(key){
+    if(key === activeNiche) return;
+
+    if(activeNiche && !frozen.includes(activeNiche)){
+      frozen.unshift(activeNiche);
+      if(frozen.length > 3) frozen.pop();
+    }
+    const idx = frozen.indexOf(key);
+    if(idx > -1) frozen.splice(idx, 1);
+
+    activeNiche = key;
+    renderFrozenLane();
+
+    rootRow.querySelectorAll('.node-pill').forEach(p => {
+      const isActive = p.dataset.niche === key;
+      p.classList.toggle('active', isActive);
+      p.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+
+    clearChildren();
+    const data = nicheData[key];
+    const cards = data.children.map(c => {
+      const card = document.createElement('div');
+      card.className = 'child-card';
+      card.innerHTML = `<div class="k">${c.k}</div><div class="v">${c.v}</div>`;
+      childRow.appendChild(card);
+      return card;
+    });
+
+    caption.textContent = `Branching from "${data.label}" — pick another niche above and this one freezes, not gone.`;
+
+    requestAnimationFrame(() => {
+      cards.forEach((card, i) => {
+        setTimeout(() => card.classList.add('in'), reduceMotion ? 0 : i * 90);
+      });
+      drawLines(rootRow.querySelector(`[data-niche="${key}"]`), cards);
+    });
+  }
+
+  rootRow.querySelectorAll('.node-pill').forEach(btn => {
+    btn.addEventListener('click', () => selectNiche(btn.dataset.niche));
+  });
+
+  window.addEventListener('resize', () => {
+    if(!activeNiche) return;
+    const cards = Array.from(childRow.querySelectorAll('.child-card'));
+    drawLines(rootRow.querySelector(`[data-niche="${activeNiche}"]`), cards);
+  });
+
+  // open with Fitness pre-branched so the mechanic is visible immediately
+  selectNiche('fitness');
+})();
+</script>
+
+</body>
+</html>
