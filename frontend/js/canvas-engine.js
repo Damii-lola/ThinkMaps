@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient.js';
+import { supabasePromise } from './supabaseClient.js';
 import { api } from './api.js';
 
 const CARD_WIDTH = 220;
@@ -448,6 +448,14 @@ async function init() {
   state.blueprintId = params.get('id');
   if (!state.blueprintId) {
     window.location.href = 'dashboard.html';
+    return;
+  }
+
+  let supabase;
+  try {
+    supabase = await supabasePromise;
+  } catch (err) {
+    showToast(err.message || 'Could not reach the backend', true);
     return;
   }
 
