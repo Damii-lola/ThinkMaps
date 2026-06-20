@@ -1,1 +1,102 @@
+html, body { height: 100%; overflow: hidden; }
 
+.viewport{
+  position:fixed; top:57px; left:0; right:0; bottom:0;
+  overflow:hidden;
+  background-color:#FBF6EE;
+  background-image: radial-gradient(rgba(191,140,92,0.22) 1px, transparent 1.5px);
+  background-size: 26px 26px;
+  cursor: grab;
+}
+.viewport.panning{ cursor: grabbing; }
+
+.world{
+  position:absolute; top:0; left:0; width:8000px; height:8000px;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.edges-layer{ position:absolute; top:0; left:0; pointer-events:none; overflow:visible; }
+.edges-layer path{ fill:none; stroke:var(--accent); stroke-width:1.6; }
+.edges-layer path.frozen-edge{ stroke:var(--frozen); stroke-dasharray:4 4; }
+
+.groups-layer{ position:relative; }
+
+.group-card{
+  position:absolute; width:220px;
+  background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  box-shadow:0 1px 0 rgba(0,0,0,0.03);
+  overflow:hidden;
+}
+.group-card.frozen{ opacity:.55; filter:grayscale(0.4); }
+
+.group-header{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:9px 12px; font-family:var(--font-mono); font-size:12px; font-weight:500; color:#fff;
+  cursor:grab;
+}
+.group-header.type-niche{ background:var(--accent); }
+.group-header.type-sub_niche{ background:#C99A3C; }
+.group-header.type-audience{ background:#B97A82; }
+.group-header.type-monetization{ background:#8B5E3C; }
+.group-header .retry-btn{
+  background:rgba(255,255,255,0.25); border:none; border-radius:6px; color:#fff;
+  font-size:11px; padding:3px 7px; cursor:pointer;
+}
+.group-header .retry-btn:hover{ background:rgba(255,255,255,0.4); }
+.group-header .retry-btn:disabled{ opacity:.5; cursor:wait; }
+
+.option-row{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:9px 12px; border-top:1px solid var(--line); font-size:13px; gap:8px;
+  background:var(--surface);
+}
+.option-row.frozen{ color:var(--frozen); }
+.option-row .dot{
+  width:9px; height:9px; border-radius:50%; background:var(--line);
+  border:1px solid var(--ink-muted); flex-shrink:0; cursor:pointer;
+}
+.option-row.has-children .dot{ background:var(--accent); border-color:var(--accent-deep); }
+.option-row.frozen .dot{ background:var(--frozen-bg); border-color:var(--frozen); }
+.option-row .label{ flex:1; }
+.option-row .branch-btn{
+  width:20px; height:20px; border-radius:6px; border:1px solid var(--line); background:var(--surface);
+  font-size:13px; line-height:1; cursor:pointer; color:var(--ink-muted);
+}
+.option-row .branch-btn:hover{ border-color:var(--accent); color:var(--accent-deep); }
+
+.custom-row{ padding:8px 12px; border-top:1px dashed var(--line); }
+.custom-row input{
+  width:100%; font-size:12.5px; border:none; background:transparent; outline:none;
+  color:var(--ink); font-family:var(--font-body);
+}
+.custom-row input::placeholder{ color:var(--ink-muted); }
+.custom-row input:disabled{ opacity:.5; }
+
+.insight-bubble{
+  position:absolute; max-width:200px; background:#FFF7EC; border:1px solid var(--accent);
+  border-radius:10px; padding:10px 30px 10px 12px; font-size:12px; color:var(--ink);
+  box-shadow:0 4px 14px rgba(0,0,0,0.08); z-index:5;
+}
+.insight-bubble .dismiss{ position:absolute; top:4px; right:8px; cursor:pointer; color:var(--ink-muted); font-size:11px; }
+
+.lock-badge{
+  font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+  background:var(--frozen-bg); color:var(--frozen); padding:5px 10px; border-radius:999px;
+}
+
+.zoom-controls{ position:fixed; bottom:20px; right:20px; display:flex; gap:6px; z-index:60; }
+.zoom-controls button{
+  width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--surface);
+  font-size:16px; cursor:pointer; color:var(--ink);
+}
+.zoom-controls button:hover{ border-color:var(--accent); }
+
+.popover{
+  position:fixed; z-index:80; background:var(--surface); border:1px solid var(--line); border-radius:10px;
+  box-shadow:0 8px 24px rgba(0,0,0,0.12); padding:8px; display:flex; flex-direction:column; gap:4px; min-width:150px;
+}
+.popover button{
+  text-align:left; padding:8px 10px; border:none; background:transparent; border-radius:6px; cursor:pointer;
+  font-size:13px; color:var(--ink); font-family:var(--font-body);
+}
+.popover button:hover{ background:var(--accent-soft); color:var(--accent-deep); }
