@@ -5,6 +5,7 @@ import cors from 'cors';
 import selarWebhookRouter from './routes/selar.js';
 import blueprintsRouter from './routes/blueprints.js';
 import graphRouter from './routes/graph.js';
+import configRouter from './routes/config.js';
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 app.use('/api/blueprints', blueprintsRouter);
 app.use('/api/blueprints', graphRouter); // adds nested /:blueprintId/groups, /options/:id/freeze, etc.
+app.use('/api/config', configRouter);
 
 // Centralized error handler — every route's catch(next) lands here.
 app.use((err, req, res, next) => {
