@@ -1,0 +1,61 @@
+:root{
+  --bg:#F0EEE6;
+  --surface:#FAF9F5;
+  --surface-2:#E7E2D5;
+  --ink:#1F1B16;
+  --ink-muted:#6B6358;
+  --accent:#D97757;
+  --accent-deep:#BD5B3A;
+  --accent-soft:rgba(217,119,87,0.12);
+  --line:#DAD5C7;
+  --frozen:#AEA99D;
+  --frozen-bg:#E3DFD3;
+  --danger:#B3432D;
+
+  --font-display:'Fraunces', serif;
+  --font-body:'Inter', sans-serif;
+  --font-mono:'IBM Plex Mono', monospace;
+}
+
+*{ box-sizing:border-box; }
+body{ margin:0; font-family:var(--font-body); color:var(--ink); background:var(--bg); }
+a{ color:inherit; }
+:focus-visible{ outline:2px solid var(--accent-deep); outline-offset:3px; border-radius:4px; }
+
+.btn{
+  font-family:var(--font-body); font-weight:600; font-size:14px;
+  padding:11px 20px; border-radius:8px; border:1px solid transparent;
+  cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:8px;
+  transition:transform .15s ease, background .15s ease;
+}
+.btn-primary{ background:var(--accent); color:#FAF6F1; }
+.btn-primary:hover{ background:var(--accent-deep); }
+.btn-ghost{ background:transparent; color:var(--ink); border-color:var(--line); }
+.btn-ghost:hover{ border-color:var(--ink-muted); }
+.btn:disabled{ opacity:.5; cursor:not-allowed; }
+
+.field{ display:flex; flex-direction:column; gap:6px; margin-bottom:16px; }
+.field label{
+  font-family:var(--font-mono); font-size:11px; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--ink-muted);
+}
+.field input{
+  font-family:var(--font-body); font-size:15px; padding:11px 14px;
+  border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink);
+}
+.field input:focus{ border-color:var(--accent); }
+
+.toast{
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  background:var(--ink); color:#FAF6F1; padding:12px 20px; border-radius:10px;
+  font-size:14px; z-index:200; opacity:0; transition:opacity .2s ease; pointer-events:none;
+}
+.toast.show{ opacity:1; }
+.toast.error{ background:var(--danger); }
+
+.topbar{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 22px; border-bottom:1px solid var(--line);
+  background:rgba(240,238,230,0.92); position:sticky; top:0; z-index:50;
+}
+.brand{ font-family:var(--font-mono); font-weight:500; font-size:15px; display:flex; align-items:center; gap:8px; }
