@@ -1,9 +1,8 @@
-import { supabase } from './supabaseClient.js';
-
-// Fill in your deployed Render backend URL.
-const API_BASE = 'https://thinkmaps.onrender.com/api';
+import { supabasePromise } from './supabaseClient.js';
+import { API_BASE } from './config.js';
 
 async function authHeader() {
+  const supabase = await supabasePromise;
   const { data } = await supabase.auth.getSession();
   const token = data?.session?.access_token;
   if (!token) throw new Error('Not signed in');
