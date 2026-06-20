@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ThinkMaps — Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/theme.css">
+<style>
+  body{ display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .card{ background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:36px; width:360px; }
+  .card h1{ font-family:var(--font-display); font-size:26px; margin:0 0 4px; }
+  .card p.sub{ color:var(--ink-muted); font-size:14px; margin:0 0 24px; }
+  .tabs{ display:flex; gap:8px; margin-bottom:22px; }
+  .tab{
+    flex:1; text-align:center; padding:9px; border-radius:8px; font-family:var(--font-mono);
+    font-size:12px; text-transform:uppercase; letter-spacing:.06em; cursor:pointer;
+    border:1px solid var(--line); color:var(--ink-muted);
+  }
+  .tab.active{ background:var(--accent); color:#FAF6F1; border-color:var(--accent); }
+  .switch{ text-align:center; font-size:13px; color:var(--ink-muted); margin-top:14px; }
+  .switch a{ color:var(--accent-deep); cursor:pointer; text-decoration:none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>ThinkMaps</h1>
+    <p class="sub" id="subtext">Sign in to keep building your blueprint.</p>
+    <div class="tabs">
+      <div class="tab active" id="tabSignin">Sign in</div>
+      <div class="tab" id="tabSignup">Sign up</div>
+    </div>
+    <form id="authForm">
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" required autocomplete="email" />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" required minlength="6" autocomplete="current-password" />
+      </div>
+      <button class="btn btn-primary" type="submit" id="submitBtn" style="width:100%;justify-content:center;">Sign in</button>
+    </form>
+    <p class="switch" id="switchText">No account? <a id="switchLink">Sign up</a></p>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script type="module">
+    import { supabase } from './js/supabaseClient.js';
+
+    let mode = 'signin';
+    const tabSignin = document.getElementById('tabSignin');
+    const tabSignup = document.getElementById('tabSignup');
+    const submitBtn = document.getElementById('submitBtn');
+    const subtext = document.getElementById('subtext');
+    const switchText = document.getElementById('switchText');
+    const toast = document.getElementById('toast');
+
+    function showToast(message, isError = false) {
+      toast.textContent = message;
+      toast.classList.toggle('error', isError);
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3200);
+    }
+
+    function setMode(next) {
+      mode = next;
+      const isSignup = mode === 'signup';
+      tabSignin.classList.toggle('active', !isSignup);
+      tabSignup.classList.toggle('active', isSignup);
+      submitBtn.textContent = isSignup ? 'Create account' : 'Sign in';
+      subtext.textContent = isSignup
+        ? 'Start your first blueprint in under a minute.'
+        : 'Sign in to keep building your blueprint.';
+      switchText.innerHTML = isSignup
+        ? 'Already have an account? <a id="switchLink">Sign in</a>'
+        : 'No account? <a id="switchLink">Sign up</a>';
+      document.getElementById('switchLink').addEventListener('click', () => setMode(isSignup ? 'signin' : 'signup'));
+    }
+
+    tabSignin.addEventListener('click', () => setMode('signin'));
+    tabSignup.addEventListener('click', () => setMode('signup'));
+    document.getElementById('switchLink').addEventListener('click', () => setMode('signup'));
+
+    document.getElementById('authForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+
+      try {
+        if (mode === 'signup') {
+          const { error } = await supabase.auth.signUp({ email, password });
+          if (error) throw error;
+          showToast('Account created — check your email if confirmation is required.');
+        } else {
+          const { error } = await supabase.auth.signInWithPassword({ email, password });
+          if (error) throw error;
+        }
+        const { data } = await supabase.auth.getSession();
+        if (data?.session) window.location.href = 'dashboard.html';
+      } catch (err) {
+        showToast(err.message || 'Something went wrong', true);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    // Already signed in? Skip straight to the dashboard.
+    supabase.auth.getSession().then(({ data }) => {
+      if (data?.session) window.location.href = 'dashboard.html';
+    });
+  </script>
+</body>
+</html>
