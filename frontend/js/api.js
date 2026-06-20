@@ -1,7 +1,7 @@
 import { supabase } from './supabaseClient.js';
 
 // Fill in your deployed Render backend URL.
-const API_BASE = 'https://YOUR-RENDER-BACKEND.onrender.com/api';
+const API_BASE = 'https://thinkmaps.onrender.com/api';
 
 async function authHeader() {
   const { data } = await supabase.auth.getSession();
