@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables — real values live in Render's dashboard only
+.env
+.env.local
+*.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
