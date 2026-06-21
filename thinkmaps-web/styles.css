@@ -253,6 +253,10 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .auth-form .btn{ justify-content:center; margin-top:4px; }
 .auth-error{ font-size:13px; color:#C24A3D; min-height:16px; margin:0; }
 
+.auth-pending{ text-align:center; padding:8px 4px; }
+.auth-pending h3{ font-size:18px; margin-bottom:10px; }
+.auth-pending strong{ color:var(--ink); }
+
 /* ---------- DASHBOARD ---------- */
 .dashboard-main{ padding:60px 0 100px; }
 .dashboard-main h1{ font-size:clamp(26px,3.4vw,34px); margin-bottom:28px; }
