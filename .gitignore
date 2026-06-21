@@ -1,16 +1,15 @@
-# Dependencies
+# dependencies
 node_modules/
 
-# Environment variables — real values live in Render's dashboard only
+# build output
+frontend/dist/
+
+# env files — real secrets stay in Render's dashboard, never in git
 .env
 .env.local
 *.env
+!.env.example
 
-# Logs
-*.log
-npm-debug.log*
-
-# OS / editor
+# OS/editor junk
 .DS_Store
 .vscode/
-.idea/
