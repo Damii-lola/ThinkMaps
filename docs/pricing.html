@@ -50,10 +50,9 @@
 </div>
 
 <script type="module">
-  import { supabase, renderNavBar } from './shared.js';
+  import { hasSession, renderNavBar } from './shared.js';
 
-  const { data } = await supabase.auth.getSession();
-  const loggedIn = !!data.session;
+  const loggedIn = hasSession();
 
   const navLink = document.createElement('a');
   navLink.className = 'btn btn-ghost';
