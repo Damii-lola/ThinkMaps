@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign in — ThinkMaps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="auth-shell">
+  <div class="auth-card">
+    <a href="index.html" class="logo" style="margin-bottom:24px;display:inline-flex;">ThinkMaps</a>
+    <h1 id="authTitle">Welcome back</h1>
+    <p class="sub" id="authSub">Sign in to keep mapping.</p>
+
+    <div class="auth-error" id="authError" style="display:none;"></div>
+
+    <form id="authForm">
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" required autocomplete="email" />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" required minlength="6" autocomplete="current-password" />
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;" id="authSubmitBtn">Sign in</button>
+    </form>
+
+    <div class="auth-switch" id="authSwitch">
+      New here? <a href="auth.html?mode=signup">Start your blueprint free</a>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { supabase } from './shared.js';
+
+  // If already signed in, no reason to see this page.
+  const { data: existing } = await supabase.auth.getSession();
+  if (existing.session) {
+    window.location.href = 'dashboard.html';
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  let isSignup = params.get('mode') === 'signup';
+
+  const titleEl = document.getElementById('authTitle');
+  const subEl = document.getElementById('authSub');
+  const submitBtn = document.getElementById('authSubmitBtn');
+  const switchEl = document.getElementById('authSwitch');
+  const errorEl = document.getElementById('authError');
+  const passwordInput = document.getElementById('password');
+
+  function applyMode() {
+    titleEl.textContent = isSignup ? 'Start your blueprint' : 'Welcome back';
+    subEl.textContent = isSignup ? 'One free blueprint, no card required.' : 'Sign in to keep mapping.';
+    submitBtn.textContent = isSignup ? 'Create account' : 'Sign in';
+    passwordInput.autocomplete = isSignup ? 'new-password' : 'current-password';
+    switchEl.innerHTML = isSignup
+      ? 'Already have a blueprint? <a href="auth.html">Sign in</a>'
+      : 'New here? <a href="auth.html?mode=signup">Start your blueprint free</a>';
+  }
+  applyMode();
+
+  document.getElementById('authForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorEl.style.display = 'none';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Working…';
+
+    const email = document.getElementById('email').value;
+    const password = passwordInput.value;
+
+    const { error } = isSignup
+      ? await supabase.auth.signUp({ email, password })
+      : await supabase.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      errorEl.textContent = error.message;
+      errorEl.style.display = 'block';
+      submitBtn.disabled = false;
+      applyMode();
+      return;
+    }
+
+    window.location.href = 'dashboard.html';
+  });
+</script>
+
+</body>
+</html>
