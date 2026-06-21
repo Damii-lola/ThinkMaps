@@ -544,7 +544,9 @@ const OPTION_ROW_HEIGHT = 38;
 // Matches the -6000px top/left on .canvas-lines in styles.css — every
 // coordinate handed to the SVG gets shifted by this so world position (0,0)
 // lands safely inside the SVG's own box instead of right at its corner.
-const SVG_OFFSET = 6000;
+// Note: the SVG line layer shares the exact same coordinate space as the
+// group cards (both are direct children of #canvasWorld, no offset between
+// them) — so path coordinates use raw world units, same as group.position_x/y.
 
 const canvasState = {
   blueprintId: null,
@@ -819,6 +821,7 @@ function renderLines(visible){
   svg.innerHTML = '';
 
   const visibleGroupIds = new Set(visible.map(v => v.group.id));
+  let drawnCount = 0;
 
   visible.forEach(({ group, options }) => {
     options.forEach((opt, optionIndex) => {
@@ -827,19 +830,22 @@ function renderLines(visible){
       spawnedGroups.forEach(childGroup => {
         if(!visibleGroupIds.has(childGroup.id)) return;
 
-        const startX = (group.position_x || 0) + CARD_WIDTH + SVG_OFFSET;
-        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2 + SVG_OFFSET;
-        const endX = (childGroup.position_x || 0) + SVG_OFFSET;
-        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2 + SVG_OFFSET;
+        const startX = (group.position_x || 0) + CARD_WIDTH;
+        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const endX = childGroup.position_x || 0;
+        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
         const midX = (startX + endX) / 2;
 
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);
         if(childGroup.is_frozen) path.setAttribute('class', 'frozen-line');
         svg.appendChild(path);
+        drawnCount++;
       });
     });
   });
+
+  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) for ${visible.length} visible group(s)`);
 }
 
 function applyWorldTransform(){
@@ -1014,7 +1020,7 @@ function updateLineDragPreview(clientX, clientY){
   }
 
   const midX = (lineDragState.startX + worldX) / 2;
-  const d = `M ${lineDragState.startX + SVG_OFFSET} ${lineDragState.startY + SVG_OFFSET} C ${midX + SVG_OFFSET} ${lineDragState.startY + SVG_OFFSET}, ${midX + SVG_OFFSET} ${worldY + SVG_OFFSET}, ${worldX + SVG_OFFSET} ${worldY + SVG_OFFSET}`;
+  const d = `M ${lineDragState.startX} ${lineDragState.startY} C ${midX} ${lineDragState.startY}, ${midX} ${worldY}, ${worldX} ${worldY}`;
   previewPath.setAttribute('d', d);
 
   lineDragState.currentWorld = { x: worldX, y: worldY };
