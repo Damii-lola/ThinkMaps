@@ -299,7 +299,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
     ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options.'
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote} Mark exactly ONE option as recommended with a short one-sentence hint explaining why it's promising for building a profitable app. Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string, "recommended": boolean, "hint": string or null}]}`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -416,7 +416,7 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
 // call, instant. Otherwise it generates a brand new group via Mistral.
 // Either way, sibling options in the SAME version that have their own child
 // branch get frozen — only one branch per fork point is "active" at a time.
-async function branchFromOption(optionId){
+async function branchFromOption(optionId, dropPosition){
   const { data: option } = await supabase
     .from('options')
     .select('id, label, group_version_id')
@@ -477,18 +477,24 @@ async function branchFromOption(optionId){
   const generated = await generateGroupOptions(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // Simple auto-layout: place the new group to the right of its parent, with
-  // a little vertical jitter so multiple branches off the same group don't
-  // stack exactly on top of each other. Dragging is the real fix after that —
-  // this just keeps a brand new graph from looking broken before anyone's touched it.
+  // The new group lands wherever the user dragged the connecting line to.
+  // If no position was given (e.g. Random button, which doesn't drag a line),
+  // fall back to a simple auto-placement next to the parent.
   const { data: parentGroup } = await supabase
     .from('groups')
     .select('position_x, position_y')
     .eq('id', version.group_id)
     .single();
 
-  const newPositionX = (parentGroup?.position_x || 0) + 320;
-  const newPositionY = (parentGroup?.position_y || 0) + (Math.random() - 0.5) * 240;
+  const hasExplicitPosition = dropPosition && dropPosition.positionX != null && dropPosition.positionY != null;
+
+  const newPositionX = hasExplicitPosition
+    ? dropPosition.positionX
+    : (parentGroup?.position_x || 0) + 320;
+
+  const newPositionY = hasExplicitPosition
+    ? dropPosition.positionY
+    : (parentGroup?.position_y || 0) + (Math.random() - 0.5) * 240;
 
   const { data: newGroup, error: groupInsertError } = await supabase
     .from('groups')
@@ -611,7 +617,7 @@ app.post('/options/:id/branch', requireAuth, async (req, res) => {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const result = await branchFromOption(req.params.id);
+    const result = await branchFromOption(req.params.id, req.body);
     res.status(200).json(result);
   } catch (err) {
     res.status(500).json({ error: 'Could not branch from that option.', detail: err.message });
