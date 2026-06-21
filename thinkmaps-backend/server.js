@@ -216,3 +216,12 @@ app.post('/blueprints', requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`ThinkMaps API running on port ${PORT}`);
 });
+
+// Render's free tier spins the service down after ~15 minutes with no
+// incoming traffic — that's what makes the FIRST request after a quiet
+// stretch feel slow (cold start). This self-ping keeps it warm, same
+// pattern already used on the other projects.
+const SELF_PING_URL = 'https://thinkmaps.onrender.com/health';
+setInterval(() => {
+  fetch(SELF_PING_URL).catch(() => {}); // best-effort, ignore failures
+}, 4 * 60 * 1000);
