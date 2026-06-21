@@ -556,8 +556,7 @@ const canvasState = {
   options: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
-  hasCenteredOnce: false,
-  svgOffset: { x: 0, y: 0 }
+  hasCenteredOnce: false
 };
 
 let isPanning = false;
@@ -817,42 +816,9 @@ function wireGroupEvents(){
 }
 
 function renderLines(visible){
-  const svg = document.getElementById('canvasLines');
-  if(!svg) return;
-
-  // Compute a bounding box around every visible group, with padding, and
-  // size/position the SVG to EXACTLY cover it. This replaces relying on
-  // CSS overflow:visible on a near-zero-sized SVG — which is the part that
-  // turned out not to be reliable. Now there's no fixed box content could
-  // ever fall outside of; it's recalculated fresh every render.
-  const PADDING = 200;
-  const ESTIMATED_MAX_CARD_HEIGHT = 420;
-
-  let minX = 0, minY = 0, maxX = CARD_WIDTH, maxY = ESTIMATED_MAX_CARD_HEIGHT;
-  visible.forEach(({ group }) => {
-    const x = group.position_x || 0;
-    const y = group.position_y || 0;
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x + CARD_WIDTH);
-    maxY = Math.max(maxY, y + ESTIMATED_MAX_CARD_HEIGHT);
-  });
-
-  const offsetX = PADDING - minX;
-  const offsetY = PADDING - minY;
-  const svgWidth = (maxX - minX) + PADDING * 2;
-  const svgHeight = (maxY - minY) + PADDING * 2;
-
-  svg.style.left = `${-offsetX}px`;
-  svg.style.top = `${-offsetY}px`;
-  svg.setAttribute('width', svgWidth);
-  svg.setAttribute('height', svgHeight);
-
-  // Stored so the live drag-preview line (drawn before any data change
-  // triggers a re-render) uses the exact same coordinate mapping.
-  canvasState.svgOffset = { x: offsetX, y: offsetY };
-
-  svg.innerHTML = '';
+  const layer = document.getElementById('linesLayer');
+  if(!layer) return;
+  layer.innerHTML = '';
 
   const visibleGroupIds = new Set(visible.map(v => v.group.id));
   let drawnCount = 0;
@@ -864,22 +830,38 @@ function renderLines(visible){
       spawnedGroups.forEach(childGroup => {
         if(!visibleGroupIds.has(childGroup.id)) return;
 
-        const startX = (group.position_x || 0) + CARD_WIDTH + offsetX;
-        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2 + offsetY;
-        const endX = (childGroup.position_x || 0) + offsetX;
-        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2 + offsetY;
-        const midX = (startX + endX) / 2;
+        const x1 = (group.position_x || 0) + CARD_WIDTH;
+        const y1 = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const x2 = childGroup.position_x || 0;
+        const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
 
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('d', `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);
-        if(childGroup.is_frozen) path.setAttribute('class', 'frozen-line');
-        svg.appendChild(path);
+        drawConnectorLine(layer, x1, y1, x2, y2, childGroup.is_frozen);
         drawnCount++;
       });
     });
   });
 
-  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) for ${visible.length} visible group(s) — svg box ${svgWidth}x${svgHeight}, offset (${offsetX}, ${offsetY})`);
+  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) as plain positioned divs`);
+}
+
+// A "line" here is just a 2px-tall div, stretched to the right length and
+// rotated to point at the target — plain CSS, same coordinate system the
+// group cards already use successfully. No separate layer, no sizing math,
+// nothing that depends on SVG-specific rendering behavior at all.
+function drawConnectorLine(container, x1, y1, x2, y2, isFrozen){
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
+
+  const line = document.createElement('div');
+  line.className = `canvas-connector ${isFrozen ? 'frozen' : ''}`;
+  line.style.left = `${x1}px`;
+  line.style.top = `${y1}px`;
+  line.style.width = `${length}px`;
+  line.style.transform = `rotate(${angleDeg}deg)`;
+
+  container.appendChild(line);
 }
 
 function applyWorldTransform(){
@@ -1038,29 +1020,30 @@ function clearEligibleDropTargets(){
 function updateLineDragPreview(clientX, clientY){
   if(!lineDragState) return;
   const viewport = document.getElementById('canvasViewport');
-  const svg = document.getElementById('canvasLines');
-  if(!viewport || !svg) return;
+  const layer = document.getElementById('linesLayer');
+  if(!viewport || !layer) return;
 
   const rect = viewport.getBoundingClientRect();
   const worldX = (clientX - rect.left - canvasState.pan.x) / canvasState.zoom;
   const worldY = (clientY - rect.top - canvasState.pan.y) / canvasState.zoom;
 
-  let previewPath = document.getElementById('lineDragPreview');
-  if(!previewPath){
-    previewPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    previewPath.setAttribute('id', 'lineDragPreview');
-    previewPath.setAttribute('class', 'drag-preview-line');
-    svg.appendChild(previewPath);
+  let previewLine = document.getElementById('lineDragPreview');
+  if(!previewLine){
+    previewLine = document.createElement('div');
+    previewLine.id = 'lineDragPreview';
+    previewLine.className = 'canvas-connector drag-preview';
+    layer.appendChild(previewLine);
   }
 
-  const offset = canvasState.svgOffset || { x: 0, y: 0 };
-  const previewStartX = lineDragState.startX + offset.x;
-  const previewStartY = lineDragState.startY + offset.y;
-  const previewEndX = worldX + offset.x;
-  const previewEndY = worldY + offset.y;
-  const midX = (previewStartX + previewEndX) / 2;
-  const d = `M ${previewStartX} ${previewStartY} C ${midX} ${previewStartY}, ${midX} ${previewEndY}, ${previewEndX} ${previewEndY}`;
-  previewPath.setAttribute('d', d);
+  const dx = worldX - lineDragState.startX;
+  const dy = worldY - lineDragState.startY;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
+
+  previewLine.style.left = `${lineDragState.startX}px`;
+  previewLine.style.top = `${lineDragState.startY}px`;
+  previewLine.style.width = `${length}px`;
+  previewLine.style.transform = `rotate(${angleDeg}deg)`;
 
   lineDragState.currentWorld = { x: worldX, y: worldY };
 
@@ -1105,8 +1088,8 @@ function endLineDrag(e){
   const state = lineDragState;
   lineDragState = null;
 
-  const previewPath = document.getElementById('lineDragPreview');
-  if(previewPath) previewPath.remove();
+  const previewLine = document.getElementById('lineDragPreview');
+  if(previewLine) previewLine.remove();
   clearEligibleDropTargets();
 
   if(!state) return;
