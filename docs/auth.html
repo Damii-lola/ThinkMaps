@@ -38,11 +38,10 @@
 </div>
 
 <script type="module">
-  import { supabase } from './shared.js';
+  import { apiFetch, storeSession, hasSession } from './shared.js';
 
   // If already signed in, no reason to see this page.
-  const { data: existing } = await supabase.auth.getSession();
-  if (existing.session) {
+  if (hasSession()) {
     window.location.href = 'dashboard.html';
   }
 
@@ -76,19 +75,28 @@
     const email = document.getElementById('email').value;
     const password = passwordInput.value;
 
-    const { error } = isSignup
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password });
+    try {
+      const result = await apiFetch(isSignup ? '/api/auth/signup' : '/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password })
+      });
 
-    if (error) {
-      errorEl.textContent = error.message;
+      if (result.session) {
+        storeSession(result.session);
+        window.location.href = 'dashboard.html';
+      } else {
+        // Signup succeeded but the Supabase project requires email confirmation first.
+        errorEl.textContent = 'Account created — check your email to confirm before signing in.';
+        errorEl.style.display = 'block';
+        submitBtn.disabled = false;
+        applyMode();
+      }
+    } catch (err) {
+      errorEl.textContent = err.message;
       errorEl.style.display = 'block';
       submitBtn.disabled = false;
       applyMode();
-      return;
     }
-
-    window.location.href = 'dashboard.html';
   });
 </script>
 
