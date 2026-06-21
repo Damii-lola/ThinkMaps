@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign in — ThinkMaps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+
+<header class="site">
+  <nav class="bar">
+    <a href="index.html" class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </a>
+  </nav>
+</header>
+
+<main class="auth-main">
+  <div class="auth-card">
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-tab="signin" type="button">Sign in</button>
+      <button class="auth-tab" data-tab="signup" type="button">Create account</button>
+    </div>
+
+    <form id="signinForm" class="auth-form active">
+      <label>Email or username
+        <input type="text" id="signinIdentifier" autocomplete="username" required />
+      </label>
+      <label>Password
+        <input type="password" id="signinPassword" autocomplete="current-password" required />
+      </label>
+      <p class="auth-error" id="signinError"></p>
+      <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+
+    <form id="signupForm" class="auth-form">
+      <label>Email
+        <input type="email" id="signupEmail" autocomplete="email" required />
+      </label>
+      <label>Username
+        <input type="text" id="signupUsername" autocomplete="username" minlength="3" required />
+      </label>
+      <label>Password
+        <input type="password" id="signupPassword" autocomplete="new-password" minlength="8" required />
+      </label>
+      <label>Repeat password
+        <input type="password" id="signupPasswordConfirm" autocomplete="new-password" minlength="8" required />
+      </label>
+      <p class="auth-error" id="signupError"></p>
+      <button type="submit" class="btn btn-primary">Create account</button>
+    </form>
+  </div>
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>
