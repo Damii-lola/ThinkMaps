@@ -556,7 +556,8 @@ const canvasState = {
   options: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
-  hasCenteredOnce: false
+  hasCenteredOnce: false,
+  svgOffset: { x: 0, y: 0 }
 };
 
 let isPanning = false;
@@ -818,6 +819,39 @@ function wireGroupEvents(){
 function renderLines(visible){
   const svg = document.getElementById('canvasLines');
   if(!svg) return;
+
+  // Compute a bounding box around every visible group, with padding, and
+  // size/position the SVG to EXACTLY cover it. This replaces relying on
+  // CSS overflow:visible on a near-zero-sized SVG — which is the part that
+  // turned out not to be reliable. Now there's no fixed box content could
+  // ever fall outside of; it's recalculated fresh every render.
+  const PADDING = 200;
+  const ESTIMATED_MAX_CARD_HEIGHT = 420;
+
+  let minX = 0, minY = 0, maxX = CARD_WIDTH, maxY = ESTIMATED_MAX_CARD_HEIGHT;
+  visible.forEach(({ group }) => {
+    const x = group.position_x || 0;
+    const y = group.position_y || 0;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + CARD_WIDTH);
+    maxY = Math.max(maxY, y + ESTIMATED_MAX_CARD_HEIGHT);
+  });
+
+  const offsetX = PADDING - minX;
+  const offsetY = PADDING - minY;
+  const svgWidth = (maxX - minX) + PADDING * 2;
+  const svgHeight = (maxY - minY) + PADDING * 2;
+
+  svg.style.left = `${-offsetX}px`;
+  svg.style.top = `${-offsetY}px`;
+  svg.setAttribute('width', svgWidth);
+  svg.setAttribute('height', svgHeight);
+
+  // Stored so the live drag-preview line (drawn before any data change
+  // triggers a re-render) uses the exact same coordinate mapping.
+  canvasState.svgOffset = { x: offsetX, y: offsetY };
+
   svg.innerHTML = '';
 
   const visibleGroupIds = new Set(visible.map(v => v.group.id));
@@ -830,10 +864,10 @@ function renderLines(visible){
       spawnedGroups.forEach(childGroup => {
         if(!visibleGroupIds.has(childGroup.id)) return;
 
-        const startX = (group.position_x || 0) + CARD_WIDTH;
-        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
-        const endX = childGroup.position_x || 0;
-        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
+        const startX = (group.position_x || 0) + CARD_WIDTH + offsetX;
+        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2 + offsetY;
+        const endX = (childGroup.position_x || 0) + offsetX;
+        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2 + offsetY;
         const midX = (startX + endX) / 2;
 
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -845,7 +879,7 @@ function renderLines(visible){
     });
   });
 
-  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) for ${visible.length} visible group(s)`);
+  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) for ${visible.length} visible group(s) — svg box ${svgWidth}x${svgHeight}, offset (${offsetX}, ${offsetY})`);
 }
 
 function applyWorldTransform(){
@@ -1019,8 +1053,13 @@ function updateLineDragPreview(clientX, clientY){
     svg.appendChild(previewPath);
   }
 
-  const midX = (lineDragState.startX + worldX) / 2;
-  const d = `M ${lineDragState.startX} ${lineDragState.startY} C ${midX} ${lineDragState.startY}, ${midX} ${worldY}, ${worldX} ${worldY}`;
+  const offset = canvasState.svgOffset || { x: 0, y: 0 };
+  const previewStartX = lineDragState.startX + offset.x;
+  const previewStartY = lineDragState.startY + offset.y;
+  const previewEndX = worldX + offset.x;
+  const previewEndY = worldY + offset.y;
+  const midX = (previewStartX + previewEndX) / 2;
+  const d = `M ${previewStartX} ${previewStartY} C ${midX} ${previewStartY}, ${midX} ${previewEndY}, ${previewEndX} ${previewEndY}`;
   previewPath.setAttribute('d', d);
 
   lineDragState.currentWorld = { x: worldX, y: worldY };
