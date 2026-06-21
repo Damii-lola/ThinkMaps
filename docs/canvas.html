@@ -35,17 +35,17 @@
 <div id="ideaOverlay"></div>
 
 <script type="module">
-import { supabase, apiFetch, requireAuth, getProfile, renderNavBar, isBlueprintLocked, escapeHtml } from './shared.js';
+import { apiFetch, requireAuth, renderNavBar, isBlueprintLocked, escapeHtml } from './shared.js';
 
 (async () => {
-  const user = await requireAuth();
-  if (!user) return; // requireAuth already redirected to auth.html
+  const auth = await requireAuth();
+  if (!auth) return; // requireAuth already redirected to auth.html
+  const { profile } = auth;
 
   const params = new URLSearchParams(window.location.search);
   const blueprintId = params.get('id');
   if (!blueprintId) { window.location.href = 'dashboard.html'; return; }
 
-  const profile = await getProfile(user.id);
 
   let blueprint = null;
   let graph = null;
@@ -146,23 +146,27 @@ import { supabase, apiFetch, requireAuth, getProfile, renderNavBar, isBlueprintL
   }
 
   async function loadBlueprint() {
-    const { data, error } = await supabase.from('blueprints').select('*').eq('id', blueprintId).single();
-    if (error || !data) {
-      showError('Could not load this blueprint.');
+    try {
+      const { blueprint: data } = await apiFetch(`/api/blueprints/${blueprintId}`);
+      blueprint = data;
+      graph = data.graph_data;
+      if (data.ideas) ideas = data.ideas;
+      isLocked = isBlueprintLocked(blueprint, profile);
+      return true;
+    } catch (err) {
+      showError(err.message || 'Could not load this blueprint.');
       return false;
     }
-    blueprint = data;
-    graph = data.graph_data;
-    if (data.ideas) ideas = data.ideas;
-    isLocked = isBlueprintLocked(blueprint, profile);
-    return true;
   }
 
   let saveTimer = null;
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      supabase.from('blueprints').update({ graph_data: graph, updated_at: new Date().toISOString() }).eq('id', blueprintId);
+      apiFetch(`/api/blueprints/${blueprintId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ graph_data: graph })
+      }).catch(() => {});
     }, 800);
   }
 
@@ -442,7 +446,10 @@ import { supabase, apiFetch, requireAuth, getProfile, renderNavBar, isBlueprintL
     try {
       const { ideas: newIdeas } = await apiFetch('/api/generate-ideas', { method: 'POST', body: JSON.stringify({ pathContext }) });
       ideas = newIdeas;
-      supabase.from('blueprints').update({ ideas: newIdeas }).eq('id', blueprintId);
+      apiFetch(`/api/blueprints/${blueprintId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ideas: newIdeas })
+      }).catch(() => {});
       renderIdeaOverlay();
     } catch (err) {
       showError(err.message || 'Could not generate ideas right now.');
