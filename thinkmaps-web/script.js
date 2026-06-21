@@ -200,21 +200,21 @@ function initGraphDemo(){
 // Sign in: accepts EITHER email or username. If it's a username, server.js
 // resolves it to an email first (frontend can't query profiles — RLS blocks it),
 // then the actual password check happens via Supabase Auth, never through our backend.
-async function initAuthPage(){
+function initAuthPage(){
   const signinForm = document.getElementById('signinForm');
   const signupForm = document.getElementById('signupForm');
   if(!signinForm && !signupForm) return;
 
   // If this page load IS the redirect back from a confirmation email,
-  // the Supabase client picks up the tokens in the URL automatically
-  // the moment it's created. So create it now and check — if there's
-  // already a session, the email was just confirmed: skip the forms
-  // entirely and go straight to the dashboard.
-  const sb = await getSupabaseClient();
-  const { data } = await sb.auth.getSession();
-  if(data.session){
-    window.location.href = 'dashboard.html';
-    return;
+  // Supabase appends the session tokens straight onto the URL hash.
+  // We deliberately don't use them to auto-log the user in — they
+  // should land on the login page and sign in themselves. So: just
+  // strip the hash (purely synchronous, no network call, no lag) and
+  // show a friendly banner explaining why they're here.
+  if(window.location.hash.includes('access_token')){
+    const banner = document.getElementById('emailConfirmedBanner');
+    if(banner) banner.style.display = 'block';
+    history.replaceState(null, '', window.location.pathname);
   }
 
   // Tab switching between Sign in / Create account
