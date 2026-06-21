@@ -509,7 +509,10 @@ app.post('/api/auth/signup', async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
 
   const { data, error } = await supabaseAuth.auth.signUp({ email, password });
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    console.error('[POST /api/auth/signup]', error.status, error.message);
+    return res.status(400).json({ error: error.message });
+  }
 
   // session is null here if your Supabase project requires email confirmation —
   // that's expected, not a bug. The frontend handles both cases.
@@ -521,7 +524,10 @@ app.post('/api/auth/login', async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
 
   const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    console.error('[POST /api/auth/login]', error.status, error.message);
+    return res.status(400).json({ error: error.message });
+  }
 
   res.json({ session: data.session, user: data.user });
 });
@@ -533,7 +539,10 @@ app.post('/api/auth/refresh', async (req, res) => {
   if (!refresh_token) return res.status(400).json({ error: 'refresh_token is required.' });
 
   const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token });
-  if (error) return res.status(401).json({ error: error.message });
+  if (error) {
+    console.error('[POST /api/auth/refresh]', error.status, error.message);
+    return res.status(401).json({ error: error.message });
+  }
 
   res.json({ session: data.session, user: data.user });
 });
