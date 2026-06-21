@@ -5,9 +5,29 @@
 
 const API_BASE_URL = 'https://thinkmaps.onrender.com';
 
+// Supabase client setup — the URL and anon key are NOT hardcoded here.
+// They're fetched from server.js's /config route, which reads them from
+// Render's env vars. Both values are public-safe (RLS does the real protecting),
+// this is purely about keeping literal strings out of the public repo.
+let supabaseClient = null;
+let supabaseConfigPromise = null;
+
+async function getSupabaseClient(){
+  if(supabaseClient) return supabaseClient;
+
+  if(!supabaseConfigPromise){
+    supabaseConfigPromise = fetch(`${API_BASE_URL}/config`).then(res => res.json());
+  }
+
+  const { supabaseUrl, supabaseAnonKey } = await supabaseConfigPromise;
+  supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+  return supabaseClient;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   checkBackendStatus();
   initGraphDemo();
+  initAuthPage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -170,4 +190,110 @@ function initGraphDemo(){
 
   // open with Fitness pre-branched so the mechanic is visible immediately
   selectNiche('fitness');
+}
+
+// ---------- AUTH PAGE ----------
+// Skips entirely on pages without the sign-in/sign-up forms.
+// Sign up: email + username + password + confirm — stored via Supabase Auth,
+// username carried in as metadata so the database trigger can save it.
+// Sign in: accepts EITHER email or username. If it's a username, server.js
+// resolves it to an email first (frontend can't query profiles — RLS blocks it),
+// then the actual password check happens via Supabase Auth, never through our backend.
+function initAuthPage(){
+  const signinForm = document.getElementById('signinForm');
+  const signupForm = document.getElementById('signupForm');
+  if(!signinForm && !signupForm) return;
+
+  // Tab switching between Sign in / Create account
+  const tabs = document.querySelectorAll('.auth-tab');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
+      document.getElementById(`${tab.dataset.tab}Form`).classList.add('active');
+    });
+  });
+
+  if(signinForm){
+    signinForm.addEventListener('submit', handleSignIn);
+  }
+  if(signupForm){
+    signupForm.addEventListener('submit', handleSignUp);
+  }
+}
+
+async function resolveEmail(identifier){
+  if(identifier.includes('@')) return identifier; // already an email, nothing to resolve
+
+  const res = await fetch(`${API_BASE_URL}/auth/resolve-email`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier })
+  });
+
+  if(!res.ok){
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'No account found for that username.');
+  }
+
+  const { email } = await res.json();
+  return email;
+}
+
+async function handleSignIn(e){
+  e.preventDefault();
+  const errorEl = document.getElementById('signinError');
+  errorEl.textContent = '';
+
+  const identifier = document.getElementById('signinIdentifier').value.trim();
+  const password = document.getElementById('signinPassword').value;
+
+  try {
+    const email = await resolveEmail(identifier);
+    const sb = await getSupabaseClient();
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+
+    if(error) throw error;
+
+    window.location.href = 'dashboard.html';
+  } catch (err){
+    errorEl.textContent = err.message || 'Could not sign in. Check your details and try again.';
+  }
+}
+
+async function handleSignUp(e){
+  e.preventDefault();
+  const errorEl = document.getElementById('signupError');
+  errorEl.textContent = '';
+
+  const email = document.getElementById('signupEmail').value.trim();
+  const username = document.getElementById('signupUsername').value.trim();
+  const password = document.getElementById('signupPassword').value;
+  const confirmPassword = document.getElementById('signupPasswordConfirm').value;
+
+  if(password !== confirmPassword){
+    errorEl.textContent = 'Passwords don\'t match.';
+    return;
+  }
+
+  try {
+    const sb = await getSupabaseClient();
+    const { error } = await sb.auth.signUp({
+      email,
+      password,
+      options: { data: { username } }
+    });
+
+    if(error){
+      if(/duplicate|unique/i.test(error.message)){
+        throw new Error('That email or username is already taken.');
+      }
+      throw error;
+    }
+
+    window.location.href = 'dashboard.html';
+  } catch (err){
+    errorEl.textContent = err.message || 'Could not create your account. Try again.';
+  }
 }
