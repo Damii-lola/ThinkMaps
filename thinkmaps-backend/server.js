@@ -477,9 +477,28 @@ async function branchFromOption(optionId){
   const generated = await generateGroupOptions(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
+  // Simple auto-layout: place the new group to the right of its parent, with
+  // a little vertical jitter so multiple branches off the same group don't
+  // stack exactly on top of each other. Dragging is the real fix after that —
+  // this just keeps a brand new graph from looking broken before anyone's touched it.
+  const { data: parentGroup } = await supabase
+    .from('groups')
+    .select('position_x, position_y')
+    .eq('id', version.group_id)
+    .single();
+
+  const newPositionX = (parentGroup?.position_x || 0) + 320;
+  const newPositionY = (parentGroup?.position_y || 0) + (Math.random() - 0.5) * 240;
+
   const { data: newGroup, error: groupInsertError } = await supabase
     .from('groups')
-    .insert({ blueprint_id: blueprintId, label: generated.groupLabel || 'Untitled Group', is_frozen: false })
+    .insert({
+      blueprint_id: blueprintId,
+      label: generated.groupLabel || 'Untitled Group',
+      position_x: newPositionX,
+      position_y: newPositionY,
+      is_frozen: false
+    })
     .select()
     .single();
 
