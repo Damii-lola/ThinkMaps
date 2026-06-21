@@ -30,21 +30,18 @@
 </div>
 
 <script type="module">
-  import { supabase, apiFetch, requireAuth, getProfile, renderNavBar, isBlueprintLocked } from './shared.js';
+  import { apiFetch, requireAuth, renderNavBar, isBlueprintLocked, signOut } from './shared.js';
 
-  const user = await requireAuth();
-  if (!user) {
+  const auth = await requireAuth();
+  if (!auth) {
     // requireAuth already redirected to auth.html
   } else {
-    const profile = await getProfile(user.id);
+    const { profile } = auth;
 
     const signOutBtn = document.createElement('button');
     signOutBtn.className = 'btn btn-ghost';
     signOutBtn.textContent = 'Sign out';
-    signOutBtn.onclick = async () => {
-      await supabase.auth.signOut();
-      window.location.href = 'index.html';
-    };
+    signOutBtn.addEventListener('click', signOut);
     renderNavBar(document.getElementById('nav'), signOutBtn);
 
     let blueprints = [];
@@ -82,11 +79,8 @@
     }
 
     async function loadBlueprints() {
-      const { data } = await supabase
-        .from('blueprints')
-        .select('id, title, created_at, updated_at')
-        .order('created_at', { ascending: false });
-      blueprints = data || [];
+      const { blueprints: list } = await apiFetch('/api/blueprints');
+      blueprints = list || [];
       renderList();
     }
 
@@ -100,37 +94,11 @@
       document.getElementById('errorBox').style.display = 'none';
 
       try {
-        const { groups } = await apiFetch('/api/generate-nodes', {
+        const { blueprint } = await apiFetch('/api/blueprints', {
           method: 'POST',
-          body: JSON.stringify({ pathContext: [] })
+          body: JSON.stringify({ title: 'Untitled blueprint' })
         });
-
-        const rootGroup = groups[0] || { label: 'Niches', options: [] };
-        const rootId = 'root';
-        const graph_data = {
-          rootId,
-          nodesById: {
-            [rootId]: {
-              id: rootId,
-              label: rootGroup.label,
-              options: rootGroup.options.map((text, i) => ({ id: `${rootId}-opt-${i}`, text })),
-              selectedOptionId: null,
-              frozenOptionIds: [],
-              children: {},
-              x: 80,
-              y: 220
-            }
-          }
-        };
-
-        const { data, error } = await supabase
-          .from('blueprints')
-          .insert({ user_id: user.id, title: 'Untitled blueprint', graph_data })
-          .select()
-          .single();
-
-        if (error) throw error;
-        window.location.href = `canvas.html?id=${data.id}`;
+        window.location.href = `canvas.html?id=${blueprint.id}`;
       } catch (err) {
         const box = document.getElementById('errorBox');
         box.textContent = err.message || 'Could not create a new blueprint right now.';
