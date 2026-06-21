@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ThinkMaps — Build your perfect app idea blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site">
+  <nav class="bar">
+    <a href="index.html" class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#idea">Output</a>
+      <a href="pricing.html">Pricing</a>
+    </div>
+    <div class="nav-cta" id="navCta">
+      <a href="auth.html" class="btn btn-ghost">Sign in</a>
+      <a href="auth.html?mode=signup" class="btn btn-primary">Start a blueprint</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap hero-inner">
+      <span class="eyebrow">An ideation canvas for builders</span>
+      <h1>Map your next app, before you build the wrong one.</h1>
+      <p class="sub">ThinkMaps turns app-idea hunting into a visual, branching graph — grounded in real research instead of guesses — so you validate before you write a line of code.</p>
+      <div class="hero-ctas">
+        <a href="auth.html?mode=signup" class="btn btn-primary" id="heroCta">Start your blueprint free</a>
+        <a href="#demo" class="hint-link">See how branching works ↓</a>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="graph-demo" id="demo">
+        <div class="graph-canvas" id="graphCanvas">
+          <svg class="graph-lines" id="graphLines"></svg>
+          <div class="node-row" id="rootRow">
+            <button class="node-pill" data-niche="fitness" aria-pressed="false">Fitness</button>
+            <button class="node-pill" data-niche="finance" aria-pressed="false">Finance &amp; Commerce</button>
+            <button class="node-pill" data-niche="productivity" aria-pressed="false">Productivity</button>
+            <button class="node-pill" data-niche="entertainment" aria-pressed="false">Entertainment</button>
+          </div>
+          <div class="child-row" id="childRow"></div>
+        </div>
+        <div class="frozen-lane" id="frozenLane"></div>
+        <p class="graph-caption" id="graphCaption">Click a niche to branch the graph — pick another, and this one freezes in place, not gone.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section" id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">How a blueprint grows</span>
+        <h2>Four moves, repeated until the graph knows what you're building.</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <div class="num">01</div>
+          <h3>Pick a niche</h3>
+          <p class="muted">Start from six AI-suggested niches, or type your own to take the graph somewhere nobody's mapped yet.</p>
+        </div>
+        <div class="step">
+          <div class="num">02</div>
+          <h3>Add context</h3>
+          <p class="muted">Connect to Sub-Niche, Audience, and Monetization groups — each click narrows the graph toward something real.</p>
+        </div>
+        <div class="step">
+          <div class="num">03</div>
+          <h3>Branch freely</h3>
+          <p class="muted">Explore a path, then rewind and try another. The old branch grays out and waits — it's never deleted.</p>
+        </div>
+        <div class="step">
+          <div class="num">04</div>
+          <h3>Catch the insight</h3>
+          <p class="muted">Generate ideas once your path is deep enough, scored live against a 100-question research framework.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section features" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Everything past the first sketch</span>
+        <h2>The graph is the start. Validation and shipping are built in.</h2>
+      </div>
+      <div class="feature-grid">
+        <div class="feature">
+          <span class="eyebrow">Live research</span>
+          <h3>Grounded, not guessed</h3>
+          <p>Every idea pulls live from Reddit, Hacker News, and the App Store — real complaints, not invented quotes.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Open-ended</span>
+          <h3>Branch as deep as you need</h3>
+          <p>Niche → Sub-niche → Audience → Monetization → on and on. The graph never caps your depth.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Never lost</span>
+          <h3>Branches freeze, not delete</h3>
+          <p>Try a path, rewind, try another. Old branches gray out and stay fully clickable, forever.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Scored</span>
+          <h3>100-question framework</h3>
+          <p>Every idea is scored across 10 categories — problem severity to regulatory risk — visualized on a radar chart.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Validate first</span>
+          <h3>Built-in validation kit</h3>
+          <p>Survey questions, an interview script, landing page copy, and a fake-door test for every idea generated.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Ship it</span>
+          <h3>Build prompts included</h3>
+          <p>Every idea comes with a build prompt ready to paste into Cursor or Lovable.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- IDEA OUTPUT -->
+  <section class="section" id="idea">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">From graph to idea</span>
+        <h2>What comes out the other end of a finished blueprint.</h2>
+      </div>
+      <div class="idea-wrap">
+        <div class="idea-card">
+          <span class="idea-tag">Sample idea card — illustrative</span>
+          <h3>Shiftwell</h3>
+          <p class="idea-oneliner">Recovery and sleep tracking built around rotating shifts, not a fixed 9-to-5.</p>
+          <div class="idea-block">
+            <div class="lbl">Core problem</div>
+            <p class="muted">Existing fitness apps assume a regular daytime schedule. Shift workers fall out of every streak the moment their roster changes.</p>
+          </div>
+          <div class="idea-block">
+            <div class="lbl">10x upgrade</div>
+            <p class="muted">A schedule-aware engine that re-times reminders and sleep targets around the next shift, not the calendar date.</p>
+          </div>
+          <p class="idea-note">Full version scores this against 100 questions and ships a validation kit alongside it.</p>
+        </div>
+        <div class="radar-panel">
+          <h4>Sample scoring, 6 of 100 questions shown</h4>
+          <svg viewBox="0 0 200 200" aria-hidden="true">
+            <polygon points="100,30 160,65 160,135 100,170 39,135 39,65" fill="none" stroke="#DAD5C7"/>
+            <polygon points="100,53 140,77 140,123 100,147 60,123 60,77" fill="none" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="30" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="65" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="170" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="65" stroke="#DAD5C7"/>
+            <polygon points="100,37 142,76 149,128 100,142 52,128 58,76" fill="#D97757" fill-opacity="0.22" stroke="#D97757" stroke-width="2"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-band">
+    <div class="wrap">
+      <span class="eyebrow">Ready when you are</span>
+      <h2>Stop scrolling app-idea threads. Start mapping one.</h2>
+      <a href="auth.html?mode=signup" class="btn btn-primary" id="ctaBandCta">Start your blueprint free</a>
+      <p class="muted" style="margin-top:14px;"><a href="pricing.html">See full pricing →</a></p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <div class="logo">ThinkMaps</div>
+    <div class="foot-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="pricing.html">Pricing</a>
+    </div>
+  </div>
+  <div class="wrap foot-fine">© 2026 ThinkMaps. Built for builders.</div>
+</footer>
+
+<!-- Swap the nav/CTA links if already signed in -->
+<script type="module">
+  import { supabase } from './shared.js';
+
+  const { data } = await supabase.auth.getSession();
+  if (data.session) {
+    document.getElementById('navCta').innerHTML = `
+      <a href="dashboard.html" class="btn btn-ghost">Dashboard</a>
+      <a href="dashboard.html" class="btn btn-primary">Start a blueprint</a>
+    `;
+    document.getElementById('heroCta').href = 'dashboard.html';
+    document.getElementById('ctaBandCta').href = 'dashboard.html';
+  }
+</script>
+
+<!-- The interactive demo graph — pure vanilla JS, no dependency on auth state -->
+<script>
+(function(){
+  const nicheData = {
+    fitness: { label:"Fitness", children:[
+      {k:"Sub-niche", v:"Recovery & sleep tracking"},
+      {k:"Audience", v:"Shift workers"},
+      {k:"Monetization", v:"Subscription + wearables"}
+    ]},
+    finance: { label:"Finance & Commerce", children:[
+      {k:"Sub-niche", v:"Cash-flow visualization"},
+      {k:"Audience", v:"Freelancers"},
+      {k:"Monetization", v:"Freemium → Pro tier"}
+    ]},
+    productivity: { label:"Productivity", children:[
+      {k:"Sub-niche", v:"Async team rituals"},
+      {k:"Audience", v:"Remote managers"},
+      {k:"Monetization", v:"Per-seat pricing"}
+    ]},
+    entertainment: { label:"Entertainment", children:[
+      {k:"Sub-niche", v:"Local live-show discovery"},
+      {k:"Audience", v:"College students"},
+      {k:"Monetization", v:"Ticketing commission"}
+    ]}
+  };
+
+  const canvas = document.getElementById('graphCanvas');
+  const linesSvg = document.getElementById('graphLines');
+  const rootRow = document.getElementById('rootRow');
+  const childRow = document.getElementById('childRow');
+  const frozenLane = document.getElementById('frozenLane');
+  const caption = document.getElementById('graphCaption');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let activeNiche = null;
+  const frozen = [];
+
+  function clearChildren(){
+    childRow.innerHTML = '';
+    linesSvg.innerHTML = '';
+  }
+
+  function renderFrozenLane(){
+    frozenLane.innerHTML = '';
+    frozen.forEach(key => {
+      const data = nicheData[key];
+      const btn = document.createElement('button');
+      btn.className = 'frozen-pill';
+      btn.innerHTML = data.label + ' <span>→</span> ' + data.children[1].v;
+      btn.addEventListener('click', () => selectNiche(key));
+      frozenLane.appendChild(btn);
+    });
+  }
+
+  function drawLines(rootBtn, cards){
+    linesSvg.innerHTML = '';
+    const canvasRect = canvas.getBoundingClientRect();
+    const rootRect = rootBtn.getBoundingClientRect();
+    const startX = rootRect.left + rootRect.width/2 - canvasRect.left;
+    const startY = rootRect.bottom - canvasRect.top;
+
+    cards.forEach(card => {
+      const r = card.getBoundingClientRect();
+      const endX = r.left + r.width/2 - canvasRect.left;
+      const endY = r.top - canvasRect.top;
+      const midY = (startY + endY) / 2;
+      const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+      path.setAttribute('d', `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`);
+      linesSvg.appendChild(path);
+
+      if(!reduceMotion){
+        const len = path.getTotalLength();
+        path.style.strokeDasharray = len;
+        path.style.strokeDashoffset = len;
+        path.style.transition = 'stroke-dashoffset .5s ease';
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          path.style.strokeDashoffset = '0';
+        }));
+      }
+    });
+  }
+
+  function selectNiche(key){
+    if(key === activeNiche) return;
+
+    if(activeNiche && !frozen.includes(activeNiche)){
+      frozen.unshift(activeNiche);
+      if(frozen.length > 3) frozen.pop();
+    }
+    const idx = frozen.indexOf(key);
+    if(idx > -1) frozen.splice(idx, 1);
+
+    activeNiche = key;
+    renderFrozenLane();
+
+    rootRow.querySelectorAll('.node-pill').forEach(p => {
+      const isActive = p.dataset.niche === key;
+      p.classList.toggle('active', isActive);
+      p.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+
+    clearChildren();
+    const data = nicheData[key];
+    const cards = data.children.map(c => {
+      const card = document.createElement('div');
+      card.className = 'child-card';
+      card.innerHTML = `<div class="k">${c.k}</div><div class="v">${c.v}</div>`;
+      childRow.appendChild(card);
+      return card;
+    });
+
+    caption.textContent = `Branching from "${data.label}" — pick another niche above and this one freezes, not gone.`;
+
+    requestAnimationFrame(() => {
+      cards.forEach((card, i) => {
+        setTimeout(() => card.classList.add('in'), reduceMotion ? 0 : i * 90);
+      });
+      drawLines(rootRow.querySelector(`[data-niche="${key}"]`), cards);
+    });
+  }
+
+  rootRow.querySelectorAll('.node-pill').forEach(btn => {
+    btn.addEventListener('click', () => selectNiche(btn.dataset.niche));
+  });
+
+  window.addEventListener('resize', () => {
+    if(!activeNiche) return;
+    const cards = Array.from(childRow.querySelectorAll('.child-card'));
+    drawLines(rootRow.querySelector(`[data-niche="${activeNiche}"]`), cards);
+  });
+
+  selectNiche('fitness');
+})();
+</script>
+
+</body>
+</html>
