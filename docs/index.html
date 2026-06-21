@@ -205,10 +205,9 @@
 
 <!-- Swap the nav/CTA links if already signed in -->
 <script type="module">
-  import { supabase } from './shared.js';
+  import { hasSession } from './shared.js';
 
-  const { data } = await supabase.auth.getSession();
-  if (data.session) {
+  if (hasSession()) {
     document.getElementById('navCta').innerHTML = `
       <a href="dashboard.html" class="btn btn-ghost">Dashboard</a>
       <a href="dashboard.html" class="btn btn-primary">Start a blueprint</a>
