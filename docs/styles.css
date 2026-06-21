@@ -28,7 +28,7 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; margin: 0; colo
 p { margin: 0; }
 .muted { color: var(--ink-muted); }
 ul.muted { padding-left: 20px; font-size: 14px; }
-.btn { font-family: var(--font-body); font-weight: 600; font-size: 14px; padding: 11px 20px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; transition: transform .15s ease, box-shadow .15s ease; }
+.btn { font-family: var(--font-body); font-weight: 600; font-size: 14px; padding: 11px 20px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: transform .15s ease, box-shadow .15s ease; }
 .btn-primary { background: var(--accent); color: #FAF6F1; }
 .btn-primary:hover { background: var(--accent-deep); }
 .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
