@@ -1,25 +1,61 @@
 // ============================================================
-// EDIT THESE THREE LINES before deploying — there's no build step
-// anymore, so this file IS the config.
+// Supabase is fully hidden behind Render now. This file never
+// imports Supabase, never sees a Supabase URL or key — it only
+// ever talks to your own backend.
 //
-// The Supabase anon key is SAFE to put here in plain text — it's
-// meant to be public. Real protection comes from Row Level Security
-// policies on the tables (already set up in supabase_schema.sql),
-// not from hiding this key.
+// EDIT this one line before deploying:
 // ============================================================
-export const SUPABASE_URL = process.env.SUPABASE_URL;
-export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-export const API_BASE_URL = 'https://thinkmaps.onrender.com'; // your Render backend, still in use exactly as before
+export const API_BASE_URL = 'https://thinkmap.onrender.com';
 
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+const ACCESS_TOKEN_KEY = 'tm_access_token';
+const REFRESH_TOKEN_KEY = 'tm_refresh_token';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export function storeSession(session) {
+  if (!session) return;
+  localStorage.setItem(ACCESS_TOKEN_KEY, session.access_token);
+  localStorage.setItem(REFRESH_TOKEN_KEY, session.refresh_token);
+}
 
-// Calls the Render backend (Mistral/Gemini/research endpoints), attaching
-// the user's Supabase session token so the backend can verify who's asking.
-export async function apiFetch(path, options = {}) {
-  const { data } = await supabase.auth.getSession();
-  const token = data?.session?.access_token;
+export function clearSession() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+export function hasSession() {
+  return !!localStorage.getItem(ACCESS_TOKEN_KEY);
+}
+
+function getAccessToken() {
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
+}
+
+function getRefreshToken() {
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+
+async function tryRefresh() {
+  const refresh_token = getRefreshToken();
+  if (!refresh_token) return false;
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token })
+    });
+    if (!res.ok) return false;
+    const { session } = await res.json();
+    storeSession(session);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Calls the Render backend for everything — AI generation, auth, blueprint storage.
+// On a 401, tries one silent token refresh before giving up and bouncing to auth.html.
+export async function apiFetch(path, options = {}, _isRetry = false) {
+  const token = getAccessToken();
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -30,6 +66,14 @@ export async function apiFetch(path, options = {}) {
     }
   });
 
+  if (res.status === 401 && !_isRetry) {
+    const refreshed = await tryRefresh();
+    if (refreshed) return apiFetch(path, options, true);
+    clearSession();
+    window.location.href = 'auth.html';
+    return new Promise(() => {}); // navigation is happening; stop here
+  }
+
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Request failed (${res.status})`);
@@ -38,19 +82,25 @@ export async function apiFetch(path, options = {}) {
   return res.json();
 }
 
-// Call at the top of any protected page. Redirects to auth.html if logged out.
+// Call at the top of any protected page. Redirects to auth.html if logged out
+// or the session can't be verified; otherwise returns { user, profile }.
 export async function requireAuth() {
-  const { data } = await supabase.auth.getSession();
-  if (!data.session) {
+  if (!hasSession()) {
     window.location.href = 'auth.html';
     return null;
   }
-  return data.session.user;
+  try {
+    return await apiFetch('/api/auth/me');
+  } catch {
+    clearSession();
+    window.location.href = 'auth.html';
+    return null;
+  }
 }
 
-export async function getProfile(userId) {
-  const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
-  return data || null;
+export function signOut() {
+  clearSession();
+  window.location.href = 'index.html';
 }
 
 // Shared free-tier lock rule: Pro users never lock; everyone else locks 7 days after creation.
