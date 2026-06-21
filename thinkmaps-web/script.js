@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
   checkBackendStatus();
   initGraphDemo();
   initAuthPage();
+  initDashboardPage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -199,10 +200,22 @@ function initGraphDemo(){
 // Sign in: accepts EITHER email or username. If it's a username, server.js
 // resolves it to an email first (frontend can't query profiles — RLS blocks it),
 // then the actual password check happens via Supabase Auth, never through our backend.
-function initAuthPage(){
+async function initAuthPage(){
   const signinForm = document.getElementById('signinForm');
   const signupForm = document.getElementById('signupForm');
   if(!signinForm && !signupForm) return;
+
+  // If this page load IS the redirect back from a confirmation email,
+  // the Supabase client picks up the tokens in the URL automatically
+  // the moment it's created. So create it now and check — if there's
+  // already a session, the email was just confirmed: skip the forms
+  // entirely and go straight to the dashboard.
+  const sb = await getSupabaseClient();
+  const { data } = await sb.auth.getSession();
+  if(data.session){
+    window.location.href = 'dashboard.html';
+    return;
+  }
 
   // Tab switching between Sign in / Create account
   const tabs = document.querySelectorAll('.auth-tab');
@@ -258,7 +271,11 @@ async function handleSignIn(e){
 
     window.location.href = 'dashboard.html';
   } catch (err){
-    errorEl.textContent = err.message || 'Could not sign in. Check your details and try again.';
+    if(/email not confirmed/i.test(err.message || '')){
+      errorEl.textContent = 'Please confirm your email first — check your inbox for the link.';
+    } else {
+      errorEl.textContent = err.message || 'Could not sign in. Check your details and try again.';
+    }
   }
 }
 
@@ -279,10 +296,15 @@ async function handleSignUp(e){
 
   try {
     const sb = await getSupabaseClient();
-    const { error } = await sb.auth.signUp({
+    const { data, error } = await sb.auth.signUp({
       email,
       password,
-      options: { data: { username } }
+      options: {
+        data: { username },
+        // Sends the confirmation link back to wherever auth.html actually
+        // lives — works on GitHub Pages without hardcoding the repo path.
+        emailRedirectTo: window.location.origin + window.location.pathname
+      }
     });
 
     if(error){
@@ -292,8 +314,189 @@ async function handleSignUp(e){
       throw error;
     }
 
-    window.location.href = 'dashboard.html';
+    if(data.session){
+      // Confirmation is off (or already confirmed) — straight in.
+      window.location.href = 'dashboard.html';
+    } else {
+      // Confirmation required — Supabase already sent the email itself.
+      showSignupPending(email);
+    }
   } catch (err){
     errorEl.textContent = err.message || 'Could not create your account. Try again.';
+  }
+}
+
+function showSignupPending(email){
+  const signupForm = document.getElementById('signupForm');
+  const pendingEl = document.getElementById('signupPending');
+  const emailEl = document.getElementById('signupPendingEmail');
+
+  if(signupForm) signupForm.style.display = 'none';
+  if(emailEl) emailEl.textContent = email;
+  if(pendingEl) pendingEl.style.display = 'block';
+}
+
+// ---------- SESSION HELPERS ----------
+// Shared by any page that needs to know who's logged in (dashboard, app, ...).
+
+async function getActiveSession(){
+  const sb = await getSupabaseClient();
+  const { data } = await sb.auth.getSession();
+  return data.session; // null if nobody's logged in
+}
+
+// Sends an authenticated request to server.js, attaching the Supabase access
+// token. If there's no session at all, bounces straight to auth.html instead
+// of letting a protected page sit there silently broken.
+async function authedFetch(path, options = {}){
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return null;
+  }
+
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+      ...(options.headers || {})
+    }
+  });
+
+  return res;
+}
+
+async function handleLogout(){
+  const sb = await getSupabaseClient();
+  await sb.auth.signOut();
+  window.location.href = 'index.html';
+}
+
+// ---------- DASHBOARD PAGE ----------
+// Skips entirely on pages without #dashboardRoot.
+// Loads profile + blueprint state from server.js, renders one of three states
+// per blueprint (empty / active / locked), and wires up "new blueprint" + logout.
+
+async function initDashboardPage(){
+  const root = document.getElementById('dashboardRoot');
+  if(!root) return;
+
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return;
+  }
+
+  const logoutBtn = document.getElementById('logoutBtn');
+  if(logoutBtn) logoutBtn.addEventListener('click', handleLogout);
+
+  await loadDashboard();
+}
+
+async function loadDashboard(){
+  const greetingEl = document.getElementById('dashboardGreeting');
+  const bannerEl = document.getElementById('dashboardBanner');
+  const blueprintArea = document.getElementById('blueprintArea');
+
+  try {
+    const res = await authedFetch('/dashboard');
+    if(!res) return; // authedFetch already redirected to auth.html
+
+    if(!res.ok){
+      throw new Error('Could not load your dashboard.');
+    }
+
+    const { profile, blueprints, canCreateNew } = await res.json();
+
+    if(greetingEl){
+      greetingEl.textContent = `Welcome back, ${profile.username || profile.email}`;
+    }
+
+    renderProBanner(bannerEl, profile);
+    renderBlueprintArea(blueprintArea, blueprints, canCreateNew);
+
+  } catch (err){
+    if(blueprintArea){
+      blueprintArea.innerHTML = `<p class="auth-error">${err.message}</p>`;
+    }
+  }
+}
+
+function renderProBanner(bannerEl, profile){
+  if(!bannerEl) return;
+
+  if(profile.pro_status){
+    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no 7-day lock.`;
+    bannerEl.classList.add('pro');
+  } else {
+    // Selar checkout isn't wired in yet — placeholder link until that phase.
+    bannerEl.innerHTML = `
+      <span class="eyebrow">Free plan</span>
+      One blueprint, seven days, then read-only.
+      <a href="index.html#pricing" class="btn btn-ghost">Go Pro</a>
+    `;
+    bannerEl.classList.remove('pro');
+  }
+}
+
+function renderBlueprintArea(container, blueprints, canCreateNew){
+  if(!container) return;
+
+  if(blueprints.length === 0){
+    container.innerHTML = `
+      <div class="empty-state">
+        <h3>You haven't started a blueprint yet</h3>
+        <p class="muted">Pick a niche, branch it out, and let the graph build toward a real idea.</p>
+        <button class="btn btn-primary" id="newBlueprintBtn">Start your first blueprint</button>
+      </div>
+    `;
+    document.getElementById('newBlueprintBtn').addEventListener('click', createBlueprint);
+    return;
+  }
+
+  const cards = blueprints.map(bp => {
+    const createdLabel = new Date(bp.created_at).toLocaleDateString();
+    const statusLabel = bp.isLocked
+      ? 'Locked — read-only'
+      : (bp.daysRemaining != null ? `${bp.daysRemaining} day(s) left on free tier` : 'Active');
+
+    return `
+      <div class="blueprint-card ${bp.isLocked ? 'locked' : ''}">
+        <h3>${bp.title}</h3>
+        <p class="muted">Created ${createdLabel}</p>
+        <p class="status-label">${statusLabel}</p>
+        <a href="app.html?blueprint=${bp.id}" class="btn ${bp.isLocked ? 'btn-ghost' : 'btn-primary'}">
+          ${bp.isLocked ? 'View (read-only)' : 'Open blueprint'}
+        </a>
+      </div>
+    `;
+  }).join('');
+
+  const newButton = canCreateNew
+    ? `<button class="btn btn-ghost" id="newBlueprintBtn">+ New blueprint</button>`
+    : '';
+
+  container.innerHTML = `<div class="blueprint-grid">${cards}</div>${newButton}`;
+
+  const newBtn = document.getElementById('newBlueprintBtn');
+  if(newBtn) newBtn.addEventListener('click', createBlueprint);
+}
+
+async function createBlueprint(){
+  try {
+    const res = await authedFetch('/blueprints', { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+
+    const body = await res.json();
+
+    if(!res.ok){
+      alert(body.error || 'Could not create blueprint.');
+      return;
+    }
+
+    window.location.href = `app.html?blueprint=${body.blueprint.id}`;
+  } catch (err){
+    alert('Could not create blueprint. Try again.');
   }
 }
