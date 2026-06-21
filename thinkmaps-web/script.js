@@ -548,7 +548,6 @@ const canvasState = {
   groups: [],
   groupVersions: [],
   options: [],
-  connections: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
   hasCenteredOnce: false
@@ -606,7 +605,6 @@ async function loadGraph(){
     canvasState.groups = data.groups;
     canvasState.groupVersions = data.groupVersions;
     canvasState.options = data.options;
-    canvasState.connections = data.connections;
 
     const titleEl = document.getElementById('blueprintTitle');
     if(titleEl) titleEl.textContent = data.blueprint.title;
@@ -649,14 +647,16 @@ function computeVisibleGroups(){
     (optionsByVersion[o.group_version_id] = optionsByVersion[o.group_version_id] || []).push(o);
   });
 
-  const connectionByFromOption = {};
-  const groupsWithIncoming = new Set();
-  canvasState.connections.forEach(c => {
-    connectionByFromOption[c.from_option_id] = c.to_group_id;
-    groupsWithIncoming.add(c.to_group_id);
+  // One option can now spawn SEVERAL groups at once — this is a one-to-many
+  // lookup, not a single connection.
+  const groupsByParentOption = {};
+  canvasState.groups.forEach(g => {
+    if(g.spawned_from_option_id){
+      (groupsByParentOption[g.spawned_from_option_id] = groupsByParentOption[g.spawned_from_option_id] || []).push(g);
+    }
   });
 
-  const rootGroup = canvasState.groups.find(g => !groupsWithIncoming.has(g.id));
+  const rootGroup = canvasState.groups.find(g => !g.spawned_from_option_id);
   if(!rootGroup) return [];
 
   const visible = [];
@@ -676,8 +676,7 @@ function computeVisibleGroups(){
     visible.push({ group, versions, activeVersion, options: opts });
 
     opts.forEach(opt => {
-      const childId = connectionByFromOption[opt.id];
-      if(childId) walk(childId);
+      (groupsByParentOption[opt.id] || []).forEach(childGroup => walk(childGroup.id));
     });
   }
 
@@ -699,14 +698,14 @@ function renderGroups(visible){
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
 
-  const connectedOptionIds = new Set(canvasState.connections.map(c => c.from_option_id));
-
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
     card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''}`;
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
+
+    const isRootGroup = !group.spawned_from_option_id;
 
     const versionNav = versions.length > 1 ? `
       <div class="version-nav">
@@ -715,11 +714,15 @@ function renderGroups(visible){
         <button data-action="version-next" ${group.current_version_number >= versions[versions.length - 1].version_number ? 'disabled' : ''}>›</button>
       </div>` : '';
 
+    // Three states per option:
+    //  - selected (already activated)  → its dot is the next drag SOURCE
+    //  - root + not yet activated      → plain click activates it
+    //  - non-root + not yet activated  → inert; only reachable as a drop target
     const optionsHtml = options.map((opt, optionIndex) => {
-      const hasConnection = connectedOptionIds.has(opt.id);
+      const stateClass = opt.is_selected ? 'selected' : (isRootGroup ? 'root-clickable' : 'inert');
       return `
-        <div class="canvas-option ${opt.is_selected ? 'selected' : ''} ${hasConnection ? 'has-connection' : 'unexplored'}" data-option-id="${opt.id}">
-          <span class="opt-dot" data-option-id="${opt.id}" data-group-id="${group.id}" data-option-index="${optionIndex}" data-has-connection="${hasConnection}"></span>
+        <div class="canvas-option ${stateClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
+          <span class="opt-dot"></span>
           <span class="opt-label">${escapeHtml(opt.label)}</span>
         </div>
       `;
@@ -755,20 +758,21 @@ function wireGroupEvents(){
     const dragHandle = card.querySelector('[data-drag-handle]');
     if(dragHandle) dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
 
-    // Unexplored option: must drag its dot to create the branch (no click).
-    // Already-explored option: a plain click just reopens it — nothing new
-    // is being created, so there's no reason to force a drag there.
     card.querySelectorAll('.canvas-option').forEach(optEl => {
       const optionId = optEl.dataset.optionId;
+      const optionIndex = Number(optEl.dataset.optionIndex);
       const dot = optEl.querySelector('.opt-dot');
-      const hasConnection = dot?.dataset.hasConnection === 'true';
-      const optionIndex = Number(dot?.dataset.optionIndex);
 
-      if(hasConnection){
-        optEl.addEventListener('click', () => handleOptionClick(optionId));
-      } else if(dot){
-        dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+      if(optEl.classList.contains('selected')){
+        // Already active — drag FROM here to pick the next step.
+        if(dot) dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+      } else if(optEl.classList.contains('root-clickable')){
+        // Root, never activated — a plain click is the bootstrap trigger,
+        // since there's nothing before it to drag from.
+        optEl.addEventListener('click', () => handleOptionActivate(optionId));
       }
+      // 'inert' options do nothing on their own — they're only reachable as
+      // a drop target for someone else's drag (see endLineDrag).
     });
 
     const prevBtn = card.querySelector('[data-action="version-prev"]');
@@ -807,22 +811,22 @@ function renderLines(visible){
 
   visible.forEach(({ group, options }) => {
     options.forEach((opt, optionIndex) => {
-      const conn = canvasState.connections.find(c => c.from_option_id === opt.id);
-      if(!conn || !visibleGroupIds.has(conn.to_group_id)) return;
+      const spawnedGroups = canvasState.groups.filter(g => g.spawned_from_option_id === opt.id);
 
-      const childGroup = canvasState.groups.find(g => g.id === conn.to_group_id);
-      if(!childGroup) return;
+      spawnedGroups.forEach(childGroup => {
+        if(!visibleGroupIds.has(childGroup.id)) return;
 
-      const startX = (group.position_x || 0) + CARD_WIDTH;
-      const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
-      const endX = childGroup.position_x || 0;
-      const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
-      const midX = (startX + endX) / 2;
+        const startX = (group.position_x || 0) + CARD_WIDTH;
+        const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const endX = childGroup.position_x || 0;
+        const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
+        const midX = (startX + endX) / 2;
 
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);
-      if(childGroup.is_frozen) path.setAttribute('class', 'frozen-line');
-      svg.appendChild(path);
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);
+        if(childGroup.is_frozen) path.setAttribute('class', 'frozen-line');
+        svg.appendChild(path);
+      });
     });
   });
 }
@@ -996,29 +1000,40 @@ function endLineDrag(e){
 
   // Barely moved — treat it as an accidental nudge, not a deliberate line draw.
   const movedDist = Math.hypot(e.clientX - state.initialClientX, e.clientY - state.initialClientY);
-  if(movedDist < 12 || !state.currentWorld) return;
+  if(movedDist < 12) return;
 
-  handleOptionClick(state.optionId, state.currentWorld);
+  // The drop target must be an actual option element — specifically one
+  // belonging to a group that THIS option spawned. Dropping on empty
+  // canvas, or on some unrelated option, does nothing.
+  const elUnderCursor = document.elementFromPoint(e.clientX, e.clientY);
+  const targetOptionEl = elUnderCursor?.closest('.canvas-option');
+  if(!targetOptionEl) return;
+
+  const targetGroupEl = targetOptionEl.closest('.canvas-group');
+  const targetGroup = canvasState.groups.find(g => g.id === targetGroupEl?.dataset.groupId);
+
+  if(!targetGroup || targetGroup.spawned_from_option_id !== state.optionId){
+    alert("That connects to a different branch — drag to one of this option's own candidate groups.");
+    return;
+  }
+
+  handleOptionActivate(targetOptionEl.dataset.optionId);
 }
 
-async function handleOptionClick(optionId, dropPosition){
+async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
   setCanvasBusy(true);
   try {
-    const requestBody = dropPosition
-      ? { positionX: dropPosition.x, positionY: dropPosition.y }
-      : {};
-
-    const res = await authedFetch(`/options/${optionId}/branch`, { method: 'POST', body: JSON.stringify(requestBody) });
+    const res = await authedFetch(`/options/${optionId}/activate`, { method: 'POST', body: JSON.stringify({}) });
     if(!res) return;
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
-      alert(body.error || 'Could not branch from that option.');
+      alert(body.error || 'Could not activate that option.');
       return;
     }
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
-    alert('Something went wrong branching from that option.');
+    alert('Something went wrong activating that option.');
   } finally {
     setCanvasBusy(false);
   }
