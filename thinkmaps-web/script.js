@@ -541,12 +541,9 @@ async function createBlueprint(){
 const CARD_WIDTH = 220;
 const HEADER_HEIGHT = 40;
 const OPTION_ROW_HEIGHT = 38;
-// Matches the -6000px top/left on .canvas-lines in styles.css — every
-// coordinate handed to the SVG gets shifted by this so world position (0,0)
-// lands safely inside the SVG's own box instead of right at its corner.
-// Note: the SVG line layer shares the exact same coordinate space as the
-// group cards (both are direct children of #canvasWorld, no offset between
-// them) — so path coordinates use raw world units, same as group.position_x/y.
+// Connector lines are plain rotated divs (see drawConnectorLine), sharing
+// the exact same raw world-unit coordinate space as the group cards —
+// no separate layer with its own sizing to keep in sync.
 
 const canvasState = {
   blueprintId: null,
