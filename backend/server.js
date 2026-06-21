@@ -11,6 +11,13 @@ const supabaseAdmin = createClient(process.env.SUPABASE_URL, process.env.SUPABAS
   auth: { autoRefreshToken: false, persistSession: false }
 });
 
+// Anon-key client — used specifically for signUp/signInWithPassword/refreshSession.
+// These are the "public" auth operations; Supabase expects them to run at the anon
+// permission level, not the service-role level. The frontend never sees this key.
+const supabaseAuth = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
+  auth: { autoRefreshToken: false, persistSession: false }
+});
+
 // ============================================================
 // Live research — Reddit, Hacker News, Apple App Store.
 // X/Twitter is intentionally excluded: no free API tier as of 2026.
@@ -491,6 +498,145 @@ async function requireUser(req, res, next) {
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
+});
+
+// ============================================================
+// Auth — the frontend never talks to Supabase directly. Every
+// auth operation is proxied through here instead.
+// ============================================================
+app.post('/api/auth/signup', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+
+  const { data, error } = await supabaseAuth.auth.signUp({ email, password });
+  if (error) return res.status(400).json({ error: error.message });
+
+  // session is null here if your Supabase project requires email confirmation —
+  // that's expected, not a bug. The frontend handles both cases.
+  res.json({ session: data.session, user: data.user });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
+  if (error) return res.status(400).json({ error: error.message });
+
+  res.json({ session: data.session, user: data.user });
+});
+
+// The frontend calls this automatically when a request comes back 401,
+// using the refresh_token it stored at login — no re-login needed hourly.
+app.post('/api/auth/refresh', async (req, res) => {
+  const { refresh_token } = req.body || {};
+  if (!refresh_token) return res.status(400).json({ error: 'refresh_token is required.' });
+
+  const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token });
+  if (error) return res.status(401).json({ error: error.message });
+
+  res.json({ session: data.session, user: data.user });
+});
+
+app.get('/api/auth/me', requireUser, async (req, res) => {
+  const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', req.user.id).single();
+  res.json({ user: { id: req.user.id, email: req.user.email }, profile: profile || null });
+});
+
+// ============================================================
+// Blueprints — full CRUD lives here now too. Uses the service-role
+// client, so every query explicitly filters by user_id below;
+// RLS in Supabase is a second layer of defense, not the only one.
+// ============================================================
+app.get('/api/blueprints', requireUser, async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('blueprints')
+    .select('id, title, created_at, updated_at')
+    .eq('user_id', req.user.id)
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: 'Could not load blueprints.' });
+  res.json({ blueprints: data || [] });
+});
+
+app.get('/api/blueprints/:id', requireUser, async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from('blueprints')
+    .select('*')
+    .eq('id', req.params.id)
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Blueprint not found.' });
+  res.json({ blueprint: data });
+});
+
+// Creates a blueprint AND seeds its root "Niches" group in one call —
+// the frontend doesn't need to make two round trips for this anymore.
+app.post('/api/blueprints', requireUser, async (req, res) => {
+  try {
+    const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', req.user.id).single();
+
+    if (!profile?.is_pro) {
+      const { count } = await supabaseAdmin
+        .from('blueprints')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', req.user.id);
+
+      if ((count || 0) >= 1) {
+        return res.status(403).json({ error: 'Free tier allows 1 blueprint — upgrade to Pro for unlimited.' });
+      }
+    }
+
+    const groups = await generateNodeGroups([]);
+    const rootGroup = groups[0] || { label: 'Niches', options: [] };
+    const rootId = 'root';
+    const graph_data = {
+      rootId,
+      nodesById: {
+        [rootId]: {
+          id: rootId,
+          label: rootGroup.label,
+          options: (rootGroup.options || []).map((text, i) => ({ id: `${rootId}-opt-${i}`, text })),
+          selectedOptionId: null,
+          frozenOptionIds: [],
+          children: {},
+          x: 80,
+          y: 220
+        }
+      }
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from('blueprints')
+      .insert({ user_id: req.user.id, title: req.body?.title || 'Untitled blueprint', graph_data })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ blueprint: data });
+  } catch (err) {
+    console.error('[POST /api/blueprints]', err.message);
+    res.status(500).json({ error: 'Could not create a new blueprint right now.' });
+  }
+});
+
+app.patch('/api/blueprints/:id', requireUser, async (req, res) => {
+  const allowed = { updated_at: new Date().toISOString() };
+  if (req.body.graph_data !== undefined) allowed.graph_data = req.body.graph_data;
+  if (req.body.ideas !== undefined) allowed.ideas = req.body.ideas;
+  if (req.body.title !== undefined) allowed.title = req.body.title;
+
+  const { data, error } = await supabaseAdmin
+    .from('blueprints')
+    .update(allowed)
+    .eq('id', req.params.id)
+    .eq('user_id', req.user.id)
+    .select()
+    .single();
+
+  if (error || !data) return res.status(404).json({ error: 'Blueprint not found.' });
+  res.json({ blueprint: data });
 });
 
 // Lets the frontend render the 100-question framework (axis labels, expandable detail)
