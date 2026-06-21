@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAuthPage();
   initDashboardPage();
   initNavAuthState();
+  initAppPage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -529,4 +530,488 @@ async function createBlueprint(){
   } catch (err){
     alert('Could not create blueprint. Try again.');
   }
+}
+
+// ---------- BLUEPRINT CANVAS PAGE ----------
+// Skips entirely on pages without #canvasWorld.
+// Layout math is fully data-driven (fixed card/row sizes) rather than reading
+// the DOM, so line-drawing stays correct under any pan/zoom without forcing
+// layout reflows.
+
+const CARD_WIDTH = 220;
+const HEADER_HEIGHT = 40;
+const OPTION_ROW_HEIGHT = 38;
+
+const canvasState = {
+  blueprintId: null,
+  isLocked: false,
+  groups: [],
+  groupVersions: [],
+  options: [],
+  connections: [],
+  pan: { x: 0, y: 0 },
+  zoom: 1,
+  hasCenteredOnce: false
+};
+
+let isPanning = false;
+let panStartPointer = null;
+let panStartValue = null;
+let draggingGroupId = null;
+let dragStartPointer = null;
+let dragStartGroupPos = null;
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+async function initAppPage(){
+  const worldEl = document.getElementById('canvasWorld');
+  if(!worldEl) return;
+
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const blueprintId = params.get('blueprint');
+  if(!blueprintId){
+    window.location.href = 'dashboard.html';
+    return;
+  }
+  canvasState.blueprintId = blueprintId;
+
+  setupCanvasInteractions();
+  await loadGraph();
+}
+
+async function loadGraph(){
+  const loadingMsg = document.getElementById('canvasLoadingMsg');
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/graph`);
+    if(!res) return;
+
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'Could not load this blueprint.');
+    }
+
+    const data = await res.json();
+    canvasState.isLocked = data.blueprint.isLocked;
+    canvasState.groups = data.groups;
+    canvasState.groupVersions = data.groupVersions;
+    canvasState.options = data.options;
+    canvasState.connections = data.connections;
+
+    const titleEl = document.getElementById('blueprintTitle');
+    if(titleEl) titleEl.textContent = data.blueprint.title;
+
+    const lockedBanner = document.getElementById('lockedBanner');
+    if(lockedBanner) lockedBanner.style.display = canvasState.isLocked ? 'block' : 'none';
+
+    if(loadingMsg) loadingMsg.style.display = 'none';
+
+    if(!canvasState.hasCenteredOnce){
+      centerCanvasOnRoot();
+      canvasState.hasCenteredOnce = true;
+    }
+
+    renderCanvas();
+  } catch (err){
+    if(loadingMsg){
+      loadingMsg.textContent = err.message;
+      loadingMsg.style.display = 'block';
+    }
+  }
+}
+
+// Walks down from the root group, following only each group's CURRENTLY
+// ACTIVE version — this is what makes Retry's old versions invisible without
+// deleting them, and what makes a frozen sibling branch still render (it's
+// still part of the active version, just visually grayed).
+function computeVisibleGroups(){
+  const groupsById = {};
+  canvasState.groups.forEach(g => groupsById[g.id] = g);
+
+  const versionsByGroup = {};
+  canvasState.groupVersions.forEach(v => {
+    (versionsByGroup[v.group_id] = versionsByGroup[v.group_id] || []).push(v);
+  });
+  Object.values(versionsByGroup).forEach(list => list.sort((a, b) => a.version_number - b.version_number));
+
+  const optionsByVersion = {};
+  canvasState.options.forEach(o => {
+    (optionsByVersion[o.group_version_id] = optionsByVersion[o.group_version_id] || []).push(o);
+  });
+
+  const connectionByFromOption = {};
+  const groupsWithIncoming = new Set();
+  canvasState.connections.forEach(c => {
+    connectionByFromOption[c.from_option_id] = c.to_group_id;
+    groupsWithIncoming.add(c.to_group_id);
+  });
+
+  const rootGroup = canvasState.groups.find(g => !groupsWithIncoming.has(g.id));
+  if(!rootGroup) return [];
+
+  const visible = [];
+  const visited = new Set();
+
+  function walk(groupId){
+    if(visited.has(groupId)) return;
+    visited.add(groupId);
+
+    const group = groupsById[groupId];
+    if(!group) return;
+
+    const versions = versionsByGroup[groupId] || [];
+    const activeVersion = versions.find(v => v.version_number === group.current_version_number) || versions[versions.length - 1];
+    const opts = activeVersion ? (optionsByVersion[activeVersion.id] || []) : [];
+
+    visible.push({ group, versions, activeVersion, options: opts });
+
+    opts.forEach(opt => {
+      const childId = connectionByFromOption[opt.id];
+      if(childId) walk(childId);
+    });
+  }
+
+  walk(rootGroup.id);
+  return visible;
+}
+
+function renderCanvas(){
+  const visible = computeVisibleGroups();
+  renderGroups(visible);
+  renderLines(visible);
+  applyWorldTransform();
+}
+
+function renderGroups(visible){
+  const layer = document.getElementById('groupsLayer');
+  if(!layer) return;
+  layer.innerHTML = '';
+
+  const disabledAttr = canvasState.isLocked ? 'disabled' : '';
+
+  visible.forEach(({ group, versions, options }) => {
+    const card = document.createElement('div');
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''}`;
+    card.dataset.groupId = group.id;
+    card.style.left = `${group.position_x || 0}px`;
+    card.style.top = `${group.position_y || 0}px`;
+
+    const versionNav = versions.length > 1 ? `
+      <div class="version-nav">
+        <button data-action="version-prev" ${group.current_version_number <= versions[0].version_number ? 'disabled' : ''}>‹</button>
+        <span>${group.current_version_number}/${versions.length}</span>
+        <button data-action="version-next" ${group.current_version_number >= versions[versions.length - 1].version_number ? 'disabled' : ''}>›</button>
+      </div>` : '';
+
+    const optionsHtml = options.map(opt => `
+      <div class="canvas-option ${opt.is_selected ? 'selected' : ''}" data-option-id="${opt.id}">
+        <span class="opt-dot"></span>
+        <span class="opt-label">${escapeHtml(opt.label)}</span>
+        ${opt.is_recommended ? `<span class="opt-star" title="${escapeHtml(opt.hint || '')}">★</span>` : ''}
+      </div>
+    `).join('');
+
+    card.innerHTML = `
+      <div class="canvas-group-header" data-drag-handle>
+        <span>${escapeHtml(group.label)}</span>
+        ${versionNav}
+      </div>
+      <div class="canvas-group-options">${optionsHtml}</div>
+      <div class="canvas-group-footer">
+        <button class="mini-btn" data-action="retry" ${disabledAttr}>Retry</button>
+        <button class="mini-btn" data-action="random" ${disabledAttr}>Random</button>
+        <button class="mini-btn" data-action="custom-toggle" ${disabledAttr}>+ Custom</button>
+      </div>
+      <div class="canvas-custom-row" style="display:none;">
+        <input type="text" placeholder="Type your own option…" data-custom-input />
+        <button class="mini-btn" data-action="custom-submit">Add</button>
+      </div>
+    `;
+
+    layer.appendChild(card);
+  });
+
+  wireGroupEvents();
+}
+
+function wireGroupEvents(){
+  document.querySelectorAll('.canvas-group').forEach(card => {
+    const groupId = card.dataset.groupId;
+
+    const dragHandle = card.querySelector('[data-drag-handle]');
+    if(dragHandle) dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
+
+    card.querySelectorAll('.canvas-option').forEach(optEl => {
+      optEl.addEventListener('click', () => handleOptionClick(optEl.dataset.optionId));
+    });
+
+    const prevBtn = card.querySelector('[data-action="version-prev"]');
+    const nextBtn = card.querySelector('[data-action="version-next"]');
+    if(prevBtn) prevBtn.addEventListener('click', () => switchVersion(groupId, -1));
+    if(nextBtn) nextBtn.addEventListener('click', () => switchVersion(groupId, 1));
+
+    const retryBtn = card.querySelector('[data-action="retry"]');
+    if(retryBtn) retryBtn.addEventListener('click', () => handleRetry(groupId));
+
+    const randomBtn = card.querySelector('[data-action="random"]');
+    if(randomBtn) randomBtn.addEventListener('click', () => handleRandom(groupId));
+
+    const customToggle = card.querySelector('[data-action="custom-toggle"]');
+    const customRow = card.querySelector('.canvas-custom-row');
+    if(customToggle && customRow){
+      customToggle.addEventListener('click', () => {
+        customRow.style.display = customRow.style.display === 'none' ? 'flex' : 'none';
+      });
+    }
+
+    const customSubmit = card.querySelector('[data-action="custom-submit"]');
+    const customInput = card.querySelector('[data-custom-input]');
+    if(customSubmit && customInput){
+      customSubmit.addEventListener('click', () => handleCustomOption(groupId, customInput.value));
+    }
+  });
+}
+
+function renderLines(visible){
+  const svg = document.getElementById('canvasLines');
+  if(!svg) return;
+  svg.innerHTML = '';
+
+  const visibleGroupIds = new Set(visible.map(v => v.group.id));
+
+  visible.forEach(({ group, options }) => {
+    options.forEach((opt, optionIndex) => {
+      const conn = canvasState.connections.find(c => c.from_option_id === opt.id);
+      if(!conn || !visibleGroupIds.has(conn.to_group_id)) return;
+
+      const childGroup = canvasState.groups.find(g => g.id === conn.to_group_id);
+      if(!childGroup) return;
+
+      const startX = (group.position_x || 0) + CARD_WIDTH;
+      const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+      const endX = childGroup.position_x || 0;
+      const endY = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
+      const midX = (startX + endX) / 2;
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`);
+      if(childGroup.is_frozen) path.setAttribute('class', 'frozen-line');
+      svg.appendChild(path);
+    });
+  });
+}
+
+function applyWorldTransform(){
+  const world = document.getElementById('canvasWorld');
+  if(!world) return;
+  world.style.transform = `translate(${canvasState.pan.x}px, ${canvasState.pan.y}px) scale(${canvasState.zoom})`;
+}
+
+function centerCanvasOnRoot(){
+  const viewport = document.getElementById('canvasViewport');
+  if(!viewport) return;
+  canvasState.pan = { x: viewport.clientWidth / 2 - CARD_WIDTH / 2, y: 80 };
+  applyWorldTransform();
+}
+
+function setCanvasBusy(isBusy){
+  const viewport = document.getElementById('canvasViewport');
+  const indicator = document.getElementById('canvasBusyIndicator');
+  if(viewport) viewport.classList.toggle('busy', isBusy);
+  if(indicator) indicator.style.display = isBusy ? 'block' : 'none';
+}
+
+function setupCanvasInteractions(){
+  const viewport = document.getElementById('canvasViewport');
+  if(!viewport) return;
+
+  viewport.addEventListener('mousedown', (e) => {
+    if(e.target.closest('.canvas-group')) return; // group drag handles its own mousedown
+    isPanning = true;
+    panStartPointer = { x: e.clientX, y: e.clientY };
+    panStartValue = { ...canvasState.pan };
+    viewport.classList.add('panning');
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if(isPanning){
+      const dx = e.clientX - panStartPointer.x;
+      const dy = e.clientY - panStartPointer.y;
+      canvasState.pan = { x: panStartValue.x + dx, y: panStartValue.y + dy };
+      applyWorldTransform();
+    } else if(draggingGroupId){
+      const dx = (e.clientX - dragStartPointer.x) / canvasState.zoom;
+      const dy = (e.clientY - dragStartPointer.y) / canvasState.zoom;
+      const group = canvasState.groups.find(g => g.id === draggingGroupId);
+      if(group){
+        group.position_x = dragStartGroupPos.x + dx;
+        group.position_y = dragStartGroupPos.y + dy;
+        const card = document.querySelector(`[data-group-id="${draggingGroupId}"]`);
+        if(card){
+          card.style.left = `${group.position_x}px`;
+          card.style.top = `${group.position_y}px`;
+        }
+        renderLines(computeVisibleGroups());
+      }
+    }
+  });
+
+  window.addEventListener('mouseup', () => {
+    if(isPanning){
+      isPanning = false;
+      viewport.classList.remove('panning');
+    }
+    if(draggingGroupId){
+      const group = canvasState.groups.find(g => g.id === draggingGroupId);
+      if(group){
+        authedFetch(`/groups/${draggingGroupId}/position`, {
+          method: 'PATCH',
+          body: JSON.stringify({ positionX: group.position_x, positionY: group.position_y })
+        }).catch(() => {});
+      }
+      draggingGroupId = null;
+    }
+  });
+
+  viewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    canvasState.zoom = Math.min(2, Math.max(0.3, canvasState.zoom + delta));
+    applyWorldTransform();
+  }, { passive: false });
+
+  document.getElementById('zoomInBtn')?.addEventListener('click', () => {
+    canvasState.zoom = Math.min(2, canvasState.zoom + 0.1);
+    applyWorldTransform();
+  });
+  document.getElementById('zoomOutBtn')?.addEventListener('click', () => {
+    canvasState.zoom = Math.max(0.3, canvasState.zoom - 0.1);
+    applyWorldTransform();
+  });
+  document.getElementById('zoomResetBtn')?.addEventListener('click', () => {
+    canvasState.zoom = 1;
+    centerCanvasOnRoot();
+  });
+}
+
+function startGroupDrag(e, groupId){
+  e.stopPropagation();
+  e.preventDefault();
+  // Dragging is intentionally allowed even on a locked blueprint —
+  // repositioning isn't "editing the idea," just rearranging what's there.
+  draggingGroupId = groupId;
+  dragStartPointer = { x: e.clientX, y: e.clientY };
+  const group = canvasState.groups.find(g => g.id === groupId);
+  dragStartGroupPos = { x: group.position_x || 0, y: group.position_y || 0 };
+}
+
+async function handleOptionClick(optionId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/options/${optionId}/branch`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not branch from that option.');
+      return;
+    }
+    await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
+  } catch (err){
+    alert('Something went wrong branching from that option.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleRetry(groupId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/groups/${groupId}/retry`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not retry this group.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong retrying this group.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleRandom(groupId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/groups/${groupId}/random-branch`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not auto-branch.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong with Random.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleCustomOption(groupId, label){
+  if(canvasState.isLocked) return;
+  if(!label || !label.trim()) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/groups/${groupId}/custom-option`, {
+      method: 'POST',
+      body: JSON.stringify({ label })
+    });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not add that option.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong adding that option.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+function switchVersion(groupId, direction){
+  const group = canvasState.groups.find(g => g.id === groupId);
+  if(!group) return;
+
+  const versions = canvasState.groupVersions
+    .filter(v => v.group_id === groupId)
+    .sort((a, b) => a.version_number - b.version_number);
+
+  const currentIndex = versions.findIndex(v => v.version_number === group.current_version_number);
+  const nextIndex = currentIndex + direction;
+  if(nextIndex < 0 || nextIndex >= versions.length) return;
+
+  // Optimistic + instant — no AI call involved, nothing worth waiting on.
+  group.current_version_number = versions[nextIndex].version_number;
+  renderCanvas();
+
+  authedFetch(`/groups/${groupId}/switch-version`, {
+    method: 'PATCH',
+    body: JSON.stringify({ versionNumber: group.current_version_number })
+  }).catch(() => {});
 }
