@@ -7,9 +7,9 @@
 // policies on the tables (already set up in supabase_schema.sql),
 // not from hiding this key.
 // ============================================================
-export const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
-export const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
-export const API_BASE_URL = 'https://YOUR-RENDER-BACKEND.onrender.com'; // your Render backend, still in use exactly as before
+export const SUPABASE_URL = process.env.SUPABASE_URL;
+export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+export const API_BASE_URL = 'https://thinkmaps.onrender.com'; // your Render backend, still in use exactly as before
 
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 
