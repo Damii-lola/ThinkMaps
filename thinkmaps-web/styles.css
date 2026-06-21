@@ -345,14 +345,14 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   border-bottom:1px solid var(--line); font-size:13px; cursor:pointer;
 }
 .canvas-option:last-child{ border-bottom:none; }
-.canvas-option.has-connection{ cursor:pointer; }
-.canvas-option.has-connection:hover{ background:var(--accent-soft); }
-.canvas-option.unexplored{ cursor:default; }
+.canvas-option.selected{ cursor:default; }
+.canvas-option.selected .opt-dot{ background:var(--accent); cursor:grab; }
+.canvas-option.selected .opt-dot:hover{ box-shadow:0 0 0 4px var(--accent-soft); }
+.canvas-option.selected .opt-dot:active{ cursor:grabbing; }
+.canvas-option.root-clickable{ cursor:pointer; }
+.canvas-option.root-clickable:hover{ background:var(--accent-soft); }
+.canvas-option.inert{ cursor:default; }
 .canvas-option .opt-dot{ width:9px; height:9px; border-radius:50%; background:var(--line); flex-shrink:0; }
-.canvas-option.has-connection .opt-dot{ background:var(--accent); }
-.canvas-option.unexplored .opt-dot{ cursor:grab; }
-.canvas-option.unexplored .opt-dot:hover{ background:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); }
-.canvas-option.unexplored .opt-dot:active{ cursor:grabbing; }
 .canvas-option .opt-label{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 .drag-preview-line{ fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:5 4; }
