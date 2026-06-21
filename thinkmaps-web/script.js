@@ -16,7 +16,21 @@ async function getSupabaseClient(){
   if(supabaseClient) return supabaseClient;
 
   if(!supabaseConfigPromise){
-    supabaseConfigPromise = fetch(`${API_BASE_URL}/config`).then(res => res.json());
+    // sessionStorage survives page-to-page navigation in the same tab —
+    // so once /config is fetched once (e.g. during sign-in), moving to
+    // dashboard.html or app.html skips that network round trip entirely.
+    const cached = sessionStorage.getItem('thinkmaps_supabase_config');
+
+    if(cached){
+      supabaseConfigPromise = Promise.resolve(JSON.parse(cached));
+    } else {
+      supabaseConfigPromise = fetch(`${API_BASE_URL}/config`)
+        .then(res => res.json())
+        .then(config => {
+          sessionStorage.setItem('thinkmaps_supabase_config', JSON.stringify(config));
+          return config;
+        });
+    }
   }
 
   const { supabaseUrl, supabaseAnonKey } = await supabaseConfigPromise;
