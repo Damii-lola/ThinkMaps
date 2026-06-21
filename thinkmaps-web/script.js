@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initGraphDemo();
   initAuthPage();
   initDashboardPage();
+  initNavAuthState();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -371,6 +372,21 @@ async function handleLogout(){
   const sb = await getSupabaseClient();
   await sb.auth.signOut();
   window.location.href = 'index.html';
+}
+
+// ---------- NAV AUTH STATE ----------
+// Runs on every page. If #navCta exists (currently just index.html, but
+// works the same on any future page with this same nav pattern) and the
+// person already has a session — Supabase persists that across visits by
+// default — swap "Sign in" / "Start a blueprint" for a single "Dashboard" link.
+async function initNavAuthState(){
+  const navCta = document.getElementById('navCta');
+  if(!navCta) return;
+
+  const session = await getActiveSession();
+  if(session){
+    navCta.innerHTML = `<a href="dashboard.html" class="btn btn-primary">Dashboard</a>`;
+  }
 }
 
 // ---------- DASHBOARD PAGE ----------
