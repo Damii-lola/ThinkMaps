@@ -560,6 +560,7 @@ let panStartValue = null;
 let draggingGroupId = null;
 let dragStartPointer = null;
 let dragStartGroupPos = null;
+let lineDragState = null; // { optionId, startX, startY, initialClientX, initialClientY, currentWorld }
 
 function escapeHtml(str){
   const div = document.createElement('div');
@@ -698,6 +699,8 @@ function renderGroups(visible){
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
 
+  const connectedOptionIds = new Set(canvasState.connections.map(c => c.from_option_id));
+
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
     card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''}`;
@@ -712,13 +715,15 @@ function renderGroups(visible){
         <button data-action="version-next" ${group.current_version_number >= versions[versions.length - 1].version_number ? 'disabled' : ''}>›</button>
       </div>` : '';
 
-    const optionsHtml = options.map(opt => `
-      <div class="canvas-option ${opt.is_selected ? 'selected' : ''}" data-option-id="${opt.id}">
-        <span class="opt-dot"></span>
-        <span class="opt-label">${escapeHtml(opt.label)}</span>
-        ${opt.is_recommended ? `<span class="opt-star" title="${escapeHtml(opt.hint || '')}">★</span>` : ''}
-      </div>
-    `).join('');
+    const optionsHtml = options.map((opt, optionIndex) => {
+      const hasConnection = connectedOptionIds.has(opt.id);
+      return `
+        <div class="canvas-option ${opt.is_selected ? 'selected' : ''} ${hasConnection ? 'has-connection' : 'unexplored'}" data-option-id="${opt.id}">
+          <span class="opt-dot" data-option-id="${opt.id}" data-group-id="${group.id}" data-option-index="${optionIndex}" data-has-connection="${hasConnection}"></span>
+          <span class="opt-label">${escapeHtml(opt.label)}</span>
+        </div>
+      `;
+    }).join('');
 
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
@@ -750,8 +755,20 @@ function wireGroupEvents(){
     const dragHandle = card.querySelector('[data-drag-handle]');
     if(dragHandle) dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
 
+    // Unexplored option: must drag its dot to create the branch (no click).
+    // Already-explored option: a plain click just reopens it — nothing new
+    // is being created, so there's no reason to force a drag there.
     card.querySelectorAll('.canvas-option').forEach(optEl => {
-      optEl.addEventListener('click', () => handleOptionClick(optEl.dataset.optionId));
+      const optionId = optEl.dataset.optionId;
+      const dot = optEl.querySelector('.opt-dot');
+      const hasConnection = dot?.dataset.hasConnection === 'true';
+      const optionIndex = Number(dot?.dataset.optionIndex);
+
+      if(hasConnection){
+        optEl.addEventListener('click', () => handleOptionClick(optionId));
+      } else if(dot){
+        dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+      }
     });
 
     const prevBtn = card.querySelector('[data-action="version-prev"]');
@@ -862,10 +879,12 @@ function setupCanvasInteractions(){
         }
         renderLines(computeVisibleGroups());
       }
+    } else if(lineDragState){
+      updateLineDragPreview(e.clientX, e.clientY);
     }
   });
 
-  window.addEventListener('mouseup', () => {
+  window.addEventListener('mouseup', (e) => {
     if(isPanning){
       isPanning = false;
       viewport.classList.remove('panning');
@@ -879,6 +898,9 @@ function setupCanvasInteractions(){
         }).catch(() => {});
       }
       draggingGroupId = null;
+    }
+    if(lineDragState){
+      endLineDrag(e);
     }
   });
 
@@ -914,11 +936,80 @@ function startGroupDrag(e, groupId){
   dragStartGroupPos = { x: group.position_x || 0, y: group.position_y || 0 };
 }
 
-async function handleOptionClick(optionId){
+// Drawing the connecting line IS the way a new branch gets created — matches
+// the original "draw a connecting line to choose your path" mechanic. Only
+// fires on options that don't already lead somewhere; reopening an existing
+// one is a plain click instead (see wireGroupEvents).
+function startLineDrag(e, optionId, groupId, optionIndex){
+  e.stopPropagation();
+  e.preventDefault();
+
+  const group = canvasState.groups.find(g => g.id === groupId);
+  if(!group) return;
+
+  const startX = (group.position_x || 0) + CARD_WIDTH;
+  const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+
+  lineDragState = {
+    optionId,
+    startX, startY,
+    initialClientX: e.clientX,
+    initialClientY: e.clientY,
+    currentWorld: null
+  };
+
+  updateLineDragPreview(e.clientX, e.clientY);
+}
+
+function updateLineDragPreview(clientX, clientY){
+  if(!lineDragState) return;
+  const viewport = document.getElementById('canvasViewport');
+  const svg = document.getElementById('canvasLines');
+  if(!viewport || !svg) return;
+
+  const rect = viewport.getBoundingClientRect();
+  const worldX = (clientX - rect.left - canvasState.pan.x) / canvasState.zoom;
+  const worldY = (clientY - rect.top - canvasState.pan.y) / canvasState.zoom;
+
+  let previewPath = document.getElementById('lineDragPreview');
+  if(!previewPath){
+    previewPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    previewPath.setAttribute('id', 'lineDragPreview');
+    previewPath.setAttribute('class', 'drag-preview-line');
+    svg.appendChild(previewPath);
+  }
+
+  const midX = (lineDragState.startX + worldX) / 2;
+  previewPath.setAttribute('d', `M ${lineDragState.startX} ${lineDragState.startY} C ${midX} ${lineDragState.startY}, ${midX} ${worldY}, ${worldX} ${worldY}`);
+
+  lineDragState.currentWorld = { x: worldX, y: worldY };
+}
+
+function endLineDrag(e){
+  const state = lineDragState;
+  lineDragState = null;
+
+  const previewPath = document.getElementById('lineDragPreview');
+  if(previewPath) previewPath.remove();
+
+  if(!state) return;
+
+  // Barely moved — treat it as an accidental nudge, not a deliberate line draw.
+  const movedDist = Math.hypot(e.clientX - state.initialClientX, e.clientY - state.initialClientY);
+  if(movedDist < 12 || !state.currentWorld) return;
+
+  handleOptionClick(state.optionId, state.currentWorld);
+}
+
+async function handleOptionClick(optionId, dropPosition){
   if(canvasState.isLocked) return;
   setCanvasBusy(true);
   try {
-    const res = await authedFetch(`/options/${optionId}/branch`, { method: 'POST', body: JSON.stringify({}) });
+    const requestBody = dropPosition
+      ? { positionX: dropPosition.x, positionY: dropPosition.y }
+      : {};
+
+    const res = await authedFetch(`/options/${optionId}/branch`, { method: 'POST', body: JSON.stringify(requestBody) });
     if(!res) return;
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
