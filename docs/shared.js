@@ -5,7 +5,7 @@
 //
 // EDIT this one line before deploying:
 // ============================================================
-export const API_BASE_URL = 'https://thinkmap.onrender.com';
+export const API_BASE_URL = 'https://thinkmaps.onrender.com';
 
 const ACCESS_TOKEN_KEY = 'tm_access_token';
 const REFRESH_TOKEN_KEY = 'tm_refresh_token';
