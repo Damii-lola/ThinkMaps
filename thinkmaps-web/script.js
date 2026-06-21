@@ -732,6 +732,7 @@ function renderGroups(visible){
       <div class="canvas-group-header" data-drag-handle>
         <span>${escapeHtml(group.label)}</span>
         ${versionNav}
+        ${!isRootGroup && !canvasState.isLocked ? `<button class="remove-btn" data-action="remove-group" title="Remove this group">×</button>` : ''}
       </div>
       <div class="canvas-group-options">${optionsHtml}</div>
       <div class="canvas-group-footer">
@@ -773,6 +774,12 @@ function wireGroupEvents(){
       }
       // 'inert' options do nothing on their own — they're only reachable as
       // a drop target for someone else's drag (see endLineDrag).
+    });
+
+    const removeBtn = card.querySelector('[data-action="remove-group"]');
+    if(removeBtn) removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handleRemoveGroup(groupId);
     });
 
     const prevBtn = card.querySelector('[data-action="version-prev"]');
@@ -962,7 +969,26 @@ function startLineDrag(e, optionId, groupId, optionIndex){
     currentWorld: null
   };
 
+  highlightEligibleDropTargets(optionId);
   updateLineDragPreview(e.clientX, e.clientY);
+  console.log('[ThinkMaps] line-drag started from option', optionId);
+}
+
+// Visually marks which groups are actually valid drop targets for THIS
+// drag — only the groups this exact option spawned. Makes the mechanic
+// obvious instead of making the user guess where a drop will register.
+function highlightEligibleDropTargets(sourceOptionId){
+  const eligibleGroupIds = new Set(
+    canvasState.groups.filter(g => g.spawned_from_option_id === sourceOptionId).map(g => g.id)
+  );
+  document.querySelectorAll('.canvas-group').forEach(card => {
+    if(eligibleGroupIds.has(card.dataset.groupId)) card.classList.add('drop-eligible');
+  });
+}
+
+function clearEligibleDropTargets(){
+  document.querySelectorAll('.canvas-group.drop-eligible').forEach(card => card.classList.remove('drop-eligible'));
+  document.querySelectorAll('.canvas-option.drop-hover').forEach(el => el.classList.remove('drop-hover'));
 }
 
 function updateLineDragPreview(clientX, clientY){
@@ -987,6 +1013,42 @@ function updateLineDragPreview(clientX, clientY){
   previewPath.setAttribute('d', `M ${lineDragState.startX} ${lineDragState.startY} C ${midX} ${lineDragState.startY}, ${midX} ${worldY}, ${worldX} ${worldY}`);
 
   lineDragState.currentWorld = { x: worldX, y: worldY };
+
+  // Live feedback — highlight whichever eligible option the cursor is over right now.
+  document.querySelectorAll('.canvas-option.drop-hover').forEach(el => el.classList.remove('drop-hover'));
+  const target = findOptionElementNear(clientX, clientY);
+  if(target) target.classList.add('drop-hover');
+}
+
+// Forgiving target detection: try the exact element under the cursor first;
+// if that's not precisely an option row but IS somewhere inside a group
+// card, fall back to whichever option row in that card is closest — so a
+// drop that's a few pixels off the row still lands correctly.
+function findOptionElementNear(clientX, clientY){
+  const elUnderCursor = document.elementFromPoint(clientX, clientY);
+  if(!elUnderCursor) return null;
+
+  const directHit = elUnderCursor.closest('.canvas-option');
+  if(directHit) return directHit;
+
+  const groupEl = elUnderCursor.closest('.canvas-group');
+  if(!groupEl) return null;
+
+  const optionEls = Array.from(groupEl.querySelectorAll('.canvas-option'));
+  if(optionEls.length === 0) return null;
+
+  let closest = null;
+  let closestDist = Infinity;
+  optionEls.forEach(el => {
+    const r = el.getBoundingClientRect();
+    const dist = Math.abs(clientY - (r.top + r.height / 2));
+    if(dist < closestDist){
+      closestDist = dist;
+      closest = el;
+    }
+  });
+
+  return closest;
 }
 
 function endLineDrag(e){
@@ -995,28 +1057,37 @@ function endLineDrag(e){
 
   const previewPath = document.getElementById('lineDragPreview');
   if(previewPath) previewPath.remove();
+  clearEligibleDropTargets();
 
   if(!state) return;
 
   // Barely moved — treat it as an accidental nudge, not a deliberate line draw.
   const movedDist = Math.hypot(e.clientX - state.initialClientX, e.clientY - state.initialClientY);
-  if(movedDist < 12) return;
+  if(movedDist < 12){
+    console.log('[ThinkMaps] line-drag cancelled — barely moved');
+    return;
+  }
 
-  // The drop target must be an actual option element — specifically one
-  // belonging to a group that THIS option spawned. Dropping on empty
-  // canvas, or on some unrelated option, does nothing.
-  const elUnderCursor = document.elementFromPoint(e.clientX, e.clientY);
-  const targetOptionEl = elUnderCursor?.closest('.canvas-option');
-  if(!targetOptionEl) return;
+  const targetOptionEl = findOptionElementNear(e.clientX, e.clientY);
+  if(!targetOptionEl){
+    console.log('[ThinkMaps] line-drag ended over empty space — no target found');
+    return;
+  }
 
   const targetGroupEl = targetOptionEl.closest('.canvas-group');
   const targetGroup = canvasState.groups.find(g => g.id === targetGroupEl?.dataset.groupId);
 
   if(!targetGroup || targetGroup.spawned_from_option_id !== state.optionId){
-    alert("That connects to a different branch — drag to one of this option's own candidate groups.");
+    console.log('[ThinkMaps] line-drag ended on the wrong branch', {
+      sourceOptionId: state.optionId,
+      targetGroupId: targetGroup?.id,
+      thatGroupWasSpawnedBy: targetGroup?.spawned_from_option_id
+    });
+    alert("That connects to a different branch — drag to one of this option's own candidate groups (highlighted while you drag).");
     return;
   }
 
+  console.log('[ThinkMaps] line-drag completed — activating option', targetOptionEl.dataset.optionId);
   handleOptionActivate(targetOptionEl.dataset.optionId);
 }
 
@@ -1034,6 +1105,27 @@ async function handleOptionActivate(optionId){
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
     alert('Something went wrong activating that option.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleRemoveGroup(groupId){
+  if(canvasState.isLocked) return;
+  if(!confirm('Remove this group? Anything that grew from it goes too — this can\'t be undone.')) return;
+
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/groups/${groupId}`, { method: 'DELETE' });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not remove that group.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong removing that group.');
   } finally {
     setCanvasBusy(false);
   }
