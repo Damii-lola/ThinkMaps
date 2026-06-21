@@ -510,7 +510,7 @@ async function activateOption(optionId){
         blueprint_id: blueprintId,
         label: spec.groupLabel || 'Untitled Group',
         position_x: baseX,
-        position_y: baseY + (i - (groupSpecs.length - 1) / 2) * 200,
+        position_y: baseY + (i - (groupSpecs.length - 1) / 2) * 360,
         spawned_from_option_id: optionId
       })
       .select()
@@ -772,6 +772,45 @@ app.patch('/groups/:id/position', requireAuth, async (req, res) => {
     res.status(200).json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Could not save position.', detail: err.message });
+  }
+});
+
+// Removes a group — and, via the DB's own cascade constraints, everything
+// that grew from it (its options, their spawned groups, all the way down).
+// The root group can't be removed; that's the foundation of the blueprint.
+// If this was the only thing its parent option had spawned, the parent
+// option un-activates too, so it can be clicked/dragged-into again fresh.
+app.delete('/groups/:id', requireAuth, async (req, res) => {
+  try {
+    const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
+    if(check.error) return res.status(check.status).json({ error: check.error });
+
+    const { data: group } = await supabase
+      .from('groups')
+      .select('spawned_from_option_id')
+      .eq('id', req.params.id)
+      .single();
+
+    if(!group) return res.status(404).json({ error: 'Group not found.' });
+    if(!group.spawned_from_option_id){
+      return res.status(400).json({ error: "Can't remove the starting group — it's the foundation of the blueprint." });
+    }
+
+    const { error: deleteError } = await supabase.from('groups').delete().eq('id', req.params.id);
+    if(deleteError) throw deleteError;
+
+    const { count } = await supabase
+      .from('groups')
+      .select('*', { count: 'exact', head: true })
+      .eq('spawned_from_option_id', group.spawned_from_option_id);
+
+    if(!count){
+      await supabase.from('options').update({ is_selected: false }).eq('id', group.spawned_from_option_id);
+    }
+
+    res.status(200).json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not remove that group.', detail: err.message });
   }
 });
 
