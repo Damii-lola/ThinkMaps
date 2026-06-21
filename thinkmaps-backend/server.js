@@ -241,37 +241,20 @@ async function callMistral(messages){
 
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
 // pairs — this is the "path so far" context fed into every generation prompt.
-async function buildPathContext(groupId){
+// Walks UP the tree from an OPTION to the root, via spawned_from_option_id —
+// this is the "path so far" context fed into every generation prompt.
+async function buildPathContextFromOption(optionId){
   const path = [];
-  let currentGroupId = groupId;
+  let currentOptionId = optionId;
 
-  while(currentGroupId){
-    const { data: group } = await supabase
-      .from('groups')
-      .select('id, label')
-      .eq('id', currentGroupId)
-      .single();
-
-    if(!group) break;
-
-    const { data: connection } = await supabase
-      .from('connections')
-      .select('from_option_id')
-      .eq('to_group_id', currentGroupId)
-      .maybeSingle();
-
-    if(!connection){
-      path.unshift({ groupLabel: group.label, optionLabel: null });
-      break; // this is the root group, nothing above it
-    }
-
+  while(currentOptionId){
     const { data: option } = await supabase
       .from('options')
-      .select('label, group_version_id')
-      .eq('id', connection.from_option_id)
+      .select('id, label, group_version_id')
+      .eq('id', currentOptionId)
       .single();
 
-    path.unshift({ groupLabel: group.label, optionLabel: option?.label || null });
+    if(!option) break;
 
     const { data: version } = await supabase
       .from('group_versions')
@@ -279,13 +262,25 @@ async function buildPathContext(groupId){
       .eq('id', option.group_version_id)
       .single();
 
-    currentGroupId = version?.group_id || null;
+    if(!version) break;
+
+    const { data: group } = await supabase
+      .from('groups')
+      .select('label, spawned_from_option_id')
+      .eq('id', version.group_id)
+      .single();
+
+    if(!group) break;
+
+    path.unshift({ groupLabel: group.label, optionLabel: option.label });
+    currentOptionId = group.spawned_from_option_id || null;
   }
 
   return path;
 }
 
-// Generates up to 6 options for a group (root niches, a fresh branch, or a Retry).
+// Generates up to 6 options for a SINGLE group (used for the root "Niches"
+// group, and for Retry — both deal with one group's own option list).
 async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false } = {}){
   const pathDescription = pathContext.length === 0
     ? 'This is the very start of the blueprint — no path chosen yet.'
@@ -300,6 +295,22 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
     : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Path so far: ${pathDescription}` }
+  ]);
+}
+
+// Generates a BATCH of several candidate groups at once — this is what
+// actually happens when an option gets activated (clicked, for root; or
+// dragged-into, for everything else). The doc's example is exactly this:
+// clicking "Fitness" surfaces Sub-Niches, Audience, and Monetization all
+// at once, and the user drags a line to pick which one to continue into.
+async function generateCandidateBatch(pathContext){
+  const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate 3 DIFFERENT, complementary next-step groups (e.g. one might be "Sub-Niches", another "Audience", another "Monetization Preferences" — pick whichever 3 distinct categories genuinely make sense given where the path currently is). Each group needs up to 6 specific, concrete options. Respond ONLY with valid JSON in this exact shape, nothing else: {"groups": [{"groupLabel": string, "options": [{"label": string}]}, {"groupLabel": string, "options": [{"label": string}]}, {"groupLabel": string, "options": [{"label": string}]}]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -334,23 +345,34 @@ async function pickBestOptionWithAI(optionsList, pathContext){
   return optionsList[Math.floor(Math.random() * optionsList.length)];
 }
 
-// Recursively freezes a group and everything that grew beneath it — used when
-// the user branches away from a previously-explored sibling option.
-async function freezeGroupSubtree(groupId){
-  await supabase.from('groups').update({ is_frozen: true }).eq('id', groupId);
+// Freezes everything an option spawned, recursively — used when a different
+// sibling gets activated instead (root siblings in one group_version, or
+// non-root siblings spawned by the same parent option).
+async function freezeOptionSubtree(optionId){
+  const { data: spawnedGroups } = await supabase.from('groups').select('id').eq('spawned_from_option_id', optionId);
 
-  const { data: versions } = await supabase.from('group_versions').select('id').eq('group_id', groupId);
-  const versionIds = (versions || []).map(v => v.id);
-  if(versionIds.length === 0) return;
+  for(const g of (spawnedGroups || [])){
+    await supabase.from('groups').update({ is_frozen: true }).eq('id', g.id);
 
-  const { data: childOptions } = await supabase.from('options').select('id').in('group_version_id', versionIds);
-  const optionIds = (childOptions || []).map(o => o.id);
-  if(optionIds.length === 0) return;
+    const { data: versions } = await supabase.from('group_versions').select('id').eq('group_id', g.id);
+    const versionIds = (versions || []).map(v => v.id);
+    if(versionIds.length === 0) continue;
 
-  const { data: childConnections } = await supabase.from('connections').select('to_group_id').in('from_option_id', optionIds);
+    const { data: innerOptions } = await supabase.from('options').select('id').in('group_version_id', versionIds);
 
-  for(const conn of (childConnections || [])){
-    await freezeGroupSubtree(conn.to_group_id);
+    for(const io of (innerOptions || [])){
+      await freezeOptionSubtree(io.id);
+    }
+  }
+}
+
+// Un-grays the IMMEDIATE batch an option spawned (re-activating a previously
+// frozen branch). Deliberately not recursive — choices made deeper inside
+// stay exactly as they were, only the top of this branch un-freezes.
+async function unfreezeOptionSubtree(optionId){
+  const { data: spawnedGroups } = await supabase.from('groups').select('id').eq('spawned_from_option_id', optionId);
+  for(const g of (spawnedGroups || [])){
+    await supabase.from('groups').update({ is_frozen: false }).eq('id', g.id);
   }
 }
 
@@ -416,10 +438,17 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
 // call, instant. Otherwise it generates a brand new group via Mistral.
 // Either way, sibling options in the SAME version that have their own child
 // branch get frozen — only one branch per fork point is "active" at a time.
-async function branchFromOption(optionId, dropPosition){
+// The core action: activate an option. Always does the same thing regardless
+// of HOW it got triggered (a root click, or a completed drag onto it) — the
+// caller (frontend) is responsible for only allowing the right trigger on
+// the right kind of option. Activating means: freeze any previously-chosen
+// sibling, generate a BATCH of new candidate groups via Mistral, and mark
+// this option as the active one. If it's already active, this is just a
+// "come back to this branch" — unfreeze its batch, no new AI call.
+async function activateOption(optionId){
   const { data: option } = await supabase
     .from('options')
-    .select('id, label, group_version_id')
+    .select('id, label, group_version_id, is_selected')
     .eq('id', optionId)
     .single();
 
@@ -433,6 +462,8 @@ async function branchFromOption(optionId, dropPosition){
 
   if(!version) throw new Error('Group version not found.');
 
+  // Freeze any OTHER option in this same group_version that was previously
+  // activated — only one sibling stays the active continuation at a time.
   const { data: siblingOptions } = await supabase
     .from('options')
     .select('id')
@@ -440,101 +471,77 @@ async function branchFromOption(optionId, dropPosition){
     .neq('id', optionId);
 
   for(const sibling of (siblingOptions || [])){
-    const { data: siblingConnection } = await supabase
-      .from('connections')
-      .select('to_group_id')
-      .eq('from_option_id', sibling.id)
-      .maybeSingle();
-
-    if(siblingConnection){
-      await freezeGroupSubtree(siblingConnection.to_group_id);
-    }
+    await freezeOptionSubtree(sibling.id);
   }
 
-  const { data: existingConnection } = await supabase
-    .from('connections')
-    .select('to_group_id')
-    .eq('from_option_id', optionId)
-    .maybeSingle();
+  if(option.is_selected){
+    await unfreezeOptionSubtree(optionId);
+    const { data: existingGroups } = await supabase.from('groups').select('*').eq('spawned_from_option_id', optionId);
+    return { groups: existingGroups || [], reactivated: true };
+  }
 
   await supabase.from('options').update({ is_selected: true }).eq('id', optionId);
 
-  if(existingConnection){
-    await supabase.from('groups').update({ is_frozen: false }).eq('id', existingConnection.to_group_id);
-
-    const { data: childGroup } = await supabase
-      .from('groups')
-      .select('*')
-      .eq('id', existingConnection.to_group_id)
-      .single();
-
-    return { group: childGroup, reactivated: true };
-  }
-
-  const pathContext = await buildPathContext(version.group_id);
-  pathContext.push({ groupLabel: '(this group)', optionLabel: option.label });
-
-  const generated = await generateGroupOptions(pathContext);
+  const pathContext = await buildPathContextFromOption(optionId);
+  const generated = await generateCandidateBatch(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // The new group lands wherever the user dragged the connecting line to.
-  // If no position was given (e.g. Random button, which doesn't drag a line),
-  // fall back to a simple auto-placement next to the parent.
+  // Auto-fan-out placement to the right of the parent group, stacked
+  // vertically — there's no drag-to-position step anymore since the drag
+  // now picks an EXISTING option, it doesn't place anything new.
   const { data: parentGroup } = await supabase
     .from('groups')
     .select('position_x, position_y')
     .eq('id', version.group_id)
     .single();
 
-  const hasExplicitPosition = dropPosition && dropPosition.positionX != null && dropPosition.positionY != null;
+  const baseX = (parentGroup?.position_x || 0) + 320;
+  const baseY = (parentGroup?.position_y || 0);
 
-  const newPositionX = hasExplicitPosition
-    ? dropPosition.positionX
-    : (parentGroup?.position_x || 0) + 320;
+  const groupSpecs = (generated.groups || []).slice(0, 3);
+  const newGroups = [];
 
-  const newPositionY = hasExplicitPosition
-    ? dropPosition.positionY
-    : (parentGroup?.position_y || 0) + (Math.random() - 0.5) * 240;
+  for(let i = 0; i < groupSpecs.length; i++){
+    const spec = groupSpecs[i];
 
-  const { data: newGroup, error: groupInsertError } = await supabase
-    .from('groups')
-    .insert({
-      blueprint_id: blueprintId,
-      label: generated.groupLabel || 'Untitled Group',
-      position_x: newPositionX,
-      position_y: newPositionY,
-      is_frozen: false
-    })
-    .select()
-    .single();
+    const { data: newGroup, error: groupInsertError } = await supabase
+      .from('groups')
+      .insert({
+        blueprint_id: blueprintId,
+        label: spec.groupLabel || 'Untitled Group',
+        position_x: baseX,
+        position_y: baseY + (i - (groupSpecs.length - 1) / 2) * 200,
+        spawned_from_option_id: optionId
+      })
+      .select()
+      .single();
 
-  if(groupInsertError) throw groupInsertError;
+    if(groupInsertError) throw groupInsertError;
 
-  const { data: newVersion, error: versionInsertError } = await supabase
-    .from('group_versions')
-    .insert({ group_id: newGroup.id, version_number: 1 })
-    .select()
-    .single();
+    const { data: newVersion, error: versionInsertError } = await supabase
+      .from('group_versions')
+      .insert({ group_id: newGroup.id, version_number: 1 })
+      .select()
+      .single();
 
-  if(versionInsertError) throw versionInsertError;
+    if(versionInsertError) throw versionInsertError;
 
-  const optionRows = (generated.options || []).slice(0, 6).map(o => ({
-    group_version_id: newVersion.id,
-    label: o.label,
-    is_recommended: !!o.recommended,
-    hint: o.hint || null
-  }));
+    const optionRows = (spec.options || []).slice(0, 6).map(o => ({
+      group_version_id: newVersion.id,
+      label: o.label
+    }));
 
-  const { data: insertedOptions, error: optionsInsertError } = await supabase
-    .from('options')
-    .insert(optionRows)
-    .select();
+    const { data: insertedOptions, error: optionsInsertError } = await supabase
+      .from('options')
+      .insert(optionRows)
+      .select();
 
-  if(optionsInsertError) throw optionsInsertError;
+    if(optionsInsertError) throw optionsInsertError;
 
-  await supabase.from('connections').insert({ from_option_id: optionId, to_group_id: newGroup.id });
+    newGroups.push({ ...newGroup, options: insertedOptions });
+  }
 
-  return { group: { ...newGroup, options: insertedOptions }, reactivated: false };
+  return { groups: newGroups, reactivated: false };
 }
 
 // Fetches the full graph for a blueprint. Auto-generates the root "Niches"
@@ -574,9 +581,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
 
       const optionRows = (generated.options || []).slice(0, 6).map(o => ({
         group_version_id: rootVersion.id,
-        label: o.label,
-        is_recommended: !!o.recommended,
-        hint: o.hint || null
+        label: o.label
       }));
 
       await supabase.from('options').insert(optionRows);
@@ -593,34 +598,28 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
       ? await supabase.from('options').select('*').in('group_version_id', versionIds)
       : { data: [] };
 
-    const optionIds = (allOptions || []).map(o => o.id);
-
-    const { data: connections } = optionIds.length
-      ? await supabase.from('connections').select('*').in('from_option_id', optionIds)
-      : { data: [] };
-
     res.status(200).json({
       blueprint: { id: blueprint.id, title: blueprint.title, isLocked },
       groups,
       groupVersions: groupVersions || [],
-      options: allOptions || [],
-      connections: connections || []
+      options: allOptions || []
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load blueprint graph.', detail: err.message });
   }
 });
 
-// Branch from an option — generates (or reactivates) the next group.
-app.post('/options/:id/branch', requireAuth, async (req, res) => {
+// Activates an option — works identically whether it's a root click or a
+// completed drag from script.js; the frontend decides which is allowed where.
+app.post('/options/:id/activate', requireAuth, async (req, res) => {
   try {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const result = await branchFromOption(req.params.id, req.body);
+    const result = await activateOption(req.params.id);
     res.status(200).json(result);
   } catch (err) {
-    res.status(500).json({ error: 'Could not branch from that option.', detail: err.message });
+    res.status(500).json({ error: 'Could not activate that option.', detail: err.message });
   }
 });
 
@@ -631,7 +630,10 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const pathContext = await buildPathContext(req.params.id);
+    const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id').eq('id', req.params.id).single();
+    const pathContext = groupRow?.spawned_from_option_id
+      ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
+      : [];
     const generated = await generateGroupOptions(pathContext, { isRetry: true });
 
     const { data: existingVersions } = await supabase
@@ -744,13 +746,16 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'This group has no options yet.' });
     }
 
-    const pathContext = await buildPathContext(req.params.id);
+    const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id').eq('id', req.params.id).single();
+    const pathContext = groupRow?.spawned_from_option_id
+      ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
+      : [];
     const chosen = await pickBestOptionWithAI(currentOptions, pathContext);
-    const result = await branchFromOption(chosen.id);
+    const result = await activateOption(chosen.id);
 
     res.status(200).json({ ...result, chosenOption: chosen });
   } catch (err) {
-    res.status(500).json({ error: 'Could not auto-branch.', detail: err.message });
+    res.status(500).json({ error: 'Could not auto-activate.', detail: err.message });
   }
 });
 
