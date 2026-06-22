@@ -330,6 +330,7 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   border-top-color:var(--frozen);
   opacity:0.4;
 }
+.canvas-connector.dimmed{ opacity:0.15; }
 
 .canvas-group{
   position:absolute; width:220px;
@@ -338,6 +339,7 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   user-select:none;
 }
 .canvas-group.frozen{ background:var(--frozen-bg); border-color:var(--frozen); opacity:0.75; }
+.canvas-group.dimmed{ filter:grayscale(0.7); opacity:0.35; transition:opacity .15s ease, filter .15s ease; }
 
 .canvas-group-header{
   display:flex; align-items:center; justify-content:space-between;
