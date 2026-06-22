@@ -914,6 +914,282 @@ app.delete('/groups/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
+// IDEA GENERATION — the 45-question intake, then a basic synthesis pass.
+//
+// This is a SCAFFOLD, not a script: each slot below is an INTENT, written
+// generically enough to apply to any niche. At runtime, Mistral writes the
+// actual question text and 6 options fresh, every time, shaped by which
+// niche was picked on the canvas and everything answered so far — the same
+// mechanism already driving the Blueprint Graph's node generation, just
+// pointed at a fixed sequence of 45 intents instead of an open-ended tree.
+// ============================================================
+const IDEATION_SCAFFOLD = [
+  // Block A — Personal Pull
+  { block: 'Personal Pull', intent: 'Ask which specific corner or sub-area of this niche pulls at them most.' },
+  { block: 'Personal Pull', intent: 'Ask whether their interest comes from lived experience, someone close to them, a professional background, or pure curiosity.' },
+  { block: 'Personal Pull', intent: 'Ask what format or delivery style feels most natural to them for this niche (e.g. tracking, courses, coaching, passive monitoring, content, social challenges).' },
+  { block: 'Personal Pull', intent: 'Ask how data-heavy or quantified they personally want the experience to feel.' },
+  { block: 'Personal Pull', intent: "Ask them to imagine someone in this niche and guess what frustration hits hardest — explicitly framed as their own imagination, not a researched fact." },
+
+  // Block B — Personal Connection to the Audience
+  { block: 'Personal Connection to the Audience', intent: "Ask who they personally feel most pulled to build for, even without being able to fully explain why." },
+  { block: 'Personal Connection to the Audience', intent: 'Ask whether this is a problem they have lived themselves, observed in someone close, or pure instinct.' },
+  { block: 'Personal Connection to the Audience', intent: 'Ask them to guess — not research — whether the audience leans tech-savvy or tech-resistant, with an explicit "let the AI estimate" option.' },
+  { block: 'Personal Connection to the Audience', intent: 'Ask them to guess a fair price point based on gut feel alone, with an explicit "let the AI estimate" option.' },
+  { block: 'Personal Connection to the Audience', intent: 'Ask where THEY personally would go looking to find this audience — their own instinct/network, not market research.' },
+
+  // Block C — Personal Read on the Pain
+  { block: 'Personal Read on the Pain', intent: 'Ask them to imagine what actually breaks down when someone fails at solving this.' },
+  { block: 'Personal Read on the Pain', intent: 'Ask how big this problem feels to them personally, even without hard proof.' },
+  { block: 'Personal Read on the Pain', intent: "Ask their gut read on WHEN this pain hits hardest in someone's journey." },
+  { block: 'Personal Read on the Pain', intent: 'Ask what they imagine people are doing right now as a workaround instead of a real fix.' },
+  { block: 'Personal Read on the Pain', intent: 'Ask which single part of this problem they would fix first if they could.' },
+
+  // Block D — Honest Awareness of What Exists
+  { block: 'Honest Awareness of What Exists', intent: 'Ask what apps or tools they have personally tried or noticed in this space, with an honest "haven\'t looked yet" option.' },
+  { block: 'Honest Awareness of What Exists', intent: 'Ask what bugged them most about those, framed as their own experience, not a universal claim.' },
+  { block: 'Honest Awareness of What Exists', intent: 'Ask what would make their version feel like a genuine 10x, not just incrementally better.' },
+  { block: 'Honest Awareness of What Exists', intent: 'Ask how much they personally care about defensibility or moat versus just shipping fast.' },
+  { block: 'Honest Awareness of What Exists', intent: 'Ask what unfair advantage they personally bring, if any.' },
+
+  // Block E — Cross-Pollination & Creative Inspiration
+  { block: 'Cross-Pollination & Creative Inspiration', intent: 'Ask what feature from a completely different app, outside this niche, they wish existed here.' },
+  { block: 'Cross-Pollination & Creative Inspiration', intent: 'Ask what business model from a totally different industry they would want to borrow.' },
+  { block: 'Cross-Pollination & Creative Inspiration', intent: 'Ask what brand, in any industry, has the vibe they want this to have.' },
+  { block: 'Cross-Pollination & Creative Inspiration', intent: 'Ask if they have personally been impressed by an app outside this niche that handled motivation or engagement well.' },
+  { block: 'Cross-Pollination & Creative Inspiration', intent: 'Ask what single thing they would steal from social media for this product, with an option to avoid social patterns entirely.' },
+
+  // Block F — Your Vision for the Experience
+  { block: 'Your Vision for the Experience', intent: 'Ask what the single non-negotiable core feature is, in their vision.' },
+  { block: 'Your Vision for the Experience', intent: 'Ask what tone or personality they want the product to have.' },
+  { block: 'Your Vision for the Experience', intent: 'Ask how important gamification is to them.' },
+  { block: 'Your Vision for the Experience', intent: 'Ask what engagement rhythm they are picturing (daily, weekly, passive, etc).' },
+  { block: 'Your Vision for the Experience', intent: 'Ask how they want the product to handle setbacks or lapses.' },
+
+  // Block G — Context, Distribution & Values
+  { block: 'Context, Distribution & Values', intent: 'Ask what platform they picture this living on first (mobile, web, wearable, etc).' },
+  { block: 'Context, Distribution & Values', intent: 'Ask if there is a specific region, culture, or language community they personally understand well enough to build for.' },
+  { block: 'Context, Distribution & Values', intent: 'Ask where THEY personally would be able to promote or distribute this first.' },
+  { block: 'Context, Distribution & Values', intent: 'Ask how they personally feel about collecting and using user data relevant to this niche.' },
+  { block: 'Context, Distribution & Values', intent: 'Ask whether they want to build this solo or with collaborators.' },
+
+  // Block H — Personal Stakes & Long-Term Vision
+  { block: 'Personal Stakes & Long-Term Vision', intent: 'Ask why this specific problem matters to them personally.' },
+  { block: 'Personal Stakes & Long-Term Vision', intent: 'Ask if they have tried to solve a version of this problem before.' },
+  { block: 'Personal Stakes & Long-Term Vision', intent: 'Ask what would feel like genuine success to them in year one.' },
+  { block: 'Personal Stakes & Long-Term Vision', intent: 'Ask their honest long-term vision (lifestyle business, venture-scale, side project, etc).' },
+  { block: 'Personal Stakes & Long-Term Vision', intent: 'Ask their appetite for AI or automation being visibly present in the product itself.' },
+
+  // Block I — What You Actually Know About Yourself
+  { block: 'What You Actually Know About Yourself', intent: 'Ask what monetization shape they want for this.' },
+  { block: 'What You Actually Know About Yourself', intent: 'Ask what technical skills they personally bring to building this.' },
+  { block: 'What You Actually Know About Yourself', intent: 'Ask how much time they can realistically commit weekly.' },
+  { block: 'What You Actually Know About Yourself', intent: 'Ask what their real budget is for tools, APIs, and launch costs.' },
+  { block: 'What You Actually Know About Yourself', intent: 'Ask how fast they want to move from idea to a testable version.' }
+];
+
+// Finds the niche this blueprint is actually for — the selected option in
+// the root group. Idea generation can't run without one.
+async function findRootNiche(blueprintId){
+  const { data: rootGroup } = await supabase
+    .from('groups')
+    .select('id, current_version_number')
+    .eq('blueprint_id', blueprintId)
+    .is('spawned_from_option_id', null)
+    .maybeSingle();
+
+  if(!rootGroup) return null;
+
+  const { data: version } = await supabase
+    .from('group_versions')
+    .select('id')
+    .eq('group_id', rootGroup.id)
+    .eq('version_number', rootGroup.current_version_number)
+    .maybeSingle();
+
+  if(!version) return null;
+
+  const { data: selectedOption } = await supabase
+    .from('options')
+    .select('label')
+    .eq('group_version_id', version.id)
+    .eq('is_selected', true)
+    .limit(1)
+    .maybeSingle();
+
+  return selectedOption?.label || null;
+}
+
+// Writes ONE question fresh, every time — this is the "scaffold, not
+// script" mechanism. Same intent slot produces a different real question
+// depending on the niche and what's already been answered.
+async function generateIdeationQuestion(nicheLabel, intent, answersSoFar){
+  const context = answersSoFar.length === 0
+    ? 'This is the first question — no prior answers yet.'
+    : answersSoFar.map((a, i) => `Q${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
+
+  const systemPrompt = `You are writing ONE question for a guided idea-generation intake inside ThinkMaps, for someone exploring the "${nicheLabel}" niche. The question's INTENT is: ${intent} Write the actual question text — one sentence, specific to "${nicheLabel}", informed by what they've already answered — and exactly 6 short, concrete, mutually distinct answer options. The question must be answerable from the person's own knowledge, instinct, or preference — never something requiring market research they wouldn't already have. If the intent involves a guess about the market, make that explicit in the wording and include an honest "not sure — let the AI figure it out" as one of the 6 options. Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `What they've answered so far:\n${context}` }
+  ]);
+}
+
+// A deliberately simple first pass — one idea, not the full 5-idea/research
+// pipeline. That's a bigger, separate phase; this just closes the loop so
+// the 45-question intake actually leads somewhere.
+async function synthesizeBasicIdea(nicheLabel, answers){
+  const transcript = answers.map((a, i) => `Q${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
+
+  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. Based on the full intake transcript below for the "${nicheLabel}" niche, generate ONE app idea concept. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "tenXFeature": string, "monetization": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: transcript }
+  ]);
+}
+
+// Starts a new intake — finds the chosen niche, generates question 1, and
+// creates the session row that the rest of the flow reads/writes.
+app.post('/blueprints/:id/ideation/start', requireAuth, async (req, res) => {
+  try {
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const nicheLabel = await findRootNiche(blueprint.id);
+    if(!nicheLabel){
+      return res.status(400).json({ error: 'Pick a niche on your canvas before generating ideas.' });
+    }
+
+    const firstQuestion = await generateIdeationQuestion(nicheLabel, IDEATION_SCAFFOLD[0].intent, []);
+
+    const { data: session, error } = await supabase
+      .from('ideation_sessions')
+      .insert({
+        blueprint_id: blueprint.id,
+        niche_label: nicheLabel,
+        answers: [],
+        pending_question: firstQuestion,
+        status: 'in_progress'
+      })
+      .select()
+      .single();
+
+    if(error) throw error;
+
+    res.status(201).json({
+      sessionId: session.id,
+      nicheLabel,
+      status: 'in_progress',
+      progress: { current: 1, total: IDEATION_SCAFFOLD.length },
+      question: firstQuestion
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not start idea generation.', detail: err.message });
+  }
+});
+
+// Records the answer to whatever question is currently pending, then either
+// generates the next one or — once all 45 are in — runs the basic synthesis.
+app.post('/ideation/:sessionId/answer', requireAuth, async (req, res) => {
+  try {
+    const { selectedOption } = req.body;
+    if(!selectedOption) return res.status(400).json({ error: 'selectedOption is required.' });
+
+    const { data: session } = await supabase
+      .from('ideation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(session.status === 'completed'){
+      return res.status(200).json({ status: 'completed', result: session.result });
+    }
+
+    if(!session.pending_question){
+      return res.status(400).json({ error: 'No question is currently pending on this session.' });
+    }
+
+    const updatedAnswers = [...session.answers, {
+      question: session.pending_question.question,
+      options: session.pending_question.options,
+      selected: selectedOption
+    }];
+
+    if(updatedAnswers.length >= IDEATION_SCAFFOLD.length){
+      const result = await synthesizeBasicIdea(session.niche_label, updatedAnswers);
+
+      await supabase.from('ideation_sessions').update({
+        answers: updatedAnswers,
+        status: 'completed',
+        result,
+        pending_question: null
+      }).eq('id', session.id);
+
+      return res.status(200).json({
+        status: 'completed',
+        progress: { current: updatedAnswers.length, total: IDEATION_SCAFFOLD.length },
+        result
+      });
+    }
+
+    const nextSlot = IDEATION_SCAFFOLD[updatedAnswers.length];
+    const nextQuestion = await generateIdeationQuestion(session.niche_label, nextSlot.intent, updatedAnswers);
+
+    await supabase.from('ideation_sessions').update({
+      answers: updatedAnswers,
+      pending_question: nextQuestion
+    }).eq('id', session.id);
+
+    res.status(200).json({
+      status: 'in_progress',
+      nicheLabel: session.niche_label,
+      progress: { current: updatedAnswers.length + 1, total: IDEATION_SCAFFOLD.length },
+      question: nextQuestion
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not submit that answer.', detail: err.message });
+  }
+});
+
+// Resumes a session on page reload — returns whatever's currently pending
+// (or the result, if it already finished) without generating anything new.
+app.get('/ideation/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('ideation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    res.status(200).json({
+      sessionId: session.id,
+      nicheLabel: session.niche_label,
+      status: session.status,
+      progress: {
+        current: session.status === 'completed' ? session.answers.length : session.answers.length + 1,
+        total: IDEATION_SCAFFOLD.length
+      },
+      question: session.pending_question,
+      result: session.result
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load that session.', detail: err.message });
+  }
+});
+
 // Future routes (idea generation, Pro access) get mounted below
 // as we build them out — keeping this file as the single entry point for now.
 
