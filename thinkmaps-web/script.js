@@ -540,8 +540,8 @@ async function createBlueprint(){
 // layout reflows.
 
 const CARD_WIDTH = 220;
-const HEADER_HEIGHT = 40;
-const OPTION_ROW_HEIGHT = 38;
+const HEADER_HEIGHT = 56;
+const OPTION_ROW_HEIGHT = 54;
 // Connector lines are plain rotated divs (see drawConnectorLine), sharing
 // the exact same raw world-unit coordinate space as the group cards —
 // no separate layer with its own sizing to keep in sync.
