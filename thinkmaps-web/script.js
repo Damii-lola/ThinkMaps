@@ -45,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initDashboardPage();
   initNavAuthState();
   initAppPage();
+  initIdeatePage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -588,6 +589,13 @@ async function initAppPage(){
     return;
   }
   canvasState.blueprintId = blueprintId;
+
+  const generateBtn = document.getElementById('generateIdeasBtn');
+  if(generateBtn){
+    generateBtn.addEventListener('click', () => {
+      window.location.href = `ideate.html?blueprint=${canvasState.blueprintId}`;
+    });
+  }
 
   setupCanvasInteractions();
   await loadGraph();
@@ -1319,4 +1327,136 @@ function switchVersion(groupId, direction){
     method: 'PATCH',
     body: JSON.stringify({ versionNumber: group.current_version_number })
   }).catch(() => {});
+}
+
+// ---------- IDEA GENERATION (IDEATE PAGE) ----------
+// Skips entirely on pages without #ideateRoot. One question on screen at a
+// time — the "45 intents → AI writes the real question" mechanism lives
+// entirely on the backend; this page just renders whatever it's handed.
+
+const ideateState = {
+  blueprintId: null,
+  sessionId: null
+};
+
+async function initIdeatePage(){
+  const root = document.getElementById('ideateRoot');
+  if(!root) return;
+
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const blueprintId = params.get('blueprint');
+  if(!blueprintId){
+    window.location.href = 'dashboard.html';
+    return;
+  }
+  ideateState.blueprintId = blueprintId;
+
+  try {
+    const res = await authedFetch(`/blueprints/${blueprintId}/ideation/start`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      showIdeateError(body.error || 'Could not start idea generation.');
+      return;
+    }
+
+    ideateState.sessionId = body.sessionId;
+    renderIdeateQuestion(body);
+  } catch (err){
+    showIdeateError('Something went wrong starting this.');
+  }
+}
+
+function showIdeateError(message){
+  const questionEl = document.getElementById('ideateQuestion');
+  const optionsEl = document.getElementById('ideateOptions');
+  if(questionEl) questionEl.textContent = message;
+  if(optionsEl) optionsEl.innerHTML = '';
+}
+
+function renderIdeateQuestion(data){
+  const nicheEl = document.getElementById('ideateNiche');
+  const progressEl = document.getElementById('ideateProgress');
+  const fillEl = document.getElementById('ideateProgressFill');
+  const questionEl = document.getElementById('ideateQuestion');
+  const optionsEl = document.getElementById('ideateOptions');
+
+  if(nicheEl) nicheEl.textContent = data.nicheLabel;
+  if(progressEl) progressEl.textContent = `Question ${data.progress.current} of ${data.progress.total}`;
+  if(fillEl) fillEl.style.width = `${(data.progress.current - 1) / data.progress.total * 100}%`;
+  if(questionEl) questionEl.textContent = data.question.question;
+
+  if(optionsEl){
+    optionsEl.innerHTML = '';
+    (data.question.options || []).forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'ideate-option';
+      btn.textContent = opt;
+      btn.addEventListener('click', () => submitIdeateAnswer(opt));
+      optionsEl.appendChild(btn);
+    });
+  }
+}
+
+async function submitIdeateAnswer(selectedOption){
+  const optionsEl = document.getElementById('ideateOptions');
+  const questionEl = document.getElementById('ideateQuestion');
+
+  if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
+  if(questionEl) questionEl.textContent = 'Thinking…';
+
+  try {
+    const res = await authedFetch(`/ideation/${ideateState.sessionId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ selectedOption })
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      showIdeateError(body.error || 'Something went wrong submitting that.');
+      return;
+    }
+
+    if(body.status === 'completed'){
+      renderIdeateResult(body.result);
+    } else {
+      renderIdeateQuestion(body);
+    }
+  } catch (err){
+    showIdeateError('Something went wrong submitting that.');
+  }
+}
+
+function renderIdeateResult(result){
+  const cardEl = document.getElementById('ideateCard');
+  const fillEl = document.getElementById('ideateProgressFill');
+  const progressEl = document.getElementById('ideateProgress');
+  const resultEl = document.getElementById('ideateResult');
+
+  if(cardEl) cardEl.style.display = 'none';
+  if(fillEl) fillEl.style.width = '100%';
+  if(progressEl) progressEl.textContent = 'Done';
+
+  if(!resultEl) return;
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = `
+    <span class="idea-tag">Your first idea concept</span>
+    <h2>${escapeHtml(result.name)}</h2>
+    <p class="idea-oneliner">${escapeHtml(result.oneLiner)}</p>
+    <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(result.coreProblem)}</p></div>
+    <div class="idea-block"><div class="lbl">10x feature</div><p>${escapeHtml(result.tenXFeature)}</p></div>
+    <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(result.monetization)}</p></div>
+    <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
+  `;
 }
