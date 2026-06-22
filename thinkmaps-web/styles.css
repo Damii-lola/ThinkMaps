@@ -321,6 +321,15 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-connector.drag-preview{
   height:0; border-top:2px dashed var(--accent); background:none;
 }
+.canvas-connector.dotted{
+  height:0; background:none;
+  border-top:1.5px dotted var(--ink-muted);
+  opacity:0.6;
+}
+.canvas-connector.dotted.frozen{
+  border-top-color:var(--frozen);
+  opacity:0.4;
+}
 
 .canvas-group{
   position:absolute; width:220px;
