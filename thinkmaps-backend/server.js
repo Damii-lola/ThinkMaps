@@ -486,26 +486,25 @@ async function activateOption(optionId){
   const generated = await generateCandidateBatch(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // Layout: fan the candidates out to hug the source group's own top/middle/
-  // bottom edges, and only fall back to repositioning if a candidate would
-  // land on top of an unrelated, already-existing group elsewhere on the
-  // canvas — not on its own siblings, which are deliberately placed close by.
+  // Layout: radiate the candidates outward from the source like a spider
+  // web, instead of forcing them into a fixed cross shape. For each one,
+  // check which compass directions around the source actually have open
+  // canvas space (nothing else nearby in that direction), pick from those,
+  // and add a little random angle variation so two candidates never land
+  // at a perfectly mechanical 180° from each other. Only when truly no
+  // direction is free does it fall back to the old "further right" approach.
   const { data: parentGroup } = await supabase
     .from('groups')
     .select('position_x, position_y')
     .eq('id', version.group_id)
     .single();
 
-  // Anchored on the source card's own top edge — NOT the specific row that
-  // was clicked. The top/bottom candidates below are positioned relative to
-  // this card's actual height, so they hug its real top/bottom edges
-  // regardless of which option inside it triggered them.
-  const baseX = (parentGroup?.position_x || 0) + 320;
+  const CARD_WIDTH_ESTIMATE = 220;
+  const baseX = (parentGroup?.position_x || 0) + 320; // fallback anchor — "further right"
   const baseY = (parentGroup?.position_y || 0);
 
   // Need the source group's actual height (it varies with its option count)
-  // so the top/bottom candidates can anchor to its real top/bottom edges
-  // instead of floating a fixed distance away regardless of how tall it is.
+  // to know its true footprint when checking what's nearby.
   const { count: parentOptionCount } = await supabase
     .from('options')
     .select('*', { count: 'exact', head: true })
@@ -519,12 +518,6 @@ async function activateOption(optionId){
     .select('position_x, position_y')
     .eq('blueprint_id', blueprintId);
 
-  // Checked ONLY against groups that already existed before this activation.
-  // The 3 candidates in this batch are deliberately placed close to the
-  // source's own edges (that's the whole point of the hugging layout) — if
-  // they also collision-checked against EACH OTHER, that tight intentional
-  // spacing would constantly read as a false collision and get shoved out
-  // of position, which is exactly what was happening.
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
   const MIN_CLEAR_Y = 240; // a bit more than a typical card's height
@@ -540,41 +533,59 @@ async function activateOption(optionId){
     let y = candidateY;
     let attempts = 0;
 
-    // Step RIGHTWARD on a real collision, not downward — vertical position
-    // is what carries the "top/middle/bottom hugging" meaning, so that has
-    // to stay intact. Horizontal is free to give way instead.
+    // Step RIGHTWARD on a real collision, not downward.
     while(overlaps(x, y) && attempts < 40){
       attempts++;
       x += 280;
     }
 
+    occupied.push({ position_x: x, position_y: y }); // claim it so later siblings in this batch avoid it too
     return { x, y };
   }
 
+  const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
+  const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
+  const RADIATE_DISTANCE = 340;
+
+  // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
+  // coordinates). "Behind" the source — whichever side has nothing nearby —
+  // is exactly what this picks out.
+  const compassAngles = [-90, -45, 0, 45, 90, 135, 180, -135];
+
+  function isDirectionFree(angleDeg){
+    const rad = (angleDeg * Math.PI) / 180;
+    const testX = sourceCenterX + Math.cos(rad) * RADIATE_DISTANCE;
+    const testY = sourceCenterY + Math.sin(rad) * RADIATE_DISTANCE;
+    return !occupied.some(g => {
+      const dx = Math.abs((g.position_x || 0) - testX);
+      const dy = Math.abs((g.position_y || 0) - testY);
+      return dx < MIN_CLEAR_X && dy < MIN_CLEAR_Y;
+    });
+  }
+
+  const shuffledAngles = [...compassAngles].sort(() => Math.random() - 0.5);
+  const freeAngles = shuffledAngles.filter(isDirectionFree);
+
   const groupSpecs = (generated.groups || []).slice(0, 3);
   const newGroups = [];
-  const GAP = 60; // breathing room between the source card and its top/bottom candidates
 
   for(let i = 0; i < groupSpecs.length; i++){
     const spec = groupSpecs[i];
-    const isFirst = i === 0;
-    const isLast = i === groupSpecs.length - 1 && groupSpecs.length > 1;
+    const candidateOptionCount = (spec.options || []).length || 6;
+    const candidateHeight = HEADER_H + candidateOptionCount * ROW_H + FOOTER_H;
 
     let candidateX;
     let candidateY;
 
-    if(isFirst){
-      // TOP — directly above the source card, same column, not off to the side.
-      const candidateOptionCount = (spec.options || []).length || 6;
-      const candidateHeight = HEADER_H + candidateOptionCount * ROW_H + FOOTER_H;
-      candidateX = parentGroup?.position_x || 0;
-      candidateY = (parentGroup?.position_y || 0) - GAP - candidateHeight;
-    } else if(isLast){
-      // BOTTOM — directly below the source card, same column.
-      candidateX = parentGroup?.position_x || 0;
-      candidateY = (parentGroup?.position_y || 0) + parentCardHeight + GAP;
+    if(freeAngles.length > 0){
+      const angle = freeAngles.shift() + (Math.random() - 0.5) * 30; // ±15° of natural variation
+      const rad = (angle * Math.PI) / 180;
+      const centerX = sourceCenterX + Math.cos(rad) * RADIATE_DISTANCE;
+      const centerY = sourceCenterY + Math.sin(rad) * RADIATE_DISTANCE;
+      candidateX = centerX - CARD_WIDTH_ESTIMATE / 2;
+      candidateY = centerY - candidateHeight / 2;
     } else {
-      // MIDDLE — to the right, unchanged from before.
+      // No open direction left nearby — fall back to placing further right.
       candidateX = baseX;
       candidateY = baseY;
     }
