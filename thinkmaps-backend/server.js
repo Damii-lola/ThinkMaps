@@ -324,27 +324,21 @@ function pickNextBlocks(usedBlocks, count){
   return [...remaining, ...IDEATION_BLOCK_NAMES.slice(0, needed)];
 }
 
-// Walks the ancestor chain from an option back to root, collecting which
-// blocks have already been assigned to groups along the way.
-async function getUsedBlockNames(optionId){
-  const used = [];
-  let currentOptionId = optionId;
+// Every block already used ANYWHERE in this blueprint — not just along one
+// linear ancestor chain. "Personal Pull," "Personal Connection to the
+// Audience," and "Personal Read on the Pain" are siblings spawned from the
+// same activation; walking only direct ancestors never sees siblings, which
+// is exactly how a block like Personal Pull could get assigned a second
+// time deeper down a different branch. Checking the whole blueprint avoids
+// that regardless of which branch you're exploring.
+async function getUsedBlockNames(blueprintId){
+  const { data: groups } = await supabase
+    .from('groups')
+    .select('block_name')
+    .eq('blueprint_id', blueprintId)
+    .not('block_name', 'is', null);
 
-  while(currentOptionId){
-    const { data: option } = await supabase.from('options').select('group_version_id').eq('id', currentOptionId).single();
-    if(!option) break;
-
-    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
-    if(!version) break;
-
-    const { data: group } = await supabase.from('groups').select('block_name, spawned_from_option_id').eq('id', version.group_id).single();
-    if(!group) break;
-
-    if(group.block_name) used.push(group.block_name);
-    currentOptionId = group.spawned_from_option_id || null;
-  }
-
-  return used;
+  return (groups || []).map(g => g.block_name);
 }
 
 // Shared instruction injected into every option-generating prompt — keeps
@@ -595,10 +589,10 @@ async function activateOption(optionId){
   await supabase.from('options').update({ is_selected: true }).eq('id', optionId);
 
   const pathContext = await buildPathContextFromOption(optionId);
-  const usedBlocks = await getUsedBlockNames(optionId);
+  const blueprintId = await getBlueprintIdForGroup(version.group_id);
+  const usedBlocks = await getUsedBlockNames(blueprintId);
   const assignedBlocks = pickNextBlocks(usedBlocks, 3);
   const generated = await generateCandidateBatch(pathContext, assignedBlocks);
-  const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
   // Layout: radiate the candidates outward from the source like a spider
   // web, instead of forcing them into a fixed cross shape. For each one,
@@ -633,7 +627,8 @@ async function activateOption(optionId){
   const { data: existingGroups } = await supabase
     .from('groups')
     .select('position_x, position_y')
-    .eq('blueprint_id', blueprintId);
+    .eq('blueprint_id', blueprintId)
+    .neq('id', version.group_id); // exclude the SOURCE group itself — comparing it against its own position is what was breaking the up/down directions
 
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
@@ -662,7 +657,7 @@ async function activateOption(optionId){
 
   const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
   const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
-  const RADIATE_DISTANCE = 360;
+  const RADIATE_DISTANCE = 500; // comfortably more than MIN_CLEAR_Y, so a "free" direction has real breathing room against actual neighbors
   const ASSUMED_CARD_HEIGHT = 56 + 6 * 54 + FOOTER_H; // conservative worst-case (tall header + 6 tall rows) for the screening pass below
 
   // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
@@ -712,9 +707,11 @@ async function activateOption(optionId){
       candidateX = centerX - CARD_WIDTH_ESTIMATE / 2;
       candidateY = centerY - candidateHeight / 2;
     } else {
-      // No open direction left nearby — fall back to placing further right.
+      // No open direction left nearby — fall back to placing further right,
+      // with a little vertical jitter so even this degraded case doesn't
+      // produce a perfectly straight horizontal line.
       candidateX = baseX;
-      candidateY = baseY;
+      candidateY = baseY + (Math.random() - 0.5) * 300;
     }
 
     const { x, y } = resolveFreePosition(candidateX, candidateY);
@@ -742,7 +739,21 @@ async function activateOption(optionId){
 
     if(versionInsertError) throw versionInsertError;
 
-    const optionRows = sanitizeOptionLabels(spec.options).slice(0, 6).map((o, index) => ({
+    let sanitizedOptions = sanitizeOptionLabels(spec.options);
+
+    // Mistral occasionally whiffs on one slot in a 3-at-once batch — rather
+    // than leave that group permanently empty, try once more for just this
+    // specific block before giving up.
+    if(sanitizedOptions.length === 0){
+      try {
+        const retryGenerated = await generateGroupOptions(pathContext, { blockName: spec.blockName });
+        sanitizedOptions = sanitizeOptionLabels(retryGenerated.options);
+      } catch (retryErr) {
+        // still nothing — group will just render with zero options, recoverable via Retry on the canvas
+      }
+    }
+
+    const optionRows = sanitizedOptions.slice(0, 6).map((o, index) => ({
       group_version_id: newVersion.id,
       label: o.label,
       position: index
