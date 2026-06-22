@@ -553,26 +553,33 @@ async function activateOption(optionId){
 
   const groupSpecs = (generated.groups || []).slice(0, 3);
   const newGroups = [];
+  const GAP = 60; // breathing room between the source card and its top/bottom candidates
 
   for(let i = 0; i < groupSpecs.length; i++){
     const spec = groupSpecs[i];
-
-    const center = (groupSpecs.length - 1) / 2;
     const isFirst = i === 0;
     const isLast = i === groupSpecs.length - 1 && groupSpecs.length > 1;
 
-    let verticalOffset;
+    let candidateX;
+    let candidateY;
+
     if(isFirst){
-      verticalOffset = -40; // sits right around the top edge of the source node
+      // TOP — directly above the source card, same column, not off to the side.
+      const candidateOptionCount = (spec.options || []).length || 6;
+      const candidateHeight = HEADER_H + candidateOptionCount * ROW_H + FOOTER_H;
+      candidateX = parentGroup?.position_x || 0;
+      candidateY = (parentGroup?.position_y || 0) - GAP - candidateHeight;
     } else if(isLast){
-      verticalOffset = parentCardHeight - 80; // sits right around the bottom edge of the source node
+      // BOTTOM — directly below the source card, same column.
+      candidateX = parentGroup?.position_x || 0;
+      candidateY = (parentGroup?.position_y || 0) + parentCardHeight + GAP;
     } else {
-      verticalOffset = 0; // unchanged — this is the spot that was already fine
+      // MIDDLE — to the right, unchanged from before.
+      candidateX = baseX;
+      candidateY = baseY;
     }
 
-    const horizontalFan = Math.abs(i - center) * 55; // outer candidates sit a little further out — a fan, not a column
-
-    const { x, y } = resolveFreePosition(baseX + horizontalFan, baseY + verticalOffset);
+    const { x, y } = resolveFreePosition(candidateX, candidateY);
 
     const { data: newGroup, error: groupInsertError } = await supabase
       .from('groups')
