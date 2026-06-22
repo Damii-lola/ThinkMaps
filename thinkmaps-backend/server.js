@@ -596,7 +596,7 @@ async function activateOption(optionId){
     .select('*', { count: 'exact', head: true })
     .eq('group_version_id', version.id);
 
-  const HEADER_H = 40, ROW_H = 38, FOOTER_H = 40;
+  const HEADER_H = 56, ROW_H = 54, FOOTER_H = 40;
   const parentCardHeight = HEADER_H + (parentOptionCount || 6) * ROW_H + FOOTER_H;
 
   const { data: existingGroups } = await supabase
@@ -606,7 +606,7 @@ async function activateOption(optionId){
 
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
-  const MIN_CLEAR_Y = 300; // a bit more than a max-height (6-option) card
+  const MIN_CLEAR_Y = 460; // a bit more than a max-height (6-option) card, now taller due to text wrapping
 
   function resolveFreePosition(candidateX, candidateY){
     const overlaps = (x, y) => occupied.some(g => {
