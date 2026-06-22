@@ -402,7 +402,7 @@ async function generateCandidateBatch(pathContext, blockNames){
   const groups = blockNames.map((blockName, i) => ({
     groupLabel: blockName,
     blockName,
-    options: Array.isArray(rawGroups[i]?.options) ? rawGroups[i].options : []
+    options: sanitizeOptionLabels(rawGroups[i]?.options)
   }));
 
   return { groups };
@@ -545,6 +545,16 @@ function estimateOptionHeight(label){
 
 function estimateHeaderHeight(label){
   return (label || '').length > 22 ? 56 : 40;
+}
+
+// Filters out anything Mistral hands back without a real, non-empty label —
+// the options.label column is NOT NULL, so an entry missing it would crash
+// the insert. Better to silently drop that one slot than fail the whole
+// activation over a single malformed item.
+function sanitizeOptionLabels(rawOptions){
+  return (rawOptions || [])
+    .filter(o => o && typeof o.label === 'string' && o.label.trim().length > 0)
+    .map(o => ({ label: o.label.trim() }));
 }
 
 async function activateOption(optionId){
@@ -732,7 +742,7 @@ async function activateOption(optionId){
 
     if(versionInsertError) throw versionInsertError;
 
-    const optionRows = (spec.options || []).slice(0, 6).map((o, index) => ({
+    const optionRows = sanitizeOptionLabels(spec.options).slice(0, 6).map((o, index) => ({
       group_version_id: newVersion.id,
       label: o.label,
       position: index
@@ -786,7 +796,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
 
       if(rootVersionError) throw rootVersionError;
 
-      const optionRows = (generated.options || []).slice(0, 6).map((o, index) => ({
+      const optionRows = sanitizeOptionLabels(generated.options).slice(0, 6).map((o, index) => ({
         group_version_id: rootVersion.id,
         label: o.label,
         position: index
@@ -866,7 +876,7 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
 
     if(versionError) throw versionError;
 
-    const optionRows = (generated.options || []).slice(0, 6).map((o, index) => ({
+    const optionRows = sanitizeOptionLabels(generated.options).slice(0, 6).map((o, index) => ({
       group_version_id: newVersion.id,
       label: o.label,
       position: index
