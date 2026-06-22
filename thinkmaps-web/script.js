@@ -1213,6 +1213,7 @@ async function handleOptionActivate(optionId){
     if(!res) return;
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
+      console.error('[ThinkMaps] activate failed:', body.error, body.detail);
       alert(body.error || 'Could not activate that option.');
       return;
     }
