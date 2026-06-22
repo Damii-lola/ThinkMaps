@@ -498,6 +498,10 @@ async function activateOption(optionId){
     .eq('id', version.group_id)
     .single();
 
+  // Anchored on the source card's own top edge — NOT the specific row that
+  // was clicked. The top/bottom candidates below are positioned relative to
+  // this card's actual height, so they hug its real top/bottom edges
+  // regardless of which option inside it triggered them.
   const baseX = (parentGroup?.position_x || 0) + 320;
   const baseY = (parentGroup?.position_y || 0);
 
