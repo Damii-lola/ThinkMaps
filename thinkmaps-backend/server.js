@@ -526,9 +526,10 @@ async function activateOption(optionId){
 
     if(versionInsertError) throw versionInsertError;
 
-    const optionRows = (spec.options || []).slice(0, 6).map(o => ({
+    const optionRows = (spec.options || []).slice(0, 6).map((o, index) => ({
       group_version_id: newVersion.id,
-      label: o.label
+      label: o.label,
+      position: index
     }));
 
     const { data: insertedOptions, error: optionsInsertError } = await supabase
@@ -579,9 +580,10 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
 
       if(rootVersionError) throw rootVersionError;
 
-      const optionRows = (generated.options || []).slice(0, 6).map(o => ({
+      const optionRows = (generated.options || []).slice(0, 6).map((o, index) => ({
         group_version_id: rootVersion.id,
-        label: o.label
+        label: o.label,
+        position: index
       }));
 
       await supabase.from('options').insert(optionRows);
@@ -595,7 +597,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     const versionIds = (groupVersions || []).map(v => v.id);
 
     const { data: allOptions } = versionIds.length
-      ? await supabase.from('options').select('*').in('group_version_id', versionIds).order('created_at', { ascending: true })
+      ? await supabase.from('options').select('*').in('group_version_id', versionIds).order('position', { ascending: true })
       : { data: [] };
 
     res.status(200).json({
@@ -653,11 +655,10 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
 
     if(versionError) throw versionError;
 
-    const optionRows = (generated.options || []).slice(0, 6).map(o => ({
+    const optionRows = (generated.options || []).slice(0, 6).map((o, index) => ({
       group_version_id: newVersion.id,
       label: o.label,
-      is_recommended: !!o.recommended,
-      hint: o.hint || null
+      position: index
     }));
 
     const { data: insertedOptions, error: optionsError } = await supabase
@@ -710,9 +711,14 @@ app.post('/groups/:id/custom-option', requireAuth, async (req, res) => {
       .eq('version_number', group.current_version_number)
       .single();
 
+    const { count: existingCount } = await supabase
+      .from('options')
+      .select('*', { count: 'exact', head: true })
+      .eq('group_version_id', version.id);
+
     const { data: newOption, error: insertError } = await supabase
       .from('options')
-      .insert({ group_version_id: version.id, label: label.trim(), is_recommended: false })
+      .insert({ group_version_id: version.id, label: label.trim(), position: existingCount || 0 })
       .select()
       .single();
 
