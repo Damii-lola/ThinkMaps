@@ -486,12 +486,10 @@ async function activateOption(optionId){
   const generated = await generateCandidateBatch(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // Layout: fan the candidates out instead of stacking them in a dead-
-  // straight column, and check every existing group in the blueprint before
-  // committing a position — if something's already there, push down and
-  // over until a clear spot is found. Checked against the OTHER groups in
-  // this very batch too, not just what's already saved, so the 3 new
-  // candidates can't land on top of each other either.
+  // Layout: fan the candidates out to hug the source group's own top/middle/
+  // bottom edges, and only fall back to repositioning if a candidate would
+  // land on top of an unrelated, already-existing group elsewhere on the
+  // canvas — not on its own siblings, which are deliberately placed close by.
   const { data: parentGroup } = await supabase
     .from('groups')
     .select('position_x, position_y')
@@ -521,6 +519,12 @@ async function activateOption(optionId){
     .select('position_x, position_y')
     .eq('blueprint_id', blueprintId);
 
+  // Checked ONLY against groups that already existed before this activation.
+  // The 3 candidates in this batch are deliberately placed close to the
+  // source's own edges (that's the whole point of the hugging layout) — if
+  // they also collision-checked against EACH OTHER, that tight intentional
+  // spacing would constantly read as a false collision and get shoved out
+  // of position, which is exactly what was happening.
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
   const MIN_CLEAR_Y = 240; // a bit more than a typical card's height
@@ -536,13 +540,14 @@ async function activateOption(optionId){
     let y = candidateY;
     let attempts = 0;
 
+    // Step RIGHTWARD on a real collision, not downward — vertical position
+    // is what carries the "top/middle/bottom hugging" meaning, so that has
+    // to stay intact. Horizontal is free to give way instead.
     while(overlaps(x, y) && attempts < 40){
       attempts++;
-      y += 260; // keep stepping away from the cluster rather than oscillating
-      x += 30;
+      x += 280;
     }
 
-    occupied.push({ position_x: x, position_y: y });
     return { x, y };
   }
 
