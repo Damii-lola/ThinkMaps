@@ -236,7 +236,24 @@ async function callMistral(messages){
   const content = data.choices?.[0]?.message?.content;
   if(!content) throw new Error('Mistral returned no content.');
 
-  return JSON.parse(content);
+  // Defensive: models occasionally wrap "pure JSON" in ```json fences or add
+  // stray text around it even when told not to. Strip fences, then clip to
+  // the outermost {...} before parsing, instead of trusting it's clean.
+  let cleaned = content.trim();
+  if(cleaned.startsWith('```')){
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if(firstBrace !== -1 && lastBrace > firstBrace){
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseErr) {
+    throw new Error(`Mistral returned invalid JSON (${parseErr.message}). Raw: ${content.slice(0, 200)}`);
+  }
 }
 
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
@@ -368,12 +385,18 @@ async function generateCandidateBatch(pathContext, blockNames){
     { role: 'user', content: `Path so far: ${pathDescription}` }
   ]);
 
-  // The label is FORCED to match the assigned block — never trust the model
-  // to echo it back, that's the one thing here that must stay fixed.
-  const groups = (result.groups || []).map((g, i) => ({
-    groupLabel: blockNames[i] || 'Untitled',
-    blockName: blockNames[i] || null,
-    options: g.options || []
+  // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
+  // happens to contain — this guarantees exactly blockNames.length groups
+  // come back every time, regardless of the model returning too few, too
+  // many, a non-array, or anything else unexpected. Labels were already
+  // forced to match the assigned block; this closes the matching gap on
+  // the options side too.
+  const rawGroups = Array.isArray(result?.groups) ? result.groups : [];
+
+  const groups = blockNames.map((blockName, i) => ({
+    groupLabel: blockName,
+    blockName,
+    options: Array.isArray(rawGroups[i]?.options) ? rawGroups[i].options : []
   }));
 
   return { groups };
