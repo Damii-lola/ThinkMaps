@@ -553,7 +553,8 @@ const canvasState = {
   options: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
-  hasCenteredOnce: false
+  hasCenteredOnce: false,
+  focusedOptionId: null
 };
 
 let isPanning = false;
@@ -694,16 +695,47 @@ function renderCanvas(){
   applyWorldTransform();
 }
 
+// Walks the focused option's ancestor chain back to root, plus whatever it
+// itself just spawned — everything else gets dimmed. Returns an empty set
+// (meaning "dim nothing") when there's no focus yet.
+function computeFocusedGroupIds(focusedOptionId){
+  const focusedIds = new Set();
+  if(!focusedOptionId) return focusedIds;
+
+  let currentOptionId = focusedOptionId;
+  while(currentOptionId){
+    const option = canvasState.options.find(o => o.id === currentOptionId);
+    if(!option) break;
+
+    const version = canvasState.groupVersions.find(v => v.id === option.group_version_id);
+    if(!version) break;
+
+    const group = canvasState.groups.find(g => g.id === version.group_id);
+    if(!group) break;
+
+    focusedIds.add(group.id);
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  canvasState.groups.forEach(g => {
+    if(g.spawned_from_option_id === focusedOptionId) focusedIds.add(g.id);
+  });
+
+  return focusedIds;
+}
+
 function renderGroups(visible){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
   layer.innerHTML = '';
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
+  const focusedGroupIds = computeFocusedGroupIds(canvasState.focusedOptionId);
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''}`;
+    const isDimmed = focusedGroupIds.size > 0 && !focusedGroupIds.has(group.id);
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isDimmed ? 'dimmed' : ''}`.trim();
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
@@ -821,6 +853,9 @@ function renderLines(visible){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
+  const focusedGroupIds = computeFocusedGroupIds(canvasState.focusedOptionId);
+  const isGroupDimmed = (groupId) => focusedGroupIds.size > 0 && !focusedGroupIds.has(groupId);
+
   let dottedCount = 0;
   let solidCount = 0;
 
@@ -839,7 +874,8 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
 
-        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen });
+        const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
+        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen, dimmed });
         dottedCount++;
       });
     });
@@ -865,7 +901,8 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT + chosenIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
 
-        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen });
+        const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
+        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen, dimmed });
         solidCount++;
       });
     });
@@ -878,14 +915,14 @@ function renderLines(visible){
 // point at the target — plain CSS, same coordinate system the group cards
 // already use. Dotted lines use a border instead of a background fill so
 // they can actually render as dotted; solid ones are a filled bar.
-function drawConnectorLine(container, x1, y1, x2, y2, { dotted = false, frozen = false } = {}){
+function drawConnectorLine(container, x1, y1, x2, y2, { dotted = false, frozen = false, dimmed = false } = {}){
   const dx = x2 - x1;
   const dy = y2 - y1;
   const length = Math.sqrt(dx * dx + dy * dy);
   const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
 
   const line = document.createElement('div');
-  line.className = `canvas-connector ${dotted ? 'dotted' : ''} ${frozen ? 'frozen' : ''}`.trim();
+  line.className = `canvas-connector ${dotted ? 'dotted' : ''} ${frozen ? 'frozen' : ''} ${dimmed ? 'dimmed' : ''}`.trim();
   line.style.left = `${x1}px`;
   line.style.top = `${y1}px`;
   line.style.width = `${length}px`;
@@ -953,6 +990,12 @@ function setupCanvasInteractions(){
 
   window.addEventListener('mouseup', (e) => {
     if(isPanning){
+      const movedDist = Math.hypot(e.clientX - panStartPointer.x, e.clientY - panStartPointer.y);
+      if(movedDist < 6 && canvasState.focusedOptionId){
+        // A plain click on empty canvas, not a pan — clear the focus dim.
+        canvasState.focusedOptionId = null;
+        renderCanvas();
+      }
       isPanning = false;
       viewport.classList.remove('panning');
     }
@@ -1165,6 +1208,7 @@ async function handleOptionActivate(optionId){
       alert(body.error || 'Could not activate that option.');
       return;
     }
+    canvasState.focusedOptionId = optionId;
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
     alert('Something went wrong activating that option.');
