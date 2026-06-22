@@ -486,9 +486,12 @@ async function activateOption(optionId){
   const generated = await generateCandidateBatch(pathContext);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // Auto-fan-out placement to the right of the parent group, stacked
-  // vertically — there's no drag-to-position step anymore since the drag
-  // now picks an EXISTING option, it doesn't place anything new.
+  // Layout: fan the candidates out instead of stacking them in a dead-
+  // straight column, and check every existing group in the blueprint before
+  // committing a position — if something's already there, push down and
+  // over until a clear spot is found. Checked against the OTHER groups in
+  // this very batch too, not just what's already saved, so the 3 new
+  // candidates can't land on top of each other either.
   const { data: parentGroup } = await supabase
     .from('groups')
     .select('position_x, position_y')
@@ -498,19 +501,55 @@ async function activateOption(optionId){
   const baseX = (parentGroup?.position_x || 0) + 320;
   const baseY = (parentGroup?.position_y || 0);
 
+  const { data: existingGroups } = await supabase
+    .from('groups')
+    .select('position_x, position_y')
+    .eq('blueprint_id', blueprintId);
+
+  const occupied = [...(existingGroups || [])];
+  const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
+  const MIN_CLEAR_Y = 240; // a bit more than a typical card's height
+
+  function resolveFreePosition(candidateX, candidateY){
+    const overlaps = (x, y) => occupied.some(g => {
+      const dx = Math.abs((g.position_x || 0) - x);
+      const dy = Math.abs((g.position_y || 0) - y);
+      return dx < MIN_CLEAR_X && dy < MIN_CLEAR_Y;
+    });
+
+    let x = candidateX;
+    let y = candidateY;
+    let attempts = 0;
+
+    while(overlaps(x, y) && attempts < 40){
+      attempts++;
+      y += 260; // keep stepping away from the cluster rather than oscillating
+      x += 30;
+    }
+
+    occupied.push({ position_x: x, position_y: y });
+    return { x, y };
+  }
+
   const groupSpecs = (generated.groups || []).slice(0, 3);
   const newGroups = [];
 
   for(let i = 0; i < groupSpecs.length; i++){
     const spec = groupSpecs[i];
 
+    const center = (groupSpecs.length - 1) / 2;
+    const verticalOffset = (i - center) * 320;
+    const horizontalFan = Math.abs(i - center) * 55; // outer candidates sit a little further out — a fan, not a column
+
+    const { x, y } = resolveFreePosition(baseX + horizontalFan, baseY + verticalOffset);
+
     const { data: newGroup, error: groupInsertError } = await supabase
       .from('groups')
       .insert({
         blueprint_id: blueprintId,
         label: spec.groupLabel || 'Untitled Group',
-        position_x: baseX,
-        position_y: baseY + (i - (groupSpecs.length - 1) / 2) * 360,
+        position_x: x,
+        position_y: y,
         spawned_from_option_id: optionId
       })
       .select()
