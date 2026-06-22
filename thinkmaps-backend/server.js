@@ -501,6 +501,17 @@ async function activateOption(optionId){
   const baseX = (parentGroup?.position_x || 0) + 320;
   const baseY = (parentGroup?.position_y || 0);
 
+  // Need the source group's actual height (it varies with its option count)
+  // so the top/bottom candidates can anchor to its real top/bottom edges
+  // instead of floating a fixed distance away regardless of how tall it is.
+  const { count: parentOptionCount } = await supabase
+    .from('options')
+    .select('*', { count: 'exact', head: true })
+    .eq('group_version_id', version.id);
+
+  const HEADER_H = 40, ROW_H = 38, FOOTER_H = 40;
+  const parentCardHeight = HEADER_H + (parentOptionCount || 6) * ROW_H + FOOTER_H;
+
   const { data: existingGroups } = await supabase
     .from('groups')
     .select('position_x, position_y')
@@ -538,7 +549,18 @@ async function activateOption(optionId){
     const spec = groupSpecs[i];
 
     const center = (groupSpecs.length - 1) / 2;
-    const verticalOffset = (i - center) * 320;
+    const isFirst = i === 0;
+    const isLast = i === groupSpecs.length - 1 && groupSpecs.length > 1;
+
+    let verticalOffset;
+    if(isFirst){
+      verticalOffset = -40; // sits right around the top edge of the source node
+    } else if(isLast){
+      verticalOffset = parentCardHeight - 80; // sits right around the bottom edge of the source node
+    } else {
+      verticalOffset = 0; // unchanged — this is the spot that was already fine
+    }
+
     const horizontalFan = Math.abs(i - center) * 55; // outer candidates sit a little further out — a fan, not a column
 
     const { x, y } = resolveFreePosition(baseX + horizontalFan, baseY + verticalOffset);
