@@ -595,7 +595,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     const versionIds = (groupVersions || []).map(v => v.id);
 
     const { data: allOptions } = versionIds.length
-      ? await supabase.from('options').select('*').in('group_version_id', versionIds)
+      ? await supabase.from('options').select('*').in('group_version_id', versionIds).order('created_at', { ascending: true })
       : { data: [] };
 
     res.status(200).json({
