@@ -347,6 +347,12 @@ async function getUsedBlockNames(optionId){
   return used;
 }
 
+// Shared instruction injected into every option-generating prompt — keeps
+// each option short (fits a line or two) instead of one long run-on
+// sentence. A naturally big/complex idea gets split into several short
+// options rather than crammed into one.
+const SHORT_OPTION_RULE = ' Keep every option SHORT — about 4 to 7 words, never a full sentence. If one underlying idea is naturally big or has multiple parts, split it into two or three separate short options instead of writing one long one.';
+
 async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null } = {}){
   const pathDescription = pathContext.length === 0
     ? 'This is the very start of the blueprint — no path chosen yet.'
@@ -360,7 +366,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
     ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options, but stay within the same block.'
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -378,7 +384,7 @@ async function generateCandidateBatch(pathContext, blockNames){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have.${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -529,6 +535,18 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
 // sibling, generate a BATCH of new candidate groups via Mistral, and mark
 // this option as the active one. If it's already active, this is just a
 // "come back to this branch" — unfreeze its batch, no new AI call.
+// Estimates whether a label needs the taller (2-line) treatment or fits
+// compactly on one line — used everywhere a card's real height matters
+// (collision checks, fan-out placement). Only text that actually needs
+// the extra room gets it; short labels stay compact.
+function estimateOptionHeight(label){
+  return (label || '').length > 26 ? 54 : 38;
+}
+
+function estimateHeaderHeight(label){
+  return (label || '').length > 22 ? 56 : 40;
+}
+
 async function activateOption(optionId){
   const { data: option } = await supabase
     .from('options')
@@ -581,7 +599,7 @@ async function activateOption(optionId){
   // direction is free does it fall back to the old "further right" approach.
   const { data: parentGroup } = await supabase
     .from('groups')
-    .select('position_x, position_y')
+    .select('label, position_x, position_y')
     .eq('id', version.group_id)
     .single();
 
@@ -589,15 +607,18 @@ async function activateOption(optionId){
   const baseX = (parentGroup?.position_x || 0) + 320; // fallback anchor — "further right"
   const baseY = (parentGroup?.position_y || 0);
 
-  // Need the source group's actual height (it varies with its option count)
-  // to know its true footprint when checking what's nearby.
-  const { count: parentOptionCount } = await supabase
+  // Need the source group's REAL height — summed from its actual option
+  // labels, not a flat per-row number — so short lists/short labels don't
+  // get treated as if they were as tall as a full 6-long, all-wrapped card.
+  const { data: parentOptionsForHeight } = await supabase
     .from('options')
-    .select('*', { count: 'exact', head: true })
+    .select('label')
     .eq('group_version_id', version.id);
 
-  const HEADER_H = 56, ROW_H = 54, FOOTER_H = 40;
-  const parentCardHeight = HEADER_H + (parentOptionCount || 6) * ROW_H + FOOTER_H;
+  const FOOTER_H = 40;
+  const parentCardHeight = estimateHeaderHeight(parentGroup?.label)
+    + (parentOptionsForHeight || []).reduce((sum, o) => sum + estimateOptionHeight(o.label), 0)
+    + FOOTER_H;
 
   const { data: existingGroups } = await supabase
     .from('groups')
@@ -632,7 +653,7 @@ async function activateOption(optionId){
   const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
   const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
   const RADIATE_DISTANCE = 360;
-  const ASSUMED_CARD_HEIGHT = HEADER_H + 6 * ROW_H + FOOTER_H; // worst-case estimate for the screening pass below
+  const ASSUMED_CARD_HEIGHT = 56 + 6 * 54 + FOOTER_H; // conservative worst-case (tall header + 6 tall rows) for the screening pass below
 
   // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
   // coordinates). "Behind" the source — whichever side has nothing nearby —
@@ -663,8 +684,12 @@ async function activateOption(optionId){
 
   for(let i = 0; i < groupSpecs.length; i++){
     const spec = groupSpecs[i];
-    const candidateOptionCount = (spec.options || []).length || 6;
-    const candidateHeight = HEADER_H + candidateOptionCount * ROW_H + FOOTER_H;
+    // Real height from THIS candidate's actual label + actual option labels
+    // — a group with short options stays compact instead of always
+    // reserving room for the worst case.
+    const candidateHeight = estimateHeaderHeight(spec.groupLabel)
+      + (spec.options || []).reduce((sum, o) => sum + estimateOptionHeight(o.label), 0)
+      + FOOTER_H;
 
     let candidateX;
     let candidateY;
@@ -1121,7 +1146,7 @@ async function generateIdeationQuestion(nicheLabel, intent, answersSoFar){
     ? 'This is the first question — no prior answers yet.'
     : answersSoFar.map((a, i) => `Q${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
 
-  const systemPrompt = `You are writing ONE question for a guided idea-generation intake inside ThinkMaps, for someone exploring the "${nicheLabel}" niche. The question's INTENT is: ${intent} Write the actual question text — one sentence, specific to "${nicheLabel}", informed by what they've already answered — and exactly 6 short, concrete, mutually distinct answer options. The question must be answerable from the person's own knowledge, instinct, or preference — never something requiring market research they wouldn't already have. If the intent involves a guess about the market, make that explicit in the wording and include an honest "not sure — let the AI figure it out" as one of the 6 options. Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
+  const systemPrompt = `You are writing ONE question for a guided idea-generation intake inside ThinkMaps, for someone exploring the "${nicheLabel}" niche. The question's INTENT is: ${intent} Write the actual question text — one sentence, specific to "${nicheLabel}", informed by what they've already answered — and exactly 6 answer options. The question must be answerable from the person's own knowledge, instinct, or preference — never something requiring market research they wouldn't already have. If the intent involves a guess about the market, make that explicit in the wording and include an honest "not sure — let the AI figure it out" as one of the 6 options.${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
