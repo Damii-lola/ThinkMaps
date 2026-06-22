@@ -818,41 +818,74 @@ function renderLines(visible){
   layer.innerHTML = '';
 
   const visibleGroupIds = new Set(visible.map(v => v.group.id));
-  let drawnCount = 0;
+  const visibleByGroupId = {};
+  visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
+
+  let dottedCount = 0;
+  let solidCount = 0;
 
   visible.forEach(({ group, options }) => {
-    options.forEach((opt, optionIndex) => {
+    // TIER 1 — faint dotted line, group header to group header. Shows up
+    // the moment a batch of candidates appears, regardless of whether
+    // anything inside them has been chosen yet. Purely structural: "these
+    // groups exist because of this group."
+    options.forEach(opt => {
       const spawnedGroups = canvasState.groups.filter(g => g.spawned_from_option_id === opt.id);
-
       spawnedGroups.forEach(childGroup => {
         if(!visibleGroupIds.has(childGroup.id)) return;
 
         const x1 = (group.position_x || 0) + CARD_WIDTH;
-        const y1 = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const y1 = (group.position_y || 0) + HEADER_HEIGHT / 2;
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
 
-        drawConnectorLine(layer, x1, y1, x2, y2, childGroup.is_frozen);
-        drawnCount++;
+        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen });
+        dottedCount++;
+      });
+    });
+
+    // TIER 2 — solid straight line, node to node. Only drawn once a SPECIFIC
+    // option inside a spawned group has actually been chosen — terminates
+    // precisely at that option's own row, not just at the group's header.
+    options.forEach((opt, optionIndex) => {
+      if(!opt.is_selected) return;
+
+      const spawnedGroups = canvasState.groups.filter(g => g.spawned_from_option_id === opt.id);
+      spawnedGroups.forEach(childGroup => {
+        if(!visibleGroupIds.has(childGroup.id)) return;
+
+        const childEntry = visibleByGroupId[childGroup.id];
+        if(!childEntry) return;
+
+        const chosenIndex = childEntry.options.findIndex(o => o.is_selected);
+        if(chosenIndex === -1) return; // nothing picked inside yet — dotted line above already covers this
+
+        const x1 = (group.position_x || 0) + CARD_WIDTH;
+        const y1 = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const x2 = childGroup.position_x || 0;
+        const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT + chosenIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+
+        drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen });
+        solidCount++;
       });
     });
   });
 
-  console.log(`[ThinkMaps] renderLines drew ${drawnCount} line(s) as plain positioned divs`);
+  console.log(`[ThinkMaps] renderLines drew ${dottedCount} dotted (group-to-group) + ${solidCount} solid (node-to-node) line(s)`);
 }
 
-// A "line" here is just a 2px-tall div, stretched to the right length and
-// rotated to point at the target — plain CSS, same coordinate system the
-// group cards already use successfully. No separate layer, no sizing math,
-// nothing that depends on SVG-specific rendering behavior at all.
-function drawConnectorLine(container, x1, y1, x2, y2, isFrozen){
+// A "line" here is just a div, stretched to the right length and rotated to
+// point at the target — plain CSS, same coordinate system the group cards
+// already use. Dotted lines use a border instead of a background fill so
+// they can actually render as dotted; solid ones are a filled bar.
+function drawConnectorLine(container, x1, y1, x2, y2, { dotted = false, frozen = false } = {}){
   const dx = x2 - x1;
   const dy = y2 - y1;
   const length = Math.sqrt(dx * dx + dy * dy);
   const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
 
   const line = document.createElement('div');
-  line.className = `canvas-connector ${isFrozen ? 'frozen' : ''}`;
+  line.className = `canvas-connector ${dotted ? 'dotted' : ''} ${frozen ? 'frozen' : ''}`.trim();
   line.style.left = `${x1}px`;
   line.style.top = `${y1}px`;
   line.style.width = `${length}px`;
