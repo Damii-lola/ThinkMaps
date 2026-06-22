@@ -520,7 +520,7 @@ async function activateOption(optionId){
 
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
-  const MIN_CLEAR_Y = 240; // a bit more than a typical card's height
+  const MIN_CLEAR_Y = 300; // a bit more than a max-height (6-option) card
 
   function resolveFreePosition(candidateX, candidateY){
     const overlaps = (x, y) => occupied.some(g => {
@@ -545,7 +545,8 @@ async function activateOption(optionId){
 
   const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
   const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
-  const RADIATE_DISTANCE = 340;
+  const RADIATE_DISTANCE = 360;
+  const ASSUMED_CARD_HEIGHT = HEADER_H + 6 * ROW_H + FOOTER_H; // worst-case estimate for the screening pass below
 
   // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
   // coordinates). "Behind" the source — whichever side has nothing nearby —
@@ -554,8 +555,13 @@ async function activateOption(optionId){
 
   function isDirectionFree(angleDeg){
     const rad = (angleDeg * Math.PI) / 180;
-    const testX = sourceCenterX + Math.cos(rad) * RADIATE_DISTANCE;
-    const testY = sourceCenterY + Math.sin(rad) * RADIATE_DISTANCE;
+    const centerX = sourceCenterX + Math.cos(rad) * RADIATE_DISTANCE;
+    const centerY = sourceCenterY + Math.sin(rad) * RADIATE_DISTANCE;
+    // Convert to a top-left corner before comparing — g.position_x/y are
+    // ALSO top-left corners, so this has to match units or the clearance
+    // check is silently off by half a card's width/height.
+    const testX = centerX - CARD_WIDTH_ESTIMATE / 2;
+    const testY = centerY - ASSUMED_CARD_HEIGHT / 2;
     return !occupied.some(g => {
       const dx = Math.abs((g.position_x || 0) - testX);
       const dy = Math.abs((g.position_y || 0) - testY);
@@ -578,7 +584,7 @@ async function activateOption(optionId){
     let candidateY;
 
     if(freeAngles.length > 0){
-      const angle = freeAngles.shift() + (Math.random() - 0.5) * 30; // ±15° of natural variation
+      const angle = freeAngles.shift() + (Math.random() - 0.5) * 10; // ±5° of natural variation
       const rad = (angle * Math.PI) / 180;
       const centerX = sourceCenterX + Math.cos(rad) * RADIATE_DISTANCE;
       const centerY = sourceCenterY + Math.sin(rad) * RADIATE_DISTANCE;
