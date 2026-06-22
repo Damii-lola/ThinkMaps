@@ -281,17 +281,66 @@ async function buildPathContextFromOption(optionId){
 
 // Generates up to 6 options for a SINGLE group (used for the root "Niches"
 // group, and for Retry — both deal with one group's own option list).
-async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false } = {}){
+// The same 9 blocks driving the 45-question ideation intake. The canvas's
+// candidate-group generation is now tied to this exact list — a group's
+// label is ASSIGNED by the backend, never invented freely by the model.
+const IDEATION_BLOCK_NAMES = [
+  'Personal Pull',
+  'Personal Connection to the Audience',
+  'Personal Read on the Pain',
+  'Honest Awareness of What Exists',
+  'Cross-Pollination & Creative Inspiration',
+  'Your Vision for the Experience',
+  'Context, Distribution & Values',
+  'Personal Stakes & Long-Term Vision',
+  'What You Actually Know About Yourself'
+];
+
+// Picks the next N blocks not yet used along THIS path — so a single
+// exploration marches through all 9 without repeats. If a path goes deep
+// enough to exhaust all 9, it cycles back from the start rather than
+// breaking.
+function pickNextBlocks(usedBlocks, count){
+  const remaining = IDEATION_BLOCK_NAMES.filter(b => !usedBlocks.includes(b));
+  if(remaining.length >= count) return remaining.slice(0, count);
+  const needed = count - remaining.length;
+  return [...remaining, ...IDEATION_BLOCK_NAMES.slice(0, needed)];
+}
+
+// Walks the ancestor chain from an option back to root, collecting which
+// blocks have already been assigned to groups along the way.
+async function getUsedBlockNames(optionId){
+  const used = [];
+  let currentOptionId = optionId;
+
+  while(currentOptionId){
+    const { data: option } = await supabase.from('options').select('group_version_id').eq('id', currentOptionId).single();
+    if(!option) break;
+
+    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+    if(!version) break;
+
+    const { data: group } = await supabase.from('groups').select('block_name, spawned_from_option_id').eq('id', version.group_id).single();
+    if(!group) break;
+
+    if(group.block_name) used.push(group.block_name);
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  return used;
+}
+
+async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null } = {}){
   const pathDescription = pathContext.length === 0
     ? 'This is the very start of the blueprint — no path chosen yet.'
     : pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
 
   const instructions = isRoot
     ? 'Generate the starting "Niches" group for a new app-idea Blueprint Graph: up to 6 high-quality, distinct app niches (e.g. Fitness, Finance & Commerce, Productivity, Entertainment).'
-    : 'Based on the path so far, decide the next logical group (e.g. "Sub-Niches", "Audience", "Monetization Preferences", "Genres", or another fitting label) and generate up to 6 specific, concrete options for it.';
+    : `Based on the path so far, generate up to 6 specific, concrete options for the "${blockName}" block — every option must fit squarely within that block's territory and must be something the person could answer from their own knowledge, instinct, or preference, never something requiring market research they don't have.`;
 
   const retryNote = isRetry
-    ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options.'
+    ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options, but stay within the same block.'
     : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
@@ -302,20 +351,32 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
   ]);
 }
 
-// Generates a BATCH of several candidate groups at once — this is what
-// actually happens when an option gets activated (clicked, for root; or
-// dragged-into, for everything else). The doc's example is exactly this:
-// clicking "Fitness" surfaces Sub-Niches, Audience, and Monetization all
-// at once, and the user drags a line to pick which one to continue into.
-async function generateCandidateBatch(pathContext){
+// Generates a BATCH of candidate groups — one per ASSIGNED block, not
+// freely invented categories. This is what happens when an option gets
+// activated (clicked, for root; dragged-into, for everything else): each
+// of the (up to 3) new groups corresponds to a specific block from the
+// same 9 driving the ideation intake, so canvas exploration and the
+// 45-question flow are two expressions of the same underlying structure.
+async function generateCandidateBatch(pathContext, blockNames){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
+  const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate 3 DIFFERENT, complementary next-step groups (e.g. one might be "Sub-Niches", another "Audience", another "Monetization Preferences" — pick whichever 3 distinct categories genuinely make sense given where the path currently is). Each group needs up to 6 specific, concrete options. Respond ONLY with valid JSON in this exact shape, nothing else: {"groups": [{"groupLabel": string, "options": [{"label": string}]}, {"groupLabel": string, "options": [{"label": string}]}, {"groupLabel": string, "options": [{"label": string}]}]}`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
-  return callMistral([
+  const result = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Path so far: ${pathDescription}` }
   ]);
+
+  // The label is FORCED to match the assigned block — never trust the model
+  // to echo it back, that's the one thing here that must stay fixed.
+  const groups = (result.groups || []).map((g, i) => ({
+    groupLabel: blockNames[i] || 'Untitled',
+    blockName: blockNames[i] || null,
+    options: g.options || []
+  }));
+
+  return { groups };
 }
 
 // AI-weighted pick for the Random button — asks Mistral which existing
@@ -483,7 +544,9 @@ async function activateOption(optionId){
   await supabase.from('options').update({ is_selected: true }).eq('id', optionId);
 
   const pathContext = await buildPathContextFromOption(optionId);
-  const generated = await generateCandidateBatch(pathContext);
+  const usedBlocks = await getUsedBlockNames(optionId);
+  const assignedBlocks = pickNextBlocks(usedBlocks, 3);
+  const generated = await generateCandidateBatch(pathContext, assignedBlocks);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
   // Layout: radiate the candidates outward from the source like a spider
@@ -603,6 +666,7 @@ async function activateOption(optionId){
       .insert({
         blueprint_id: blueprintId,
         label: spec.groupLabel || 'Untitled Group',
+        block_name: spec.blockName || null,
         position_x: x,
         position_y: y,
         spawned_from_option_id: optionId
@@ -726,11 +790,16 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id').eq('id', req.params.id).single();
+    const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id, block_name').eq('id', req.params.id).single();
+    const isRoot = !groupRow?.spawned_from_option_id;
     const pathContext = groupRow?.spawned_from_option_id
       ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
       : [];
-    const generated = await generateGroupOptions(pathContext, { isRetry: true });
+    const generated = await generateGroupOptions(pathContext, {
+      isRetry: true,
+      isRoot,
+      blockName: groupRow?.block_name || null
+    });
 
     const { data: existingVersions } = await supabase
       .from('group_versions')
