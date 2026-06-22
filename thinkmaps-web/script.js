@@ -540,11 +540,43 @@ async function createBlueprint(){
 // layout reflows.
 
 const CARD_WIDTH = 220;
-const HEADER_HEIGHT = 56;
-const OPTION_ROW_HEIGHT = 54;
 // Connector lines are plain rotated divs (see drawConnectorLine), sharing
 // the exact same raw world-unit coordinate space as the group cards —
 // no separate layer with its own sizing to keep in sync.
+
+// Mirrors the exact same heuristic used on the backend (estimateOptionHeight/
+// estimateHeaderHeight in server.js) — a row/header only "scales" up when its
+// own actual text needs the extra room, not by default for every card.
+function estimateOptionHeight(label){
+  return (label || '').length > 26 ? 54 : 38;
+}
+
+function estimateHeaderHeight(label){
+  return (label || '').length > 22 ? 56 : 40;
+}
+
+// The vertical center of option row `index` within a group, in world
+// coordinates — sums each preceding row's REAL estimated height instead of
+// assuming every row is the same fixed size.
+function computeRowCenterY(group, options, index){
+  let y = estimateHeaderHeight(group.label);
+  for(let i = 0; i < index; i++){
+    y += estimateOptionHeight(options[i]?.label);
+  }
+  y += estimateOptionHeight(options[index]?.label) / 2;
+  return (group.position_y || 0) + y;
+}
+
+// Reconstructs a group's CURRENT active-version options from canvasState —
+// used wherever a row's position is needed but only a groupId is on hand.
+function getGroupOptionsArray(groupId){
+  const group = canvasState.groups.find(g => g.id === groupId);
+  if(!group) return [];
+  const versions = canvasState.groupVersions.filter(v => v.group_id === groupId);
+  const activeVersion = versions.find(v => v.version_number === group.current_version_number) || versions[versions.length - 1];
+  if(!activeVersion) return [];
+  return canvasState.options.filter(o => o.group_version_id === activeVersion.id);
+}
 
 const canvasState = {
   blueprintId: null,
@@ -757,6 +789,16 @@ function renderGroups(visible){
         <button data-action="version-next" ${group.current_version_number >= versions[versions.length - 1].version_number ? 'disabled' : ''}>›</button>
       </div>` : '';
 
+    const removeBtnHtml = !isRootGroup && !canvasState.isLocked
+      ? `<button class="remove-btn" data-action="remove-group" title="Remove this group">×</button>`
+      : '';
+
+    // Same controls markup rendered twice — once for real (right side), once
+    // invisible (left side) purely as a width-matching spacer. That's what
+    // makes the title genuinely centered no matter what's actually in the
+    // controls (just a remove button, a version switcher, both, or neither).
+    const controlsHtml = `${versionNav}${removeBtnHtml}`;
+
     // Three states per option:
     //  - selected (already activated)  → its dot is the next drag SOURCE
     //  - root + not yet activated      → plain click activates it
@@ -773,9 +815,9 @@ function renderGroups(visible){
 
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
+        <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
         <span>${escapeHtml(group.label)}</span>
-        ${versionNav}
-        ${!isRootGroup && !canvasState.isLocked ? `<button class="remove-btn" data-action="remove-group" title="Remove this group">×</button>` : ''}
+        <div class="header-controls">${controlsHtml}</div>
       </div>
       <div class="canvas-group-options">${optionsHtml}</div>
       <div class="canvas-group-footer">
@@ -819,14 +861,14 @@ function wireGroupEvents(){
       // a drop target for someone else's drag (see endLineDrag).
     });
 
-    const removeBtn = card.querySelector('[data-action="remove-group"]');
+    const removeBtn = card.querySelector('.header-controls [data-action="remove-group"]');
     if(removeBtn) removeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       handleRemoveGroup(groupId);
     });
 
-    const prevBtn = card.querySelector('[data-action="version-prev"]');
-    const nextBtn = card.querySelector('[data-action="version-next"]');
+    const prevBtn = card.querySelector('.header-controls [data-action="version-prev"]');
+    const nextBtn = card.querySelector('.header-controls [data-action="version-next"]');
     if(prevBtn) prevBtn.addEventListener('click', () => switchVersion(groupId, -1));
     if(nextBtn) nextBtn.addEventListener('click', () => switchVersion(groupId, 1));
 
@@ -878,9 +920,9 @@ function renderLines(visible){
         if(!visibleGroupIds.has(childGroup.id)) return;
 
         const x1 = (group.position_x || 0) + CARD_WIDTH;
-        const y1 = (group.position_y || 0) + HEADER_HEIGHT / 2;
+        const y1 = (group.position_y || 0) + estimateHeaderHeight(group.label) / 2;
         const x2 = childGroup.position_x || 0;
-        const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT / 2;
+        const y2 = (childGroup.position_y || 0) + estimateHeaderHeight(childGroup.label) / 2;
 
         const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen, dimmed });
@@ -905,9 +947,9 @@ function renderLines(visible){
         if(chosenIndex === -1) return; // nothing picked inside yet — dotted line above already covers this
 
         const x1 = (group.position_x || 0) + CARD_WIDTH;
-        const y1 = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const y1 = computeRowCenterY(group, options, optionIndex);
         const x2 = childGroup.position_x || 0;
-        const y2 = (childGroup.position_y || 0) + HEADER_HEIGHT + chosenIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+        const y2 = computeRowCenterY(childGroup, childEntry.options, chosenIndex);
 
         const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen, dimmed });
@@ -1065,8 +1107,9 @@ function startLineDrag(e, optionId, groupId, optionIndex){
   const group = canvasState.groups.find(g => g.id === groupId);
   if(!group) return;
 
+  const groupOptions = getGroupOptionsArray(groupId);
   const startX = (group.position_x || 0) + CARD_WIDTH;
-  const startY = (group.position_y || 0) + HEADER_HEIGHT + optionIndex * OPTION_ROW_HEIGHT + OPTION_ROW_HEIGHT / 2;
+  const startY = computeRowCenterY(group, groupOptions, optionIndex);
 
   lineDragState = {
     optionId,
