@@ -217,6 +217,35 @@ app.post('/blueprints', requireAuth, async (req, res) => {
   }
 });
 
+// Renames a blueprint. Allowed even when the blueprint is locked on the
+// free tier — same precedent as dragging/repositioning a group: relabeling
+// what's already there isn't "editing the idea," so there's no lock check
+// here, just ownership.
+app.patch('/blueprints/:id', requireAuth, async (req, res) => {
+  try {
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if (!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { title } = req.body;
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Title is required.' });
+    }
+
+    const { data: updated, error } = await supabase
+      .from('blueprints')
+      .update({ title: title.trim() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(200).json({ blueprint: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not rename blueprint.', detail: err.message });
+  }
+});
+
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
