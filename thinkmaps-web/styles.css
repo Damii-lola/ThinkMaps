@@ -401,6 +401,19 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.frozen:hover .canvas-group-header{ color:var(--ink); background:var(--surface-2); }
 .canvas-group.frozen:hover .canvas-option{ opacity:1; }
 
+/* Unpicked — nothing chosen inside this group yet (and it isn't root,
+   isn't frozen). Deliberately light: opacity only, no grayscale, no
+   pointer-events change — every option in here is always exactly as
+   readable and clickable as one in an active group. This is a visual hint
+   about what's currently live, not a lock. Hover brings it to full
+   strength as a small extra touch, but reading/clicking never required it. */
+.canvas-group.unpicked{ opacity:0.68; }
+.canvas-group.unpicked:hover{
+  opacity:1;
+  box-shadow:0 4px 14px rgba(0,0,0,0.10);
+  z-index:5;
+}
+
 /* "on-path" — this group currently holds the option that was picked to
    continue onward; the orange outline marks the live trail through the
    graph at a glance. Never applied together with .frozen (see script.js —
