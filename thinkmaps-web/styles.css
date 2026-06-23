@@ -79,6 +79,7 @@ nav.bar{
 .btn-primary:hover{ background:var(--accent-deep); }
 .btn-ghost{ background:transparent; color:var(--ink); border-color:var(--line); }
 .btn-ghost:hover{ border-color:var(--ink-muted); }
+.btn:disabled{ opacity:.5; cursor:not-allowed; transform:none !important; }
 @media (prefers-reduced-motion:no-preference){ .btn:hover{ transform:translateY(-1px); } }
 
 /* ---------- HERO ---------- */
@@ -262,6 +263,31 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   font-size:13px; border-radius:8px; padding:10px 14px; margin-bottom:20px; text-align:center;
 }
 
+/* ---------- MODAL (shared) ---------- */
+/* Used by the "name your blueprint" dialog. Generic enough to reuse for
+   any future confirm/input dialog without writing new modal CSS. */
+.modal-overlay{
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  background:rgba(31,27,22,0.45);
+  display:flex; align-items:center; justify-content:center;
+  z-index:200; padding:20px;
+}
+.modal-card{
+  background:var(--surface); border:1px solid var(--line); border-radius:16px;
+  padding:28px; max-width:420px; width:100%;
+  box-shadow:0 8px 30px rgba(0,0,0,0.12);
+}
+.modal-card h3{ font-size:19px; margin-bottom:8px; }
+.modal-card .muted{ font-size:13.5px; margin-bottom:18px; }
+.modal-card input{
+  width:100%; font-family:var(--font-body); font-size:15px; color:var(--ink);
+  background:var(--bg); border:1px solid var(--line); border-radius:8px;
+  padding:11px 13px; outline:none; margin-bottom:6px;
+  transition:border-color .15s ease;
+}
+.modal-card input:focus{ border-color:var(--accent); }
+.modal-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+
 /* ---------- DASHBOARD ---------- */
 .dashboard-main{ padding:60px 0 100px; }
 .dashboard-main h1{ font-size:clamp(26px,3.4vw,34px); margin-bottom:28px; }
@@ -312,7 +338,16 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-viewport.panning{ cursor:grabbing; }
 .canvas-viewport.busy{ pointer-events:none; }
 
-.canvas-world{ position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform; }
+/* Fullscreen API targets this element directly (not the whole page) — it
+   needs to fill the screen and keep its own background/pattern once it's
+   the fullscreen root, since none of its normal page chrome comes with it. */
+.canvas-viewport:fullscreen{ width:100vw; height:100vh; }
+.canvas-viewport:-webkit-full-screen{ width:100vw; height:100vh; }
+
+.canvas-world{
+  position:absolute; top:0; left:0; transform-origin:0 0; will-change:transform;
+  backface-visibility:hidden;
+}
 .canvas-connector{
   position:absolute; height:2px; background:var(--accent);
   transform-origin:0 50%; pointer-events:none;
@@ -337,9 +372,35 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   background:var(--surface); border:1px solid var(--line); border-radius:12px;
   box-shadow:0 2px 6px rgba(0,0,0,0.05);
   user-select:none;
+  transition:opacity .15s ease, background-color .15s ease, border-color .15s ease, box-shadow .15s ease, filter .15s ease;
 }
+
+/* Frozen — grayed out by definition (no longer the active branch). Stays
+   grayed out PERMANENTLY regardless of any render/animation timing, since
+   it's driven purely by group.is_frozen on every render, never a transient
+   class. The ONLY thing that lifts the gray is the mouse actually hovering
+   the card — a deliberate "peek at a frozen branch without un-freezing it"
+   affordance, not a bug. Moving the mouse away always re-grays it; there is
+   no other state in between. */
 .canvas-group.frozen{ background:var(--frozen-bg); border-color:var(--frozen); opacity:0.75; }
-.canvas-group.dimmed{ filter:grayscale(0.7); opacity:0.35; transition:opacity .15s ease, filter .15s ease; }
+.canvas-group.frozen:hover{
+  opacity:1; background:var(--surface); border-color:var(--line);
+  box-shadow:0 4px 14px rgba(0,0,0,0.10);
+  z-index:5;
+}
+.canvas-group.frozen .canvas-group-header{ color:var(--frozen); background:transparent; }
+.canvas-group.frozen:hover .canvas-group-header{ color:var(--ink); background:var(--surface-2); }
+.canvas-group.frozen:hover .canvas-option{ opacity:1; }
+
+.canvas-group.dimmed{ filter:grayscale(0.7); opacity:0.35; }
+
+/* "on-path" — this group currently holds the option that was picked to
+   continue onward; the orange outline marks the live trail through the
+   graph at a glance. Never applied together with .frozen (see script.js —
+   a frozen group's selected option is a STALE choice from before an
+   ancestor branch got deprioritized, not the current path), so there's no
+   conflicting style to resolve between the two. */
+.canvas-group.on-path{ box-shadow:0 0 0 2px var(--accent); }
 
 .canvas-group-header{
   display:grid; grid-template-columns:auto 1fr auto; align-items:flex-start;
@@ -359,7 +420,6 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   line-height:1; cursor:pointer; padding:2px 4px; border-radius:4px; flex-shrink:0;
 }
 .remove-btn:hover{ color:#C24A3D; background:rgba(194,74,61,0.1); }
-.canvas-group.frozen .canvas-group-header{ color:var(--frozen); background:transparent; }
 .canvas-group-header:active{ cursor:grabbing; }
 
 .version-nav{ display:flex; align-items:center; gap:4px; font-family:var(--font-mono); font-size:11px; color:var(--ink-muted); flex-shrink:0; }
@@ -382,7 +442,7 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-option .opt-dot{ width:12px; height:12px; border-radius:50%; background:var(--line); flex-shrink:0; }
 .canvas-option .opt-label{
   flex:1; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
-  overflow:hidden; line-height:1.3;
+  overflow:hidden; line-height:1.3; text-align:center;
 }
 
 /* Live feedback while dragging a connecting line */
