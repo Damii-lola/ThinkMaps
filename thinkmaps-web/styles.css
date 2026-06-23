@@ -401,6 +401,22 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.frozen:hover .canvas-group-header{ color:var(--ink); background:var(--surface-2); }
 .canvas-group.frozen:hover .canvas-option{ opacity:1; }
 
+/* Batch-unpicked — a brother group spawned in the SAME batch (same
+   activation) has a pick inside it, and this one doesn't. Strong fade,
+   on purpose: background swap (not opacity alone — that measured an
+   imperceptible luminance gap of 3.6/255 the one time it was tried)
+   PLUS a real opacity drop on top, since this needs to read as clearly
+   "you moved on from this one" rather than a light hint. Hover lifts it
+   to full clarity to peek without losing the cue once the mouse leaves. */
+.canvas-group.batch-unpicked{ background:var(--frozen-bg); opacity:0.7; }
+.canvas-group.batch-unpicked .canvas-group-header{ background:#DCD7C8; color:var(--ink-muted); }
+.canvas-group.batch-unpicked:hover{
+  background:var(--surface); opacity:1;
+  box-shadow:0 4px 14px rgba(0,0,0,0.10);
+  z-index:5;
+}
+.canvas-group.batch-unpicked:hover .canvas-group-header{ background:var(--surface-2); color:var(--ink); }
+
 /* "on-path" — this group currently holds the option that was picked to
    continue onward; the orange outline marks the live trail through the
    graph at a glance. Never applied together with .frozen (see script.js —
