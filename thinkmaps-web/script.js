@@ -804,35 +804,18 @@ function renderCanvas(){
   applyWorldTransform();
 }
 
-// Single source of truth for a group's visual "liveness" — used by both
-// renderGroups (for the card itself) and renderLines (for the connectors
-// leading to it), so the two can never disagree with each other.
-//
-// A group is ACTIVE (full color, gets the orange on-path outline) only if
-// it currently has a selected option inside it AND it isn't frozen — a
-// frozen group's selected option is a stale choice from before an
-// ancestor branch deprioritized the whole thing, not a live path.
-//
-// Everything else is MUTED (grayed by default, lifted only by :hover in
-// CSS) — including freshly-spawned sibling candidate groups that haven't
-// had anything picked inside them yet. The previous version of this used
-// a transient "focusedOptionId" that only lived in JS memory: it reset to
-// nothing on every reload (so muting silently vanished), and it actively
-// exempted an entire just-spawned batch from being muted just because it
-// was the most recent thing clicked — which is backwards from what should
-// read as "live path" versus "still waiting to be chosen." This version
-// is computed fresh from is_frozen/is_selected on every render, so it's
-// never stale and never depends on memory that can be lost.
-//
-// The ROOT group is the one deliberate exception: it's the starting point
-// of the whole blueprint and must stay fully readable even before
-// anything inside it has been picked yet.
+// Whether a group currently has a selected option inside it AND isn't
+// frozen — drives the orange on-path outline in renderGroups. (Graying out
+// every group that ISN'T this was tried and reverted: it meant freshly
+// spawned candidate groups — the exact ones you need to read in order to
+// pick the next step — defaulted to grayed-out too, making the canvas
+// impossible to actually use. The only thing that should default to gray
+// is a group that's genuinely frozen — i.e. explicitly deprioritized
+// because a sibling got chosen instead — which the .frozen CSS class
+// already handles on its own, hover-lift included.)
 function computeGroupVisualState(group, options){
-  const isRootGroup = !group.spawned_from_option_id;
-  const hasSelectedOption = options.some(o => o.is_selected);
-  const isActive = hasSelectedOption && !group.is_frozen;
-  const isMuted = !isRootGroup && !group.is_frozen && !isActive;
-  return { isActive, isMuted };
+  const isActive = options.some(o => o.is_selected) && !group.is_frozen;
+  return { isActive };
 }
 
 function renderGroups(visible){
@@ -844,8 +827,8 @@ function renderGroups(visible){
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    const { isActive, isMuted } = computeGroupVisualState(group, options);
-    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isMuted ? 'muted' : ''} ${isActive ? 'on-path' : ''}`.trim();
+    const { isActive } = computeGroupVisualState(group, options);
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isActive ? 'on-path' : ''}`.trim();
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
@@ -886,7 +869,7 @@ function renderGroups(visible){
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
         <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
-        <span>${escapeHtml(group.label)}</span>
+        <div class="canvas-group-title"><span>${escapeHtml(group.label)}</span></div>
         <div class="header-controls">${controlsHtml}</div>
       </div>
       <div class="canvas-group-options">${optionsHtml}</div>
@@ -973,16 +956,6 @@ function renderLines(visible){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
-  // Same liveness rule as the cards themselves (computeGroupVisualState),
-  // computed once per group up front so both line tiers below stay in
-  // sync with what renderGroups just drew — no separate, possibly-stale
-  // notion of "dimmed" living only in this function.
-  const mutedByGroupId = {};
-  visible.forEach(({ group, options }) => {
-    mutedByGroupId[group.id] = computeGroupVisualState(group, options).isMuted;
-  });
-  const isGroupMuted = (groupId) => mutedByGroupId[groupId] || false;
-
   let dottedCount = 0;
   let solidCount = 0;
 
@@ -1001,7 +974,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + estimateHeaderHeight(childGroup.label) / 2;
 
-        const dimmed = isGroupMuted(group.id) || isGroupMuted(childGroup.id);
+        const dimmed = group.is_frozen || childGroup.is_frozen;
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen, dimmed });
         dottedCount++;
       });
@@ -1028,7 +1001,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = computeRowCenterY(childGroup, childEntry.options, chosenIndex);
 
-        const dimmed = isGroupMuted(group.id) || isGroupMuted(childGroup.id);
+        const dimmed = group.is_frozen || childGroup.is_frozen;
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen, dimmed });
         solidCount++;
       });
