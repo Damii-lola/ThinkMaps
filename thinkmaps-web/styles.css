@@ -402,17 +402,27 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.frozen:hover .canvas-option{ opacity:1; }
 
 /* Unpicked — nothing chosen inside this group yet (and it isn't root,
-   isn't frozen). Deliberately light: opacity only, no grayscale, no
-   pointer-events change — every option in here is always exactly as
-   readable and clickable as one in an active group. This is a visual hint
-   about what's currently live, not a lock. Hover brings it to full
-   strength as a small extra touch, but reading/clicking never required it. */
-.canvas-group.unpicked{ opacity:0.68; }
+   isn't frozen). REWRITTEN: opacity alone (0.68) was nearly invisible
+   here, because the card background (#FAF9F5) and the page background
+   (#F0EEE6) are both already near-white — alpha-blending one toward the
+   other barely moves either color. This version shifts the actual
+   background to the same darker tan already used for frozen cards, which
+   is a real color change, not a blend toward an already-similar
+   background — it can't visually disappear the way opacity did. Border
+   and text stay at their normal colors (unlike .frozen, which also dims
+   those) — the distinction on purpose: frozen means "set aside," unpicked
+   means "just hasn't been chosen yet," and they shouldn't look identical.
+   Never touches pointer-events or opacity-based readability — every
+   option here is always exactly as clickable and legible as an active
+   group's, faded background or not. */
+.canvas-group.unpicked{ background:var(--frozen-bg); }
+.canvas-group.unpicked .canvas-group-header{ background:#DCD7C8; }
 .canvas-group.unpicked:hover{
-  opacity:1;
+  background:var(--surface);
   box-shadow:0 4px 14px rgba(0,0,0,0.10);
   z-index:5;
 }
+.canvas-group.unpicked:hover .canvas-group-header{ background:var(--surface-2); }
 
 /* "on-path" — this group currently holds the option that was picked to
    continue onward; the orange outline marks the live trail through the
