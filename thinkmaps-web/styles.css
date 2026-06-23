@@ -401,19 +401,6 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.frozen:hover .canvas-group-header{ color:var(--ink); background:var(--surface-2); }
 .canvas-group.frozen:hover .canvas-option{ opacity:1; }
 
-/* Muted — not frozen, just not currently on the active path (no option
-   picked inside it yet, and it isn't the root). Same hover-to-peek
-   affordance as frozen: full clarity while the mouse is actually over the
-   card, back to muted the instant it leaves. This is what makes freshly
-   spawned sibling candidate groups read as "waiting to be chosen" instead
-   of looking identical to the one group that's actually live. */
-.canvas-group.muted{ filter:grayscale(0.6); opacity:0.4; }
-.canvas-group.muted:hover{
-  filter:none; opacity:1;
-  box-shadow:0 4px 14px rgba(0,0,0,0.10);
-  z-index:5;
-}
-
 /* "on-path" — this group currently holds the option that was picked to
    continue onward; the orange outline marks the live trail through the
    graph at a glance. Never applied together with .frozen (see script.js —
@@ -429,18 +416,22 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
   font-family:var(--font-mono); font-size:11.5px; font-weight:600; color:var(--ink);
   letter-spacing:.03em; text-transform:uppercase; gap:6px;
 }
-.canvas-group-header .header-spacer{ visibility:hidden; pointer-events:none; display:flex; align-items:center; gap:4px; }
-.canvas-group-header span:first-child{
+.canvas-group-header .header-spacer{ visibility:hidden; pointer-events:none; display:flex; align-items:center; gap:4px; min-width:0; }
+.header-controls{ display:flex; align-items:center; gap:4px; min-width:0; }
+/* Centering done in two layers on purpose: this flex wrapper centers the
+   title block as a WHOLE within the grid's middle column — that part
+   doesn't depend on the title's own width at all, so it can't fail the
+   way relying on the inner span filling 100% did. The inner span (below)
+   only has to handle centering each individual wrapped line within
+   ITSELF once text actually clamps to 2 lines. */
+.canvas-group-title{
+  display:flex; align-items:center; justify-content:center;
+  width:100%; min-width:0; overflow:hidden;
+}
+.canvas-group-title span{
   display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
   overflow:hidden; line-height:1.25; text-align:center;
-  /* -webkit-box defaults to shrink-to-fit width even inside a 1fr grid
-     column, so it ends up exactly as wide as its own text — at which
-     point text-align:center has no spare room to center anything into.
-     width:100% forces it to actually fill the column; min-width:0 stops
-     it from blowing out the grid track when the text is long. */
-  width:100%; min-width:0;
 }
-.header-controls{ display:flex; align-items:center; gap:4px; }
 .remove-btn{
   border:none; background:transparent; color:var(--ink-muted); font-size:16px;
   line-height:1; cursor:pointer; padding:2px 4px; border-radius:4px; flex-shrink:0;
