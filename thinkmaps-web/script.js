@@ -799,57 +799,28 @@ function computeVisibleGroups(){
 
 function renderCanvas(){
   const visible = computeVisibleGroups();
-  // Computed exactly once per real render, shared by both renderGroups
-  // and renderLines below — they can't disagree with each other because
-  // there's only one place this gets decided. Logs here too, once per
-  // group, once per actual render (not on every mousemove tick while
-  // dragging — see the silent fallback in renderLines for that case).
-  const visualStateByGroupId = {};
-  visible.forEach(({ group, options }) => {
-    const state = resolveGroupVisualState(group, options);
-    visualStateByGroupId[group.id] = state;
-    console.log('[ThinkMaps][visual-state]', group.label, {
-      isFrozen: !!group.is_frozen,
-      hasPickedOption: options.some(o => o.is_selected),
-      ...state
-    });
-  });
-
-  renderGroups(visible, visualStateByGroupId);
-  renderLines(visible, visualStateByGroupId);
+  renderGroups(visible);
+  renderLines(visible);
   applyWorldTransform();
 }
 
-// REWRITTEN FROM SCRATCH. The previous version's logic was actually
-// correct — verified against real data before this rewrite, and the class
-// was landing on the right cards every time, no typo, no race. The actual
-// defect was the CSS: opacity:0.68 on an off-white card (#FAF9F5) sitting
-// on an off-white page background (#F0EEE6) barely changes anything,
-// because there's almost no luminance gap between card and background to
-// begin with — alpha-blending a near-white toward a near-white is close
-// to invisible. So this version doesn't touch opacity as the primary
-// signal at all: it swaps the card to an actually different background
-// color (the same darker tan already used for frozen cards), which can't
-// disappear into the page the way an opacity nudge did.
+// The ONLY thing that grays a group out is group.is_frozen, set by the
+// backend (confirmed correct: freezeOptionSubtree is a no-op on a sibling
+// that was never explored — it only freezes something that actually has
+// spawned content to freeze). There is no other graying rule anymore.
 //
-// Pure computation, no side effects — renderCanvas above does the
-// logging, exactly once per group per real render. If a card LOOKS
-// unfaded but its console line says shouldFade:true, that's a CSS rule
-// not applying (cache, selector typo, not yet redeployed). If the console
-// line itself says shouldFade:false on a group that visibly has nothing
-// picked inside it, that's a real logic bug here, not a styling one —
-// those are two very different problems with two different fixes, and
-// this makes it possible to tell them apart from a screenshot of the
-// console alone.
-function resolveGroupVisualState(group, options){
-  const isRootGroup = !group.spawned_from_option_id;
-  const hasPickedOption = options.some(o => o.is_selected);
-  const onLivePath = hasPickedOption && !group.is_frozen;
-  const shouldFade = !isRootGroup && !group.is_frozen && !onLivePath;
-  return { onLivePath, shouldFade };
-}
-
-function renderGroups(visible, visualStateByGroupId){
+// A freshly spawned group with nothing picked inside it yet is NOT
+// frozen, was never frozen, and renders at full color — exactly like an
+// active group — because nothing has happened to it that warrants
+// visually setting it aside. This was tried the other way twice (fading
+// it lightly, then fading it with a stronger background swap) and both
+// times made the canvas confusing right after the very first click, on a
+// blueprint where nothing could possibly be frozen yet. Removed for good.
+//
+// The orange on-path outline is unrelated to graying — it's purely "does
+// this group currently hold the option that was picked to continue
+// onward," with root included (a root with a selection is on-path too).
+function renderGroups(visible){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
   layer.innerHTML = '';
@@ -858,11 +829,10 @@ function renderGroups(visible, visualStateByGroupId){
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    const { onLivePath, shouldFade } = visualStateByGroupId[group.id] || resolveGroupVisualState(group, options);
+    const isOnPath = options.some(o => o.is_selected) && !group.is_frozen;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
-    if(shouldFade) classNames.push('unpicked');
-    if(onLivePath) classNames.push('on-path');
+    if(isOnPath) classNames.push('on-path');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -982,7 +952,7 @@ function wireGroupEvents(){
   });
 }
 
-function renderLines(visible, visualStateByGroupId){
+function renderLines(visible){
   const layer = document.getElementById('linesLayer');
   if(!layer) return;
   layer.innerHTML = '';
@@ -991,16 +961,7 @@ function renderLines(visible, visualStateByGroupId){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
-  // Falls back to computing this silently (no console logging) when
-  // called without a shared map — that's the drag-mousemove call site
-  // below, which fires on every pixel of mouse movement and only needs
-  // line positions, not a fresh diagnostic log flooding the console.
-  const stateByGroupId = visualStateByGroupId || (() => {
-    const map = {};
-    visible.forEach(({ group, options }) => { map[group.id] = resolveGroupVisualState(group, options); });
-    return map;
-  })();
-  const isGroupFaded = (g) => (stateByGroupId[g.id]?.shouldFade) || g.is_frozen;
+  const isGroupFaded = (g) => g.is_frozen;
 
   let dottedCount = 0;
   let solidCount = 0;
