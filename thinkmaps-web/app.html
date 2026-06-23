@@ -11,7 +11,6 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 </head>
 <body>
-
 <header class="site app-header">
   <nav class="bar">
     <a href="dashboard.html" class="logo">
@@ -32,23 +31,20 @@
     This blueprint is read-only on the free tier. <a href="index.html#pricing">Upgrade to Pro</a> to keep building it.
   </div>
 </header>
-
 <main class="canvas-viewport" id="canvasViewport">
   <div class="canvas-world" id="canvasWorld">
     <div id="linesLayer"></div>
     <div id="groupsLayer"></div>
   </div>
-
   <div class="canvas-controls">
+    <button class="zoom-btn" id="fullscreenBtn" type="button" title="Fullscreen">⛶</button>
     <button class="zoom-btn" id="zoomInBtn" type="button" title="Zoom in">+</button>
     <button class="zoom-btn" id="zoomOutBtn" type="button" title="Zoom out">−</button>
     <button class="zoom-btn" id="zoomResetBtn" type="button" title="Reset view">⟲</button>
   </div>
-
   <p class="canvas-empty-message" id="canvasLoadingMsg">Loading your blueprint…</p>
   <div class="canvas-busy-indicator" id="canvasBusyIndicator" style="display:none;">Thinking…</div>
 </main>
-
 <script src="script.js"></script>
 </body>
 </html>
