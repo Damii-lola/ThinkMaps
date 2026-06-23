@@ -423,6 +423,7 @@ async function initDashboardPage(){
   const logoutBtn = document.getElementById('logoutBtn');
   if(logoutBtn) logoutBtn.addEventListener('click', handleLogout);
 
+  setupNewBlueprintModal();
   await loadDashboard();
 }
 
@@ -459,13 +460,13 @@ function renderProBanner(bannerEl, profile){
   if(!bannerEl) return;
 
   if(profile.pro_status){
-    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no 7-day lock.`;
+    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no 24-hour lock.`;
     bannerEl.classList.add('pro');
   } else {
     // Selar checkout isn't wired in yet — placeholder link until that phase.
     bannerEl.innerHTML = `
       <span class="eyebrow">Free plan</span>
-      One blueprint, seven days, then read-only.
+      One blueprint, 24 hours, then read-only.
       <a href="index.html#pricing" class="btn btn-ghost">Go Pro</a>
     `;
     bannerEl.classList.remove('pro');
@@ -483,7 +484,7 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
         <button class="btn btn-primary" id="newBlueprintBtn">Start your first blueprint</button>
       </div>
     `;
-    document.getElementById('newBlueprintBtn').addEventListener('click', createBlueprint);
+    document.getElementById('newBlueprintBtn').addEventListener('click', openNewBlueprintModal);
     return;
   }
 
@@ -491,7 +492,7 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
     const createdLabel = new Date(bp.created_at).toLocaleDateString();
     const statusLabel = bp.isLocked
       ? 'Locked — read-only'
-      : (bp.daysRemaining != null ? `${bp.daysRemaining} day(s) left on free tier` : 'Active');
+      : (bp.hoursRemaining != null ? `${bp.hoursRemaining} hour(s) left on free tier` : 'Active');
 
     return `
       <div class="blueprint-card ${bp.isLocked ? 'locked' : ''}">
@@ -512,24 +513,85 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
   container.innerHTML = `<div class="blueprint-grid">${cards}</div>${newButton}`;
 
   const newBtn = document.getElementById('newBlueprintBtn');
-  if(newBtn) newBtn.addEventListener('click', createBlueprint);
+  if(newBtn) newBtn.addEventListener('click', openNewBlueprintModal);
 }
 
-async function createBlueprint(){
+// ---------- NEW BLUEPRINT MODAL ----------
+// Every "+ New blueprint" / "Start your first blueprint" button opens this
+// instead of creating a blueprint directly — the person names it up front,
+// rather than getting an "Untitled Blueprint" they have to rename later.
+function setupNewBlueprintModal(){
+  const modal = document.getElementById('newBlueprintModal');
+  if(!modal) return;
+
+  const input = document.getElementById('newBlueprintNameInput');
+  const cancelBtn = document.getElementById('cancelNewBlueprintBtn');
+  const confirmBtn = document.getElementById('confirmNewBlueprintBtn');
+
+  if(cancelBtn) cancelBtn.addEventListener('click', closeNewBlueprintModal);
+  if(confirmBtn) confirmBtn.addEventListener('click', submitNewBlueprint);
+
+  // Click on the dimmed overlay (not the card itself) closes it.
+  modal.addEventListener('click', (e) => {
+    if(e.target === modal) closeNewBlueprintModal();
+  });
+
+  if(input){
+    input.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter') submitNewBlueprint();
+      if(e.key === 'Escape') closeNewBlueprintModal();
+    });
+  }
+}
+
+function openNewBlueprintModal(){
+  const modal = document.getElementById('newBlueprintModal');
+  const input = document.getElementById('newBlueprintNameInput');
+  const errorEl = document.getElementById('newBlueprintError');
+  if(!modal) return;
+
+  if(errorEl) errorEl.textContent = '';
+  if(input) input.value = '';
+  modal.style.display = 'flex';
+  if(input) input.focus();
+}
+
+function closeNewBlueprintModal(){
+  const modal = document.getElementById('newBlueprintModal');
+  if(modal) modal.style.display = 'none';
+}
+
+async function submitNewBlueprint(){
+  const input = document.getElementById('newBlueprintNameInput');
+  const errorEl = document.getElementById('newBlueprintError');
+  const confirmBtn = document.getElementById('confirmNewBlueprintBtn');
+  const name = (input?.value || '').trim();
+
+  if(!name){
+    if(errorEl) errorEl.textContent = 'Give your blueprint a name to continue.';
+    if(input) input.focus();
+    return;
+  }
+
+  if(confirmBtn) confirmBtn.disabled = true;
+
   try {
-    const res = await authedFetch('/blueprints', { method: 'POST', body: JSON.stringify({}) });
+    const res = await authedFetch('/blueprints', { method: 'POST', body: JSON.stringify({ title: name }) });
     if(!res) return;
 
     const body = await res.json();
 
     if(!res.ok){
-      alert(body.error || 'Could not create blueprint.');
+      if(errorEl) errorEl.textContent = body.error || 'Could not create blueprint.';
       return;
     }
 
+    closeNewBlueprintModal();
     window.location.href = `app.html?blueprint=${body.blueprint.id}`;
   } catch (err){
-    alert('Could not create blueprint. Try again.');
+    if(errorEl) errorEl.textContent = 'Could not create blueprint. Try again.';
+  } finally {
+    if(confirmBtn) confirmBtn.disabled = false;
   }
 }
 
@@ -590,6 +652,12 @@ const canvasState = {
   focusedOptionId: null
 };
 
+// Zoom range — 0.15 is "see almost the whole sprawling graph at once,"
+// 2 is "read fine text up close." Was 0.3 at the low end; widened on
+// request so a large blueprint can actually fit on screen when zoomed out.
+const ZOOM_MIN = 0.15;
+const ZOOM_MAX = 2;
+
 let isPanning = false;
 let panStartPointer = null;
 let panStartValue = null;
@@ -630,6 +698,7 @@ async function initAppPage(){
   }
 
   setupCanvasInteractions();
+  setupFullscreenToggle();
   await loadGraph();
 }
 
@@ -775,7 +844,14 @@ function renderGroups(visible){
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
     const isDimmed = focusedGroupIds.size > 0 && !focusedGroupIds.has(group.id);
-    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isDimmed ? 'dimmed' : ''}`.trim();
+    // "on-path" — this group currently contains the option that was picked
+    // to continue onward. Frozen groups never get this even if one of their
+    // options is still flagged is_selected from before they were frozen —
+    // a frozen group's whole subtree is, by definition, no longer the live
+    // path, so the orange pathway marker would be misleading there; the
+    // gray frozen treatment is what should read instead.
+    const isOnPath = !group.is_frozen && options.some(o => o.is_selected);
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isDimmed ? 'dimmed' : ''} ${isOnPath ? 'on-path' : ''}`.trim();
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
@@ -981,10 +1057,23 @@ function drawConnectorLine(container, x1, y1, x2, y2, { dotted = false, frozen =
   container.appendChild(line);
 }
 
+// Builds the world transform string. Pan values are rounded to the nearest
+// whole pixel before being applied — fractional translate values combined
+// with a non-1 scale are what cause text to look soft/blurry under CSS
+// transforms in most browsers, since the browser ends up compositing on a
+// sub-pixel grid instead of a clean one. scale3d (vs. plain scale) is used
+// deliberately too — it pushes the element onto the GPU compositing path,
+// which renders text noticeably crisper at a fixed zoom level than the 2D
+// scale() path in Chrome and Firefox. This won't make zoomed-out text look
+// as sharp as zoomed-in text — some softening at small scale is an inherent
+// property of rasterizing vector text smaller, not a bug — but it removes
+// the avoidable blur on top of that.
 function applyWorldTransform(){
   const world = document.getElementById('canvasWorld');
   if(!world) return;
-  world.style.transform = `translate(${canvasState.pan.x}px, ${canvasState.pan.y}px) scale(${canvasState.zoom})`;
+  const panX = Math.round(canvasState.pan.x);
+  const panY = Math.round(canvasState.pan.y);
+  world.style.transform = `translate(${panX}px, ${panY}px) scale3d(${canvasState.zoom}, ${canvasState.zoom}, 1)`;
 }
 
 function centerCanvasOnRoot(){
@@ -999,6 +1088,36 @@ function setCanvasBusy(isBusy){
   const indicator = document.getElementById('canvasBusyIndicator');
   if(viewport) viewport.classList.toggle('busy', isBusy);
   if(indicator) indicator.style.display = isBusy ? 'block' : 'none';
+}
+
+// ---------- FULLSCREEN ----------
+// Puts just the canvas viewport into the browser's Fullscreen API, not the
+// whole page — so the controls and locked-banner (which live inside the
+// viewport's parent header) stay reachable via the button's own toggle,
+// while the graph itself gets the full screen to breathe in.
+function setupFullscreenToggle(){
+  const btn = document.getElementById('fullscreenBtn');
+  const viewport = document.getElementById('canvasViewport');
+  if(!btn || !viewport) return;
+
+  btn.addEventListener('click', () => {
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+    if(!isFullscreen){
+      const request = viewport.requestFullscreen || viewport.webkitRequestFullscreen || viewport.msRequestFullscreen;
+      request?.call(viewport);
+    } else {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+      exit?.call(document);
+    }
+  });
+
+  const syncIcon = () => {
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+    btn.textContent = isFullscreen ? '⤡' : '⛶';
+    btn.title = isFullscreen ? 'Exit fullscreen' : 'Fullscreen';
+  };
+  document.addEventListener('fullscreenchange', syncIcon);
+  document.addEventListener('webkitfullscreenchange', syncIcon);
 }
 
 function setupCanvasInteractions(){
@@ -1067,16 +1186,16 @@ function setupCanvasInteractions(){
   viewport.addEventListener('wheel', (e) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    canvasState.zoom = Math.min(2, Math.max(0.3, canvasState.zoom + delta));
+    canvasState.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, canvasState.zoom + delta));
     applyWorldTransform();
   }, { passive: false });
 
   document.getElementById('zoomInBtn')?.addEventListener('click', () => {
-    canvasState.zoom = Math.min(2, canvasState.zoom + 0.1);
+    canvasState.zoom = Math.min(ZOOM_MAX, canvasState.zoom + 0.1);
     applyWorldTransform();
   });
   document.getElementById('zoomOutBtn')?.addEventListener('click', () => {
-    canvasState.zoom = Math.max(0.3, canvasState.zoom - 0.1);
+    canvasState.zoom = Math.max(ZOOM_MIN, canvasState.zoom - 0.1);
     applyWorldTransform();
   });
   document.getElementById('zoomResetBtn')?.addEventListener('click', () => {
