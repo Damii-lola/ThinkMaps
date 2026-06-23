@@ -321,7 +321,16 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 
 /* ---------- APP / CANVAS ---------- */
 .app-header .bar{ justify-content:space-between; gap:20px; }
-.app-blueprint-title{ font-family:var(--font-mono); font-size:13px; color:var(--ink-muted); flex:1; text-align:center; }
+.app-blueprint-title{
+  font-family:var(--font-mono); font-size:13px; color:var(--ink-muted); flex:1; text-align:center;
+  cursor:pointer; border-radius:6px; padding:4px 10px; transition:background-color .15s ease;
+}
+.app-blueprint-title:hover{ background:var(--surface-2); }
+.app-blueprint-title-input{
+  font-family:var(--font-mono); font-size:13px; color:var(--ink);
+  background:var(--bg); border:1px solid var(--accent); border-radius:6px;
+  padding:3px 8px; outline:none; text-align:center; width:100%; max-width:280px;
+}
 .locked-banner{
   background:var(--frozen-bg); color:var(--ink-muted); text-align:center;
   font-size:13px; padding:8px 16px; border-top:1px solid var(--frozen);
@@ -392,7 +401,18 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.frozen:hover .canvas-group-header{ color:var(--ink); background:var(--surface-2); }
 .canvas-group.frozen:hover .canvas-option{ opacity:1; }
 
-.canvas-group.dimmed{ filter:grayscale(0.7); opacity:0.35; }
+/* Muted — not frozen, just not currently on the active path (no option
+   picked inside it yet, and it isn't the root). Same hover-to-peek
+   affordance as frozen: full clarity while the mouse is actually over the
+   card, back to muted the instant it leaves. This is what makes freshly
+   spawned sibling candidate groups read as "waiting to be chosen" instead
+   of looking identical to the one group that's actually live. */
+.canvas-group.muted{ filter:grayscale(0.6); opacity:0.4; }
+.canvas-group.muted:hover{
+  filter:none; opacity:1;
+  box-shadow:0 4px 14px rgba(0,0,0,0.10);
+  z-index:5;
+}
 
 /* "on-path" — this group currently holds the option that was picked to
    continue onward; the orange outline marks the live trail through the
@@ -403,7 +423,7 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.on-path{ box-shadow:0 0 0 2px var(--accent); }
 
 .canvas-group-header{
-  display:grid; grid-template-columns:auto 1fr auto; align-items:flex-start;
+  display:grid; grid-template-columns:auto 1fr auto; align-items:center;
   min-height:40px; height:auto; padding:8px 8px 6px 12px; border-bottom:1px solid var(--line);
   background:var(--surface-2); border-radius:12px 12px 0 0; cursor:grab;
   font-family:var(--font-mono); font-size:11.5px; font-weight:600; color:var(--ink);
@@ -413,6 +433,12 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group-header span:first-child{
   display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
   overflow:hidden; line-height:1.25; text-align:center;
+  /* -webkit-box defaults to shrink-to-fit width even inside a 1fr grid
+     column, so it ends up exactly as wide as its own text — at which
+     point text-align:center has no spare room to center anything into.
+     width:100% forces it to actually fill the column; min-width:0 stops
+     it from blowing out the grid track when the text is long. */
+  width:100%; min-width:0;
 }
 .header-controls{ display:flex; align-items:center; gap:4px; }
 .remove-btn{
