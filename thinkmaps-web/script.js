@@ -799,39 +799,70 @@ function computeVisibleGroups(){
 
 function renderCanvas(){
   const visible = computeVisibleGroups();
-  renderGroups(visible);
-  renderLines(visible);
+  const infoByGroupId = computeSiblingBatchInfo(visible);
+  renderGroups(visible, infoByGroupId);
+  renderLines(visible, infoByGroupId);
   applyWorldTransform();
 }
 
-// The ONLY thing that grays a group out is group.is_frozen, set by the
-// backend (confirmed correct: freezeOptionSubtree is a no-op on a sibling
-// that was never explored — it only freezes something that actually has
-// spawned content to freeze). There is no other graying rule anymore.
+// A "batch" is every group spawned from the SAME option activation —
+// when one option gets clicked, up to 3 groups appear together, and
+// those 3 are each other's "brothers." Root counts as its own batch of
+// one. For every visible group, this records two things about its batch:
+//  - hasOwnPick: does THIS group have a selected option inside it
+//  - batchHasPick: does ANY brother in the same batch (itself included)
+//    have a selected option inside it
+function computeSiblingBatchInfo(visible){
+  const batches = {};
+  visible.forEach(({ group, options }) => {
+    const batchKey = group.spawned_from_option_id || `root:${group.id}`;
+    (batches[batchKey] = batches[batchKey] || []).push({ group, options });
+  });
+
+  const infoByGroupId = {};
+  Object.values(batches).forEach(batch => {
+    const batchHasPick = batch.some(({ options }) => options.some(o => o.is_selected));
+    batch.forEach(({ group, options }) => {
+      infoByGroupId[group.id] = { hasOwnPick: options.some(o => o.is_selected), batchHasPick };
+    });
+  });
+
+  return infoByGroupId;
+}
+
+// ON-PATH (orange outline, full color): this group has its own pick and
+// isn't frozen.
 //
-// A freshly spawned group with nothing picked inside it yet is NOT
-// frozen, was never frozen, and renders at full color — exactly like an
-// active group — because nothing has happened to it that warrants
-// visually setting it aside. This was tried the other way twice (fading
-// it lightly, then fading it with a stronger background swap) and both
-// times made the canvas confusing right after the very first click, on a
-// blueprint where nothing could possibly be frozen yet. Removed for good.
+// BATCH-FADED (strong fade): a brother spawned in the SAME batch has a
+// pick and THIS group doesn't — you engaged with one option out of a
+// freshly spawned set, so the others in that exact set visually step
+// back. Critically: a batch where NOTHING has been picked in ANY brother
+// yet (itself included) never fades — there's no signal about which one
+// matters more, so a freshly spawned set stays full color until you
+// actually pick something somewhere inside that set.
 //
-// The orange on-path outline is unrelated to graying — it's purely "does
-// this group currently hold the option that was picked to continue
-// onward," with root included (a root with a selection is on-path too).
-function renderGroups(visible){
+// Frozen always wins over both — it already has its own distinct
+// "set aside" treatment and doesn't also need the batch fade on top.
+function resolveGroupVisualState(group, info){
+  const isOnPath = info.hasOwnPick && !group.is_frozen;
+  const isBatchFaded = !group.is_frozen && info.batchHasPick && !info.hasOwnPick;
+  return { isOnPath, isBatchFaded };
+}
+
+function renderGroups(visible, infoByGroupId){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
   layer.innerHTML = '';
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
+  const info = infoByGroupId || computeSiblingBatchInfo(visible);
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    const isOnPath = options.some(o => o.is_selected) && !group.is_frozen;
+    const { isOnPath, isBatchFaded } = resolveGroupVisualState(group, info[group.id]);
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
+    if(isBatchFaded) classNames.push('batch-unpicked');
     if(isOnPath) classNames.push('on-path');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
@@ -952,7 +983,7 @@ function wireGroupEvents(){
   });
 }
 
-function renderLines(visible){
+function renderLines(visible, infoByGroupId){
   const layer = document.getElementById('linesLayer');
   if(!layer) return;
   layer.innerHTML = '';
@@ -961,7 +992,8 @@ function renderLines(visible){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
-  const isGroupFaded = (g) => g.is_frozen;
+  const info = infoByGroupId || computeSiblingBatchInfo(visible);
+  const isGroupFaded = (g) => g.is_frozen || (info[g.id] && resolveGroupVisualState(g, info[g.id]).isBatchFaded);
 
   let dottedCount = 0;
   let solidCount = 0;
