@@ -804,18 +804,30 @@ function renderCanvas(){
   applyWorldTransform();
 }
 
-// Whether a group currently has a selected option inside it AND isn't
-// frozen — drives the orange on-path outline in renderGroups. (Graying out
-// every group that ISN'T this was tried and reverted: it meant freshly
-// spawned candidate groups — the exact ones you need to read in order to
-// pick the next step — defaulted to grayed-out too, making the canvas
-// impossible to actually use. The only thing that should default to gray
-// is a group that's genuinely frozen — i.e. explicitly deprioritized
-// because a sibling got chosen instead — which the .frozen CSS class
-// already handles on its own, hover-lift included.)
+// Single source of truth — used by both renderGroups (the card itself)
+// and renderLines (the connectors leading to it).
+//
+// ACTIVE: has a selected option inside it AND isn't frozen — full color,
+// gets the orange on-path outline.
+//
+// UNPICKED: not root, not frozen, not active — nothing's been chosen
+// inside it yet. Gets a LIGHT fade (opacity only, no grayscale) purely as
+// a visual hint about what's live versus still waiting to be chosen.
+// Fading here is cosmetic only — it never disables clicking or reading;
+// every option inside an unpicked group is exactly as clickable as one in
+// an active group, the whole time, faded or not. An earlier version of
+// this used a much stronger treatment (heavy grayscale + opacity 0.4),
+// which made the canvas feel broken/unusable even though nothing was
+// actually disabled — this version stays subtle on purpose so reading and
+// clicking never require squinting through it, hover or not.
+//
+// Root is exempt from unpicked entirely: it's the starting point and must
+// always read at full strength, picked or not.
 function computeGroupVisualState(group, options){
+  const isRootGroup = !group.spawned_from_option_id;
   const isActive = options.some(o => o.is_selected) && !group.is_frozen;
-  return { isActive };
+  const isUnpicked = !isRootGroup && !group.is_frozen && !isActive;
+  return { isActive, isUnpicked };
 }
 
 function renderGroups(visible){
@@ -827,8 +839,8 @@ function renderGroups(visible){
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    const { isActive } = computeGroupVisualState(group, options);
-    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isActive ? 'on-path' : ''}`.trim();
+    const { isActive, isUnpicked } = computeGroupVisualState(group, options);
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isUnpicked ? 'unpicked' : ''} ${isActive ? 'on-path' : ''}`.trim();
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
@@ -956,6 +968,15 @@ function renderLines(visible){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
+  // Same liveness rule as the cards (computeGroupVisualState) — a line is
+  // faded if either end is frozen OR unpicked, kept as one lookup so this
+  // can't quietly drift out of sync with what renderGroups just drew.
+  const unpickedByGroupId = {};
+  visible.forEach(({ group, options }) => {
+    unpickedByGroupId[group.id] = computeGroupVisualState(group, options).isUnpicked;
+  });
+  const isGroupFaded = (g) => unpickedByGroupId[g.id] || g.is_frozen;
+
   let dottedCount = 0;
   let solidCount = 0;
 
@@ -974,7 +995,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + estimateHeaderHeight(childGroup.label) / 2;
 
-        const dimmed = group.is_frozen || childGroup.is_frozen;
+        const dimmed = isGroupFaded(group) || isGroupFaded(childGroup);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen, dimmed });
         dottedCount++;
       });
@@ -1001,7 +1022,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = computeRowCenterY(childGroup, childEntry.options, chosenIndex);
 
-        const dimmed = group.is_frozen || childGroup.is_frozen;
+        const dimmed = isGroupFaded(group) || isGroupFaded(childGroup);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen, dimmed });
         solidCount++;
       });
