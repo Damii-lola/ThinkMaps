@@ -16,6 +16,14 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// Free tier locks a blueprint to read-only after this much time since
+// creation, unless pro_status is set. Was 7 days; now 24 hours. Single
+// shared constant — both /dashboard's enrichment and checkIsLocked below
+// used to each hardcode their own copy of this number, which is exactly
+// the kind of duplication that causes one of them to quietly drift out of
+// sync on a future change.
+const FREE_TIER_LOCK_MS = 24 * 60 * 60 * 1000;
+
 // Verifies the Supabase access token sent from script.js (Authorization: Bearer <token>)
 // and attaches the real user to req.user. Every route that touches a specific
 // user's data sits behind this — never trust a user_id sent in the request body.
@@ -145,14 +153,13 @@ app.get('/dashboard', requireAuth, async (req, res) => {
 
     if (blueprintsError) throw blueprintsError;
 
-    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
     const now = Date.now();
 
     const enrichedBlueprints = blueprints.map(bp => {
       const ageMs = now - new Date(bp.created_at).getTime();
-      const isLocked = !profile.pro_status && ageMs > SEVEN_DAYS_MS;
-      const daysRemaining = Math.max(0, Math.ceil((SEVEN_DAYS_MS - ageMs) / (24 * 60 * 60 * 1000)));
-      return { ...bp, isLocked, daysRemaining: isLocked ? 0 : daysRemaining };
+      const isLocked = !profile.pro_status && ageMs > FREE_TIER_LOCK_MS;
+      const hoursRemaining = Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 60 * 1000)));
+      return { ...bp, isLocked, hoursRemaining: isLocked ? 0 : hoursRemaining };
     });
 
     res.status(200).json({
@@ -354,7 +361,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 
   const instructions = isRoot
     ? 'Generate the starting "Niches" group for a new app-idea Blueprint Graph: up to 6 high-quality, distinct app niches (e.g. Fitness, Finance & Commerce, Productivity, Entertainment).'
-    : `Based on the path so far, generate up to 6 specific, concrete options for the "${blockName}" block — every option must fit squarely within that block's territory and must be something the person could answer from their own knowledge, instinct, or preference, never something requiring market research they don't have.`;
+    : `The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Based on THAT exact path, generate up to 6 specific, concrete options for the "${blockName}" block, each one reading as a personalized continuation of what they've already chosen — reference or clearly connect to those prior choices, don't write options that could apply to any random blueprint. Every option must fit squarely within that block's territory and must be something the person could answer from their own knowledge, instinct, or preference, never something requiring market research they don't have. While generating, privately consider how the choices in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction inform your phrasing, even though you're not asked to state the idea itself yet.`;
 
   const retryNote = isRetry
     ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options, but stay within the same block.'
@@ -364,7 +371,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 
   return callMistral([
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Path so far: ${pathDescription}` }
+    { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
   ]);
 }
 
@@ -374,15 +381,25 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 // of the (up to 3) new groups corresponds to a specific block from the
 // same 9 driving the ideation intake, so canvas exploration and the
 // 45-question flow are two expressions of the same underlying structure.
+//
+// pathContext (built by buildPathContextFromOption) already carries the
+// FULL chain of every option this person has picked, root to the option
+// just activated — that part of the data flow was always correct. What
+// was missing was forcing the model to actually treat that chain as real,
+// specific signal instead of generic background context: the prompt below
+// explicitly demands every option reference or build on the prior choices,
+// and explicitly asks the model to keep a running, private sense of what
+// app idea this path is converging toward — well before the person
+// finishes the canvas or starts the 45-question ideation intake.
 async function generateCandidateBatch(pathContext, blockNames){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have.${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Path so far: ${pathDescription}` }
+    { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
   ]);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
@@ -478,9 +495,8 @@ async function getOwnedBlueprint(blueprintId, userId){
 
 async function checkIsLocked(userId, blueprintCreatedAt){
   const { data: profile } = await supabase.from('profiles').select('pro_status').eq('id', userId).single();
-  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
   const ageMs = Date.now() - new Date(blueprintCreatedAt).getTime();
-  return !profile?.pro_status && ageMs > SEVEN_DAYS_MS;
+  return !profile?.pro_status && ageMs > FREE_TIER_LOCK_MS;
 }
 
 async function verifyOptionOwnershipAndLock(optionId, userId){
@@ -3632,7 +3648,7 @@ async function generateIdeationQuestion(nicheLabel, intent, answersSoFar, templa
     referenceBlock = ` Here's how a LOOSELY related niche handled this slot — "${nicheLabel}" is meaningfully different, so treat this only as a rough example of tone and format, not specifics: Q: "${templateReference.question}" Options: ${JSON.stringify(templateReference.options)}. This is a calibration example only, NOT text to copy — adapt heavily and write fully original content for "${nicheLabel}".`;
   }
 
-  const systemPrompt = `You are writing ONE question for a guided idea-generation intake inside ThinkMaps, for someone exploring the "${nicheLabel}" niche. The question's INTENT is: ${intent} Write the actual question text — one sentence, specific to "${nicheLabel}", informed by what they've already answered — and exactly 6 answer options. The question must be answerable from the person's own knowledge, instinct, or preference — never something requiring market research they wouldn't already have. If the intent involves a guess about the market, make that explicit in the wording and include an honest "not sure — let the AI figure it out" as one of the 6 options.${referenceBlock}${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
+  const systemPrompt = `You are writing ONE question for a guided idea-generation intake inside ThinkMaps, for someone exploring the "${nicheLabel}" niche. The question's INTENT is: ${intent} Write the actual question text — one sentence, specific to "${nicheLabel}", informed by what they've already answered — and exactly 6 answer options. Every answer they've already given is real, specific signal about this exact person — treat it that way: where it's natural, let this question and its options clearly build on or reference what they've already told you, rather than reading as a generic next slot. The question must be answerable from the person's own knowledge, instinct, or preference — never something requiring market research they wouldn't already have. If the intent involves a guess about the market, make that explicit in the wording and include an honest "not sure — let the AI figure it out" as one of the 6 options. As you write this, privately keep building a sense of what specific app idea their answers are converging toward — let that emerging direction inform later questions, well before all 45 are answered and the idea itself gets synthesized.${referenceBlock}${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
