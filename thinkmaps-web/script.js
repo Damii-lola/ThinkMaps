@@ -648,8 +648,7 @@ const canvasState = {
   options: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
-  hasCenteredOnce: false,
-  focusedOptionId: null
+  hasCenteredOnce: false
 };
 
 // Zoom range — 0.15 is "see almost the whole sprawling graph at once,"
@@ -699,6 +698,7 @@ async function initAppPage(){
 
   setupCanvasInteractions();
   setupFullscreenToggle();
+  setupBlueprintTitleEditing();
   await loadGraph();
 }
 
@@ -804,33 +804,35 @@ function renderCanvas(){
   applyWorldTransform();
 }
 
-// Walks the focused option's ancestor chain back to root, plus whatever it
-// itself just spawned — everything else gets dimmed. Returns an empty set
-// (meaning "dim nothing") when there's no focus yet.
-function computeFocusedGroupIds(focusedOptionId){
-  const focusedIds = new Set();
-  if(!focusedOptionId) return focusedIds;
-
-  let currentOptionId = focusedOptionId;
-  while(currentOptionId){
-    const option = canvasState.options.find(o => o.id === currentOptionId);
-    if(!option) break;
-
-    const version = canvasState.groupVersions.find(v => v.id === option.group_version_id);
-    if(!version) break;
-
-    const group = canvasState.groups.find(g => g.id === version.group_id);
-    if(!group) break;
-
-    focusedIds.add(group.id);
-    currentOptionId = group.spawned_from_option_id || null;
-  }
-
-  canvasState.groups.forEach(g => {
-    if(g.spawned_from_option_id === focusedOptionId) focusedIds.add(g.id);
-  });
-
-  return focusedIds;
+// Single source of truth for a group's visual "liveness" — used by both
+// renderGroups (for the card itself) and renderLines (for the connectors
+// leading to it), so the two can never disagree with each other.
+//
+// A group is ACTIVE (full color, gets the orange on-path outline) only if
+// it currently has a selected option inside it AND it isn't frozen — a
+// frozen group's selected option is a stale choice from before an
+// ancestor branch deprioritized the whole thing, not a live path.
+//
+// Everything else is MUTED (grayed by default, lifted only by :hover in
+// CSS) — including freshly-spawned sibling candidate groups that haven't
+// had anything picked inside them yet. The previous version of this used
+// a transient "focusedOptionId" that only lived in JS memory: it reset to
+// nothing on every reload (so muting silently vanished), and it actively
+// exempted an entire just-spawned batch from being muted just because it
+// was the most recent thing clicked — which is backwards from what should
+// read as "live path" versus "still waiting to be chosen." This version
+// is computed fresh from is_frozen/is_selected on every render, so it's
+// never stale and never depends on memory that can be lost.
+//
+// The ROOT group is the one deliberate exception: it's the starting point
+// of the whole blueprint and must stay fully readable even before
+// anything inside it has been picked yet.
+function computeGroupVisualState(group, options){
+  const isRootGroup = !group.spawned_from_option_id;
+  const hasSelectedOption = options.some(o => o.is_selected);
+  const isActive = hasSelectedOption && !group.is_frozen;
+  const isMuted = !isRootGroup && !group.is_frozen && !isActive;
+  return { isActive, isMuted };
 }
 
 function renderGroups(visible){
@@ -839,19 +841,11 @@ function renderGroups(visible){
   layer.innerHTML = '';
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
-  const focusedGroupIds = computeFocusedGroupIds(canvasState.focusedOptionId);
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
-    const isDimmed = focusedGroupIds.size > 0 && !focusedGroupIds.has(group.id);
-    // "on-path" — this group currently contains the option that was picked
-    // to continue onward. Frozen groups never get this even if one of their
-    // options is still flagged is_selected from before they were frozen —
-    // a frozen group's whole subtree is, by definition, no longer the live
-    // path, so the orange pathway marker would be misleading there; the
-    // gray frozen treatment is what should read instead.
-    const isOnPath = !group.is_frozen && options.some(o => o.is_selected);
-    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isDimmed ? 'dimmed' : ''} ${isOnPath ? 'on-path' : ''}`.trim();
+    const { isActive, isMuted } = computeGroupVisualState(group, options);
+    card.className = `canvas-group ${group.is_frozen ? 'frozen' : ''} ${isMuted ? 'muted' : ''} ${isActive ? 'on-path' : ''}`.trim();
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
     card.style.top = `${group.position_y || 0}px`;
@@ -979,8 +973,15 @@ function renderLines(visible){
   const visibleByGroupId = {};
   visible.forEach(entry => { visibleByGroupId[entry.group.id] = entry; });
 
-  const focusedGroupIds = computeFocusedGroupIds(canvasState.focusedOptionId);
-  const isGroupDimmed = (groupId) => focusedGroupIds.size > 0 && !focusedGroupIds.has(groupId);
+  // Same liveness rule as the cards themselves (computeGroupVisualState),
+  // computed once per group up front so both line tiers below stay in
+  // sync with what renderGroups just drew — no separate, possibly-stale
+  // notion of "dimmed" living only in this function.
+  const mutedByGroupId = {};
+  visible.forEach(({ group, options }) => {
+    mutedByGroupId[group.id] = computeGroupVisualState(group, options).isMuted;
+  });
+  const isGroupMuted = (groupId) => mutedByGroupId[groupId] || false;
 
   let dottedCount = 0;
   let solidCount = 0;
@@ -1000,7 +1001,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = (childGroup.position_y || 0) + estimateHeaderHeight(childGroup.label) / 2;
 
-        const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
+        const dimmed = isGroupMuted(group.id) || isGroupMuted(childGroup.id);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: true, frozen: childGroup.is_frozen, dimmed });
         dottedCount++;
       });
@@ -1027,7 +1028,7 @@ function renderLines(visible){
         const x2 = childGroup.position_x || 0;
         const y2 = computeRowCenterY(childGroup, childEntry.options, chosenIndex);
 
-        const dimmed = isGroupDimmed(group.id) || isGroupDimmed(childGroup.id);
+        const dimmed = isGroupMuted(group.id) || isGroupMuted(childGroup.id);
         drawConnectorLine(layer, x1, y1, x2, y2, { dotted: false, frozen: childGroup.is_frozen, dimmed });
         solidCount++;
       });
@@ -1120,6 +1121,80 @@ function setupFullscreenToggle(){
   document.addEventListener('webkitfullscreenchange', syncIcon);
 }
 
+// ---------- BLUEPRINT TITLE — CLICK TO RENAME ----------
+// The title swaps to a real <input> on click, pre-filled and selected, so
+// renaming feels the same as renaming a file or a doc title — not a popup,
+// not a separate page, just click the name and type.
+function setupBlueprintTitleEditing(){
+  const titleEl = document.getElementById('blueprintTitle');
+  if(!titleEl) return;
+
+  titleEl.title = 'Click to rename';
+  titleEl.addEventListener('click', () => {
+    if(titleEl.querySelector('input')) return; // already editing — ignore a second click
+    startEditingBlueprintTitle(titleEl);
+  });
+}
+
+function startEditingBlueprintTitle(titleEl){
+  const previousTitle = titleEl.textContent;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = previousTitle;
+  input.maxLength = 80;
+  input.className = 'app-blueprint-title-input';
+
+  titleEl.textContent = '';
+  titleEl.appendChild(input);
+  input.focus();
+  input.select();
+
+  // Guards against both Enter (blur fires programmatically) and Escape
+  // (we revert immediately) trying to resolve this same edit twice — the
+  // second one becomes a no-op instead of double-submitting or re-reverting.
+  let settled = false;
+
+  const commit = async () => {
+    if(settled) return;
+    settled = true;
+
+    const newTitle = input.value.trim();
+    if(!newTitle || newTitle === previousTitle){
+      titleEl.textContent = previousTitle;
+      return;
+    }
+
+    titleEl.textContent = newTitle; // optimistic — instant feedback, no AI call involved here
+
+    try {
+      const res = await authedFetch(`/blueprints/${canvasState.blueprintId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: newTitle })
+      });
+      if(!res || !res.ok){
+        titleEl.textContent = previousTitle; // revert — the rename didn't actually stick
+      }
+    } catch (err){
+      titleEl.textContent = previousTitle;
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter'){
+      e.preventDefault();
+      input.blur(); // triggers commit() below
+    }
+    if(e.key === 'Escape'){
+      e.preventDefault();
+      settled = true;
+      titleEl.textContent = previousTitle;
+    }
+  });
+
+  input.addEventListener('blur', commit);
+}
+
 function setupCanvasInteractions(){
   const viewport = document.getElementById('canvasViewport');
   if(!viewport) return;
@@ -1159,12 +1234,6 @@ function setupCanvasInteractions(){
 
   window.addEventListener('mouseup', (e) => {
     if(isPanning){
-      const movedDist = Math.hypot(e.clientX - panStartPointer.x, e.clientY - panStartPointer.y);
-      if(movedDist < 6 && canvasState.focusedOptionId){
-        // A plain click on empty canvas, not a pan — clear the focus dim.
-        canvasState.focusedOptionId = null;
-        renderCanvas();
-      }
       isPanning = false;
       viewport.classList.remove('panning');
     }
@@ -1379,7 +1448,6 @@ async function handleOptionActivate(optionId){
       alert(body.error || 'Could not activate that option.');
       return;
     }
-    canvasState.focusedOptionId = optionId;
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
     alert('Something went wrong activating that option.');
