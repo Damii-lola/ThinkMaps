@@ -4,7 +4,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-const PORT = process.env.PORT || 3000; 
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -58,7 +58,16 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    // Bump this string whenever a real backend fix ships, specifically so
+    // it's possible to check — by just visiting /health in a browser —
+    // whether Render is actually running the latest server.js, rather than
+    // guessing from symptoms alone whether something is a fresh bug or a
+    // deploy that never happened. Last bumped: cross-fork diversity
+    // injection for canvas option generation (no more repeating "Personal
+    // Pull" content across unrelated branches of the same niche) +
+    // monetization removed from confirmation questions.
+    deployedFixes: 'cross-fork-diversity-injection-2026-06-24'
   });
 });
 
@@ -393,6 +402,14 @@ const BLOCKS_BEFORE_IDEA_CHECKPOINT = IDEATION_BLOCK_NAMES.slice(0, 6);
 const PATH_DEPTH_CAP = 15;
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
+// A group of this block_name never gets AI-generated content — it's a
+// blank slate the person fills in themselves via the existing
+// /groups/:id/custom-option route, spawned by the new post-selection
+// "+Custom" action (see /options/:id/custom-spawned-group below). Like
+// the other two sentinels above, this never collides with the 9 real
+// blocks since pickNextBlocks only ever filters against those by name.
+const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
+
 // Every block_name "used" for the purpose of deciding what to assign
 // NEXT, scoped to ONE continuous path: every ancestor of optionId, PLUS
 // every SIBLING generated in the same batch as each ancestor (siblings
@@ -496,52 +513,42 @@ async function findNicheRootOptionId(optionId){
 
 // Walks the ENTIRE niche subtree (every group descended from
 // nicheOptionId, at any depth, through any fork) and collects every
-// option LABEL from groups whose block_name matches the one given.
-// Capped at the most recent 20 found, purely to keep the prompt a sane
-// size once a niche has been explored heavily.
-async function getExistingOptionLabelsForBlock(nicheOptionId, blockName){
+// option LABEL anywhere in it, REGARDLESS of block_name.
+//
+// This used to filter by a single matching block_name — catching
+// "Personal Pull repeating Personal Pull elsewhere," but structurally
+// blind to "Personal Pull and Personal Connection both converging on the
+// same 'meeting mute' phrasing," which is exactly what kept showing up:
+// once a niche gets specific enough (office workers, interrupted by
+// meetings, wanting micro-workouts), that one same idea is the most
+// obvious answer for EVERY block, not just one, and a per-block filter
+// only ever compared a block against itself. Capped at the most recent
+// 40 found (roughly double the old per-block cap, since this is now
+// pooling across every block instead of just one).
+async function getAllExistingOptionLabelsInNiche(nicheOptionId){
   const labels = [];
   let frontierOptionIds = [nicheOptionId];
 
   while(frontierOptionIds.length > 0){
     const { data: groups } = await supabase
       .from('groups')
-      .select('id, block_name')
+      .select('id')
       .in('spawned_from_option_id', frontierOptionIds);
 
     if(!groups || groups.length === 0) break;
 
-    const matchingGroupIds = groups.filter(g => g.block_name === blockName).map(g => g.id);
-    if(matchingGroupIds.length > 0){
-      const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', matchingGroupIds);
-      const versionIds = (versions || []).map(v => v.id);
-      if(versionIds.length > 0){
-        const { data: opts } = await supabase.from('options').select('label').in('group_version_id', versionIds);
-        (opts || []).forEach(o => { if(o.label) labels.push(o.label); });
-      }
-    }
+    const groupIds = groups.map(g => g.id);
+    const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', groupIds);
+    const versionIds = (versions || []).map(v => v.id);
+    if(versionIds.length === 0) break;
 
-    const allGroupIds = groups.map(g => g.id);
-    const { data: allVersions } = await supabase.from('group_versions').select('id').in('group_id', allGroupIds);
-    const allVersionIds = (allVersions || []).map(v => v.id);
-    if(allVersionIds.length === 0) break;
+    const { data: opts } = await supabase.from('options').select('id, label').in('group_version_id', versionIds);
+    (opts || []).forEach(o => { if(o.label) labels.push(o.label); });
 
-    const { data: allOptions } = await supabase.from('options').select('id').in('group_version_id', allVersionIds);
-    frontierOptionIds = (allOptions || []).map(o => o.id);
+    frontierOptionIds = (opts || []).map(o => o.id);
   }
 
-  return labels.slice(-20);
-}
-
-// Same lookup, for several blocks at once — generateCandidateBatch
-// generates a whole batch in one call, so it needs "what already exists"
-// for EACH assigned block, keyed by name, to build one combined prompt.
-async function getExistingOptionLabelsForBlocks(nicheOptionId, blockNames){
-  const byBlock = {};
-  for(const blockName of blockNames){
-    byBlock[blockName] = await getExistingOptionLabelsForBlock(nicheOptionId, blockName);
-  }
-  return byBlock;
+  return labels.slice(-40);
 }
 
 // Shared instruction injected into every option-generating prompt — keeps
@@ -563,12 +570,14 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
     ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options, but stay within the same block.'
     : '';
 
-  // Catches repetition ACROSS forks of the same niche — every other guard
-  // in this file only ever sees one path in isolation, which is exactly
-  // why "Personal Pull" kept converging on near-identical phrasing on
-  // unrelated branches of the same niche exploration.
+  // Catches repetition across EVERY block in this niche, not just this
+  // one — see getAllExistingOptionLabelsInNiche above for why a per-block
+  // filter wasn't enough (the actual repeats were happening ACROSS
+  // different blocks converging on the same idea, e.g. "meeting mute"
+  // showing up near-identically in both Personal Pull and Personal
+  // Connection elsewhere in this same niche).
   const diversityNote = (!isRoot && existingLabels.length > 0)
-    ? ` These exact angles have ALREADY been used elsewhere in this same niche exploration for this exact block — do not repeat them or write close rephrasings of the same underlying idea, find genuinely different territory instead: ${JSON.stringify(existingLabels)}`
+    ? ` This niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (possibly for a different block than this one — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. If the obvious answer for this block would just be a small variation on one of those (same core mechanism, same trigger, same setting, different wording), actively look for a DIFFERENT underlying angle instead — a different mechanism, trigger, setting, or emotional hook entirely, not a rephrasing.`
     : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
@@ -595,22 +604,20 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 // and explicitly asks the model to keep a running, private sense of what
 // app idea this path is converging toward — well before the person
 // finishes the canvas or starts the 45-question ideation intake.
-async function generateCandidateBatch(pathContext, blockNames, existingLabelsByBlock = {}){
+async function generateCandidateBatch(pathContext, blockNames, existingLabels = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  // Same cross-fork repetition guard as generateGroupOptions above, just
-  // assembled per-block since this generates a whole batch in one call.
-  const diversityBlock = blockNames
-    .map(blockName => {
-      const existing = existingLabelsByBlock[blockName] || [];
-      if(existing.length === 0) return '';
-      return `For "${blockName}" specifically, these exact angles have ALREADY been used elsewhere in this same niche exploration — do not repeat them or write close rephrasings of the same underlying idea, find genuinely different territory instead: ${JSON.stringify(existing)}`;
-    })
-    .filter(Boolean)
-    .join('\n');
+  // Same niche-wide repetition guard as generateGroupOptions above — one
+  // shared list covering every block already explored anywhere in this
+  // niche, applied across the WHOLE batch being generated right now, not
+  // separated by block. Cross-block convergence is exactly the failure
+  // mode a per-block-only version of this missed.
+  const diversityNote = existingLabels.length > 0
+    ? `\nThis niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (across various blocks — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. If the obvious answer for any of these ${blockNames.length} blocks would just be a small variation on one of those (same core mechanism, same trigger, same setting, different wording), actively look for a DIFFERENT underlying angle for that block instead — a different mechanism, trigger, setting, or emotional hook entirely, not a rephrasing.`
+    : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${diversityBlock ? '\n' + diversityBlock : ''}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -895,16 +902,16 @@ async function activateOption(optionId){
       // smaller tradeoff than the checkpoint never cleanly happening.
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
-      const existingLabelsByBlock = await getExistingOptionLabelsForBlocks(nicheOptionId, assignedBlocks);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabelsByBlock);
+      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
     } else {
       // Checkpoint already shown along this path — proceed normally
       // through G, H, I (and wrap around the full 9 if this single path
       // goes deep enough to exhaust those too, though the 15-node cap
       // above means that's now a much rarer case than it used to be).
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-      const existingLabelsByBlock = await getExistingOptionLabelsForBlocks(nicheOptionId, assignedBlocks);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabelsByBlock);
+      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
     }
   }
 
@@ -1061,7 +1068,7 @@ async function activateOption(optionId){
     if(sanitizedOptions.length === 0){
       try {
         const nicheOptionId = await findNicheRootOptionId(optionId);
-        const existingLabels = await getExistingOptionLabelsForBlock(nicheOptionId, spec.blockName);
+        const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
         const retryGenerated = await generateGroupOptions(pathContext, { blockName: spec.blockName, existingLabels });
         sanitizedOptions = sanitizeOptionLabels(retryGenerated.options);
       } catch (retryErr) {
@@ -1184,7 +1191,7 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     let existingLabels = [];
     if(!isRoot && groupRow?.block_name){
       const nicheOptionId = await findNicheRootOptionId(groupRow.spawned_from_option_id);
-      existingLabels = await getExistingOptionLabelsForBlock(nicheOptionId, groupRow.block_name);
+      existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
     }
 
     const generated = await generateGroupOptions(pathContext, {
@@ -1318,6 +1325,238 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
     res.status(200).json({ ...result, chosenOption: chosen });
   } catch (err) {
     res.status(500).json({ error: 'Could not auto-activate.', detail: err.message });
+  }
+});
+
+// ============================================================
+// POST-SELECTION Retry/Random/+Custom — these three act on whatever
+// spawned from a SELECTED option, not on a group's own option list. Once
+// an option inside a group gets picked, that group's own Retry/Random/
+// +Custom footer (the ones above, scoped to a single groupId) stops being
+// what's shown — see script.js's footer-targeting logic. These three are
+// scoped to an OPTION id instead, since "what spawned from this pick" is
+// the actual unit of action here, not any single one of the (up to 3)
+// groups it produced.
+// ============================================================
+
+// Regenerates EVERY group spawned from this option at once — not one
+// group's content, all of them, together, as a single refresh of "what
+// this pick led to."
+app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
+  try {
+    const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
+    if(check.error) return res.status(check.status).json({ error: check.error });
+
+    const { data: spawnedGroups } = await supabase
+      .from('groups')
+      .select('id, block_name')
+      .eq('spawned_from_option_id', req.params.id);
+
+    if(!spawnedGroups || spawnedGroups.length === 0){
+      return res.status(400).json({ error: 'Nothing has spawned from this option yet.' });
+    }
+
+    const pathContext = await buildPathContextFromOption(req.params.id);
+    const nicheOptionId = await findNicheRootOptionId(req.params.id);
+    const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
+
+    const retried = [];
+
+    for(const group of spawnedGroups){
+      // Custom-idea groups (blank text-box slates) never had AI content
+      // to regenerate — retrying one wouldn't mean anything, so it's
+      // skipped rather than overwriting whatever the person typed in.
+      if(group.block_name === CUSTOM_IDEA_BLOCK_NAME) continue;
+
+      const generated = await generateGroupOptions(pathContext, {
+        isRetry: true,
+        isRoot: false,
+        blockName: group.block_name || null,
+        existingLabels
+      });
+
+      const { data: existingVersions } = await supabase
+        .from('group_versions')
+        .select('version_number')
+        .eq('group_id', group.id)
+        .order('version_number', { ascending: false })
+        .limit(1);
+
+      const nextVersionNumber = (existingVersions?.[0]?.version_number || 0) + 1;
+
+      const { data: newVersion, error: versionError } = await supabase
+        .from('group_versions')
+        .insert({ group_id: group.id, version_number: nextVersionNumber })
+        .select()
+        .single();
+
+      if(versionError) throw versionError;
+
+      const optionRows = sanitizeOptionLabels(generated.options).slice(0, 6).map((o, index) => ({
+        group_version_id: newVersion.id,
+        label: o.label,
+        position: index
+      }));
+
+      const { data: insertedOptions, error: optionsError } = await supabase
+        .from('options')
+        .insert(optionRows)
+        .select();
+
+      if(optionsError) throw optionsError;
+
+      await supabase.from('groups').update({ current_version_number: nextVersionNumber }).eq('id', group.id);
+
+      retried.push({ groupId: group.id, versionNumber: nextVersionNumber, options: insertedOptions });
+    }
+
+    res.status(200).json({ retried });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not retry the spawned groups.', detail: err.message });
+  }
+});
+
+// Two genuinely random picks (Math.random — deliberately NOT the
+// AI-assisted pick the per-group /groups/:id/random-branch above uses):
+// which spawned group, then which option inside it. Then activates that
+// option exactly like a real click would, so whatever spawns from IT
+// goes through the normal flow.
+app.post('/options/:id/random-spawned', requireAuth, async (req, res) => {
+  try {
+    const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
+    if(check.error) return res.status(check.status).json({ error: check.error });
+
+    const { data: spawnedGroups } = await supabase
+      .from('groups')
+      .select('id, current_version_number, block_name')
+      .eq('spawned_from_option_id', req.params.id);
+
+    // A custom-idea group with nothing typed into it yet has no option to
+    // pick — excluded from the random draw rather than landing on an
+    // empty group and erroring out.
+    const eligibleGroups = (spawnedGroups || []).filter(g => g.block_name !== CUSTOM_IDEA_BLOCK_NAME);
+    if(eligibleGroups.length === 0){
+      return res.status(400).json({ error: 'Nothing eligible has spawned from this option yet.' });
+    }
+
+    const chosenGroup = eligibleGroups[Math.floor(Math.random() * eligibleGroups.length)];
+
+    const { data: activeVersion } = await supabase
+      .from('group_versions')
+      .select('id')
+      .eq('group_id', chosenGroup.id)
+      .eq('version_number', chosenGroup.current_version_number)
+      .single();
+
+    if(!activeVersion) return res.status(400).json({ error: "Could not find that group's current options." });
+
+    const { data: optionsInGroup } = await supabase.from('options').select('id, label').eq('group_version_id', activeVersion.id);
+
+    if(!optionsInGroup || optionsInGroup.length === 0){
+      return res.status(400).json({ error: 'That group has no options yet.' });
+    }
+
+    const chosenOption = optionsInGroup[Math.floor(Math.random() * optionsInGroup.length)];
+    const result = await activateOption(chosenOption.id);
+
+    res.status(200).json({ ...result, chosenGroupId: chosenGroup.id, chosenOption });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not auto-activate a random spawned option.', detail: err.message });
+  }
+});
+
+// Spawns one brand new, empty sibling group next to whatever the AI
+// already generated for this option — a blank slate with zero options.
+// The EXISTING /groups/:id/custom-option route handles actually adding
+// the person's typed text into it once they submit; this route only
+// creates the empty container and finds it a clear spot on the canvas.
+app.post('/options/:id/custom-spawned-group', requireAuth, async (req, res) => {
+  try {
+    const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
+    if(check.error) return res.status(check.status).json({ error: check.error });
+
+    const { data: option } = await supabase.from('options').select('group_version_id').eq('id', req.params.id).single();
+    if(!option) return res.status(404).json({ error: 'Option not found.' });
+
+    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+    if(!version) return res.status(404).json({ error: 'Group version not found.' });
+
+    const { data: parentGroup } = await supabase.from('groups').select('blueprint_id, position_x, position_y').eq('id', version.group_id).single();
+    if(!parentGroup) return res.status(404).json({ error: 'Parent group not found.' });
+
+    const blueprintId = parentGroup.blueprint_id;
+    const MIN_CLEAR_X = 260;
+    const MIN_CLEAR_Y = 460;
+
+    const { data: existingGroups } = await supabase
+      .from('groups')
+      .select('position_x, position_y')
+      .eq('blueprint_id', blueprintId);
+
+    function overlaps(x, y){
+      return (existingGroups || []).some(g => {
+        const dx = Math.abs((g.position_x || 0) - x);
+        const dy = Math.abs((g.position_y || 0) - y);
+        return dx < MIN_CLEAR_X && dy < MIN_CLEAR_Y;
+      });
+    }
+
+    // A simpler fan-out than activateOption's batch radiator above —
+    // always exactly one new group here, never up to three at once, so a
+    // handful of candidate compass directions tried in random order is
+    // enough; falls back to stepping further right if every one of them
+    // is already occupied.
+    const tryAngles = [-90, 90, -45, 45, 0, 180].sort(() => Math.random() - 0.5);
+    let x = (parentGroup.position_x || 0) + 320;
+    let y = parentGroup.position_y || 0;
+    let placed = false;
+
+    for(const angleDeg of tryAngles){
+      const rad = (angleDeg * Math.PI) / 180;
+      const candidateX = (parentGroup.position_x || 0) + Math.cos(rad) * 400;
+      const candidateY = (parentGroup.position_y || 0) + Math.sin(rad) * 400;
+      if(!overlaps(candidateX, candidateY)){
+        x = candidateX;
+        y = candidateY;
+        placed = true;
+        break;
+      }
+    }
+
+    if(!placed){
+      let attempts = 0;
+      while(overlaps(x, y) && attempts < 20){
+        attempts++;
+        x += 280;
+      }
+    }
+
+    const { data: newGroup, error: groupInsertError } = await supabase
+      .from('groups')
+      .insert({
+        blueprint_id: blueprintId,
+        label: CUSTOM_IDEA_BLOCK_NAME,
+        block_name: CUSTOM_IDEA_BLOCK_NAME,
+        position_x: x,
+        position_y: y,
+        spawned_from_option_id: req.params.id
+      })
+      .select()
+      .single();
+
+    if(groupInsertError) throw groupInsertError;
+
+    const { data: newVersion, error: versionInsertError } = await supabase
+      .from('group_versions')
+      .insert({ group_id: newGroup.id, version_number: 1 })
+      .select()
+      .single();
+
+    if(versionInsertError) throw versionInsertError;
+
+    res.status(201).json({ group: newGroup, version: newVersion, options: [] });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not create a custom group.', detail: err.message });
   }
 });
 
