@@ -349,32 +349,103 @@ const IDEATION_BLOCK_NAMES = [
   'What You Actually Know About Yourself'
 ];
 
+// Once a niche's exploration has used all 6 of these — its pull toward
+// the space, who it's for, the pain, what's already out there, its
+// creative angle, and its vision for the experience — there's enough on
+// the table to actually synthesize a specific idea, not just gather more
+// context about the person. THE_IDEA_CHECKPOINT_BLOCK_NAME marks the
+// one-time pause that happens right there, before moving on to block 7
+// ("Context, Distribution & Values"). It's tracked via the exact same
+// block_name column the 9 canonical blocks use, just with a sentinel
+// value that deliberately isn't one of the 9 — so it never interferes
+// with pickNextBlocks' own filtering, and (like the 9) is scoped per
+// niche subtree, so it fires exactly once per niche, not once per
+// blueprint.
+const IDEA_CHECKPOINT_BLOCK_NAME = 'The Idea Taking Shape';
+const BLOCKS_BEFORE_IDEA_CHECKPOINT = IDEATION_BLOCK_NAMES.slice(0, 6);
+
 // Picks the next N blocks not yet used along THIS path — so a single
 // exploration marches through all 9 without repeats. If a path goes deep
 // enough to exhaust all 9, it cycles back from the start rather than
-// breaking.
+// breaking — but the wraparound portion explicitly excludes whatever's
+// already in `remaining`, so a single returned batch of 3 can never
+// contain the same block name twice (the original version of this could,
+// in the narrow case where almost all 9 were already used: e.g. only
+// "Personal Pull" left unused with needed=2 would have returned
+// ["Personal Pull", "Personal Pull", "Personal Connection..."] without
+// this guard).
 function pickNextBlocks(usedBlocks, count){
   const remaining = IDEATION_BLOCK_NAMES.filter(b => !usedBlocks.includes(b));
   if(remaining.length >= count) return remaining.slice(0, count);
   const needed = count - remaining.length;
-  return [...remaining, ...IDEATION_BLOCK_NAMES.slice(0, needed)];
+  const wraparound = IDEATION_BLOCK_NAMES.filter(b => !remaining.includes(b)).slice(0, needed);
+  return [...remaining, ...wraparound];
 }
 
-// Every block already used ANYWHERE in this blueprint — not just along one
-// linear ancestor chain. "Personal Pull," "Personal Connection to the
-// Audience," and "Personal Read on the Pain" are siblings spawned from the
-// same activation; walking only direct ancestors never sees siblings, which
-// is exactly how a block like Personal Pull could get assigned a second
-// time deeper down a different branch. Checking the whole blueprint avoids
-// that regardless of which branch you're exploring.
-async function getUsedBlockNames(blueprintId){
-  const { data: groups } = await supabase
-    .from('groups')
-    .select('block_name')
-    .eq('blueprint_id', blueprintId)
-    .not('block_name', 'is', null);
+// Finds the option, living directly inside the ROOT "Niches" group, that
+// this option's ancestor chain traces back to — i.e. which niche was
+// picked to start this whole exploration thread. If optionId itself is a
+// niche option, it traces back to itself immediately.
+async function findNicheRootOptionId(optionId){
+  let currentOptionId = optionId;
 
-  return (groups || []).map(g => g.block_name);
+  while(true){
+    const { data: option } = await supabase.from('options').select('id, group_version_id').eq('id', currentOptionId).single();
+    if(!option) return currentOptionId;
+
+    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+    if(!version) return currentOptionId;
+
+    const { data: group } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
+    if(!group) return currentOptionId;
+
+    if(!group.spawned_from_option_id){
+      // currentOptionId's own group has no parent option — that group IS
+      // the root, so currentOptionId itself is a niche option.
+      return currentOptionId;
+    }
+
+    currentOptionId = group.spawned_from_option_id;
+  }
+}
+
+// Every block_name used ANYWHERE inside ONE niche's exploration — every
+// group descended from nicheOptionId, at any depth, through any fork —
+// but NOT blocks used by a different niche picked elsewhere in the same
+// blueprint. Each niche is treated as its own independent idea: it
+// marches through all 9 blocks without repeating any of them anywhere
+// inside its own subtree, while a different niche gets a completely
+// fresh set of 9. This replaces an earlier version that scoped "already
+// used" to the WHOLE blueprint regardless of niche — which meant exploring
+// more than one niche (or even just branching enough within one) drained
+// the shared pool of 9 fast and started wrapping back around, reissuing
+// "Personal Pull" with fresh AI-generated content under the same name
+// elsewhere in the SAME niche's tree. That's a real architectural bug,
+// not a display issue — this fixes the actual scope, not just the result.
+async function getUsedBlockNamesInNicheSubtree(nicheOptionId){
+  const usedBlocks = [];
+  let frontierOptionIds = [nicheOptionId];
+
+  while(frontierOptionIds.length > 0){
+    const { data: groups } = await supabase
+      .from('groups')
+      .select('id, block_name')
+      .in('spawned_from_option_id', frontierOptionIds);
+
+    if(!groups || groups.length === 0) break;
+
+    groups.forEach(g => { if(g.block_name) usedBlocks.push(g.block_name); });
+
+    const groupIds = groups.map(g => g.id);
+    const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', groupIds);
+    const versionIds = (versions || []).map(v => v.id);
+    if(versionIds.length === 0) break;
+
+    const { data: options } = await supabase.from('options').select('id').in('group_version_id', versionIds);
+    frontierOptionIds = (options || []).map(o => o.id);
+  }
+
+  return usedBlocks;
 }
 
 // Shared instruction injected into every option-generating prompt — keeps
@@ -446,6 +517,40 @@ async function generateCandidateBatch(pathContext, blockNames){
   }));
 
   return { groups };
+}
+
+// The one-time checkpoint between block F and block G — see
+// IDEA_CHECKPOINT_BLOCK_NAME above for when this fires. Unlike every
+// other generator in this file, the instruction here is explicitly NOT
+// "ask about the person" — it's "actually work out what specific app idea
+// is crystallizing out of everything chosen so far, then ask a sharp,
+// idea-specific follow-up that meaningfully changes what gets built
+// next." Returns the same { groups: [...] } shape generateCandidateBatch
+// does (just with one entry instead of three), so activateOption can pick
+// between them without any change to how the result gets inserted.
+async function generateIdeaSynthesisCheckpoint(pathContext){
+  const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The person has just finished a deep round of personal exploration: their pull toward this space, who they're building for, the pain they've identified, what's already out there, where their creative instincts point, and their vision for the actual experience. Before this turns back to questions about THEM, pause and actually do the work of synthesizing what's emerged.
+
+Path so far (their actual choices, in order): ${pathDescription}
+
+Privately work out: what is the SPECIFIC, nameable app concept crystallizing out of this exact path? Not a vague theme or restatement of the niche — a real, concrete idea with a clear angle, the kind you could describe in one sharp sentence.
+
+Then generate up to 6 options for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked.${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, ...]}`;
+
+  const result = await callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
+  ]);
+
+  return {
+    groups: [{
+      groupLabel: IDEA_CHECKPOINT_BLOCK_NAME,
+      blockName: IDEA_CHECKPOINT_BLOCK_NAME,
+      options: sanitizeOptionLabels(result?.options)
+    }]
+  };
 }
 
 // AI-weighted pick for the Random button — asks Mistral which existing
@@ -635,9 +740,32 @@ async function activateOption(optionId){
 
   const pathContext = await buildPathContextFromOption(optionId);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
-  const usedBlocks = await getUsedBlockNames(blueprintId);
-  const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-  const generated = await generateCandidateBatch(pathContext, assignedBlocks);
+  const nicheOptionId = await findNicheRootOptionId(optionId);
+  const usedBlocks = await getUsedBlockNamesInNicheSubtree(nicheOptionId);
+
+  const ideaCheckpointAlreadyShown = usedBlocks.includes(IDEA_CHECKPOINT_BLOCK_NAME);
+  const remainingBeforeCheckpoint = BLOCKS_BEFORE_IDEA_CHECKPOINT.filter(b => !usedBlocks.includes(b));
+
+  let generated;
+  if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
+    // All 6 of A–F are used and the checkpoint hasn't fired yet for this
+    // niche — this is the moment.
+    generated = await generateIdeaSynthesisCheckpoint(pathContext);
+  } else if(!ideaCheckpointAlreadyShown){
+    // Still working through A–F. Capped at however many of THOSE 6 are
+    // actually left — never padded out to 3 by reaching into G/H/I, which
+    // is exactly how block G could leak into a batch alongside the tail
+    // of A–F before the checkpoint ever got evaluated. A batch near the
+    // end of this phase might be 1 or 2 groups instead of 3; that's a far
+    // smaller tradeoff than the checkpoint never cleanly happening.
+    const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
+    generated = await generateCandidateBatch(pathContext, remainingBeforeCheckpoint.slice(0, batchSize));
+  } else {
+    // Checkpoint already shown for this niche — proceed normally through
+    // G, H, I (and wrap around the full 9 if this niche goes deep enough
+    // to exhaust those too).
+    generated = await generateCandidateBatch(pathContext, pickNextBlocks(usedBlocks, 3));
+  }
 
   // Layout: radiate the candidates outward from the source like a spider
   // web, instead of forcing them into a fixed cross shape. For each one,
