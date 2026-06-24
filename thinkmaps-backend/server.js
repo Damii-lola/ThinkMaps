@@ -364,6 +364,60 @@ const IDEATION_BLOCK_NAMES = [
 const IDEA_CHECKPOINT_BLOCK_NAME = 'The Idea Taking Shape';
 const BLOCKS_BEFORE_IDEA_CHECKPOINT = IDEATION_BLOCK_NAMES.slice(0, 6);
 
+// Hard cap on path depth — see GENERATE_IDEAS_BLOCK_NAME below for what
+// happens once a single continuous path reaches this many picks deep.
+const PATH_DEPTH_CAP = 15;
+const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
+
+// Every block_name "used" for the purpose of deciding what to assign
+// NEXT, scoped to ONE continuous path: every ancestor of optionId, PLUS
+// every SIBLING generated in the same batch as each ancestor (siblings
+// share a spawned_from_option_id with the ancestor but weren't
+// necessarily the one actually clicked into). Siblings have to count —
+// they were assigned together in one Mistral call specifically so they'd
+// never collide with each other, so anything continuing through any ONE
+// of them needs to know the OTHERS in that same batch are already spoken
+// for too.
+//
+// Critically, this does NOT look at unrelated cousin branches — a
+// completely different fork that split off elsewhere in the same niche
+// (e.g. continuing through "Personal Connection" after having earlier
+// explored a few levels down "Personal Pull") gets its own fully
+// independent pool. This replaces an earlier version that scoped "already
+// used" to the WHOLE niche subtree regardless of which fork you were on:
+// that correctly stopped siblings from colliding, but meant exploring
+// more than a couple of forks in the same niche drained the shared pool
+// of 9 fast and forced premature wraparound — reissuing "Personal Pull"
+// with fresh content deep down an UNRELATED branch, which is exactly the
+// repetition still visible several levels into a real exploration.
+async function getUsedBlockNamesAlongPath(optionId){
+  const usedBlocks = [];
+  let currentOptionId = optionId;
+
+  while(currentOptionId){
+    const { data: option } = await supabase.from('options').select('id, group_version_id').eq('id', currentOptionId).single();
+    if(!option) break;
+
+    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+    if(!version) break;
+
+    const { data: group } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
+    if(!group) break;
+
+    if(group.spawned_from_option_id){
+      const { data: batchGroups } = await supabase
+        .from('groups')
+        .select('block_name')
+        .eq('spawned_from_option_id', group.spawned_from_option_id);
+      (batchGroups || []).forEach(g => { if(g.block_name) usedBlocks.push(g.block_name); });
+    }
+
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  return usedBlocks;
+}
+
 // Picks the next N blocks not yet used along THIS path — so a single
 // exploration marches through all 9 without repeats. If a path goes deep
 // enough to exhaust all 9, it cycles back from the start rather than
@@ -380,72 +434,6 @@ function pickNextBlocks(usedBlocks, count){
   const needed = count - remaining.length;
   const wraparound = IDEATION_BLOCK_NAMES.filter(b => !remaining.includes(b)).slice(0, needed);
   return [...remaining, ...wraparound];
-}
-
-// Finds the option, living directly inside the ROOT "Niches" group, that
-// this option's ancestor chain traces back to — i.e. which niche was
-// picked to start this whole exploration thread. If optionId itself is a
-// niche option, it traces back to itself immediately.
-async function findNicheRootOptionId(optionId){
-  let currentOptionId = optionId;
-
-  while(true){
-    const { data: option } = await supabase.from('options').select('id, group_version_id').eq('id', currentOptionId).single();
-    if(!option) return currentOptionId;
-
-    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
-    if(!version) return currentOptionId;
-
-    const { data: group } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
-    if(!group) return currentOptionId;
-
-    if(!group.spawned_from_option_id){
-      // currentOptionId's own group has no parent option — that group IS
-      // the root, so currentOptionId itself is a niche option.
-      return currentOptionId;
-    }
-
-    currentOptionId = group.spawned_from_option_id;
-  }
-}
-
-// Every block_name used ANYWHERE inside ONE niche's exploration — every
-// group descended from nicheOptionId, at any depth, through any fork —
-// but NOT blocks used by a different niche picked elsewhere in the same
-// blueprint. Each niche is treated as its own independent idea: it
-// marches through all 9 blocks without repeating any of them anywhere
-// inside its own subtree, while a different niche gets a completely
-// fresh set of 9. This replaces an earlier version that scoped "already
-// used" to the WHOLE blueprint regardless of niche — which meant exploring
-// more than one niche (or even just branching enough within one) drained
-// the shared pool of 9 fast and started wrapping back around, reissuing
-// "Personal Pull" with fresh AI-generated content under the same name
-// elsewhere in the SAME niche's tree. That's a real architectural bug,
-// not a display issue — this fixes the actual scope, not just the result.
-async function getUsedBlockNamesInNicheSubtree(nicheOptionId){
-  const usedBlocks = [];
-  let frontierOptionIds = [nicheOptionId];
-
-  while(frontierOptionIds.length > 0){
-    const { data: groups } = await supabase
-      .from('groups')
-      .select('id, block_name')
-      .in('spawned_from_option_id', frontierOptionIds);
-
-    if(!groups || groups.length === 0) break;
-
-    groups.forEach(g => { if(g.block_name) usedBlocks.push(g.block_name); });
-
-    const groupIds = groups.map(g => g.id);
-    const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', groupIds);
-    const versionIds = (versions || []).map(v => v.id);
-    if(versionIds.length === 0) break;
-
-    const { data: options } = await supabase.from('options').select('id').in('group_version_id', versionIds);
-    frontierOptionIds = (options || []).map(o => o.id);
-  }
-
-  return usedBlocks;
 }
 
 // Shared instruction injected into every option-generating prompt — keeps
@@ -740,31 +728,46 @@ async function activateOption(optionId){
 
   const pathContext = await buildPathContextFromOption(optionId);
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
-  const nicheOptionId = await findNicheRootOptionId(optionId);
-  const usedBlocks = await getUsedBlockNamesInNicheSubtree(nicheOptionId);
-
-  const ideaCheckpointAlreadyShown = usedBlocks.includes(IDEA_CHECKPOINT_BLOCK_NAME);
-  const remainingBeforeCheckpoint = BLOCKS_BEFORE_IDEA_CHECKPOINT.filter(b => !usedBlocks.includes(b));
 
   let generated;
-  if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
-    // All 6 of A–F are used and the checkpoint hasn't fired yet for this
-    // niche — this is the moment.
-    generated = await generateIdeaSynthesisCheckpoint(pathContext);
-  } else if(!ideaCheckpointAlreadyShown){
-    // Still working through A–F. Capped at however many of THOSE 6 are
-    // actually left — never padded out to 3 by reaching into G/H/I, which
-    // is exactly how block G could leak into a batch alongside the tail
-    // of A–F before the checkpoint ever got evaluated. A batch near the
-    // end of this phase might be 1 or 2 groups instead of 3; that's a far
-    // smaller tradeoff than the checkpoint never cleanly happening.
-    const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
-    generated = await generateCandidateBatch(pathContext, remainingBeforeCheckpoint.slice(0, batchSize));
+  if(pathContext.length >= PATH_DEPTH_CAP){
+    // This path is deep enough now — stop generating more exploration
+    // and hand back exactly one terminal group: a button, not a list of
+    // options to click into. No AI call needed; there's nothing left to
+    // generate, just a clear "you're done exploring, go turn this into
+    // an idea" stop sign at the end of this specific path.
+    generated = {
+      groups: [{
+        groupLabel: GENERATE_IDEAS_BLOCK_NAME,
+        blockName: GENERATE_IDEAS_BLOCK_NAME,
+        options: []
+      }]
+    };
   } else {
-    // Checkpoint already shown for this niche — proceed normally through
-    // G, H, I (and wrap around the full 9 if this niche goes deep enough
-    // to exhaust those too).
-    generated = await generateCandidateBatch(pathContext, pickNextBlocks(usedBlocks, 3));
+    const usedBlocks = await getUsedBlockNamesAlongPath(optionId);
+    const ideaCheckpointAlreadyShown = usedBlocks.includes(IDEA_CHECKPOINT_BLOCK_NAME);
+    const remainingBeforeCheckpoint = BLOCKS_BEFORE_IDEA_CHECKPOINT.filter(b => !usedBlocks.includes(b));
+
+    if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
+      // All 6 of A–F are used along THIS path and the checkpoint hasn't
+      // fired yet on it — this is the moment.
+      generated = await generateIdeaSynthesisCheckpoint(pathContext);
+    } else if(!ideaCheckpointAlreadyShown){
+      // Still working through A–F. Capped at however many of THOSE 6 are
+      // actually left — never padded out to 3 by reaching into G/H/I, which
+      // is exactly how block G could leak into a batch alongside the tail
+      // of A–F before the checkpoint ever got evaluated. A batch near the
+      // end of this phase might be 1 or 2 groups instead of 3; that's a far
+      // smaller tradeoff than the checkpoint never cleanly happening.
+      const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
+      generated = await generateCandidateBatch(pathContext, remainingBeforeCheckpoint.slice(0, batchSize));
+    } else {
+      // Checkpoint already shown along this path — proceed normally
+      // through G, H, I (and wrap around the full 9 if this single path
+      // goes deep enough to exhaust those too, though the 15-node cap
+      // above means that's now a much rarer case than it used to be).
+      generated = await generateCandidateBatch(pathContext, pickNextBlocks(usedBlocks, 3));
+    }
   }
 
   // Layout: radiate the candidates outward from the source like a spider
