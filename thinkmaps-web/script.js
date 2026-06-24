@@ -873,6 +873,29 @@ function resolveGroupVisualState(group, info){
 // terminal stop sign at the end of a path that's gone 15 nodes deep.
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
+// Must match CUSTOM_IDEA_BLOCK_NAME in server.js exactly — a group of
+// this block_name is a blank slate: no AI-generated options, just a
+// persistent text box the person fills in themselves.
+const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
+
+// Finds whichever option in this group is the LIVE selected one — not
+// just "is_selected", but specifically the one that hasn't been
+// superseded by a sibling picked later in the same group. More than one
+// option in a group can end up marked is_selected over time (pick one,
+// come back, pick a different one instead); the superseded one's spawned
+// children get frozen, which is exactly the signal used here to tell
+// "the choice that's still actually live" from "a choice that used to be
+// live." Returns null if nothing in this group has ever been selected.
+function findLiveSelectedOption(options){
+  const selectedOptions = options.filter(o => o.is_selected);
+  if(selectedOptions.length === 0) return null;
+  const live = selectedOptions.find(o => {
+    const children = canvasState.groups.filter(g => g.spawned_from_option_id === o.id);
+    return children.length === 0 || children.some(c => !c.is_frozen);
+  });
+  return live || selectedOptions[selectedOptions.length - 1];
+}
+
 function renderGroups(visible, infoByGroupId){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
@@ -885,11 +908,13 @@ function renderGroups(visible, infoByGroupId){
     const card = document.createElement('div');
     const { isOnPath, isBatchFaded } = resolveGroupVisualState(group, info[group.id]);
     const isGenerateIdeasNode = group.block_name === GENERATE_IDEAS_BLOCK_NAME;
+    const isCustomIdeaNode = group.block_name === CUSTOM_IDEA_BLOCK_NAME;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
     if(isBatchFaded) classNames.push('batch-unpicked');
     if(isOnPath) classNames.push('on-path');
     if(isGenerateIdeasNode) classNames.push('generate-ideas-node');
+    if(isCustomIdeaNode) classNames.push('custom-idea-node');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -949,6 +974,61 @@ function renderGroups(visible, infoByGroupId){
       `;
     }).join('');
 
+    // A custom-idea group is a blank slate: whatever's already been typed
+    // in renders as a normal, clickable options list (same three states as
+    // above), but instead of Retry/Random/+Custom it always shows the
+    // input that adds MORE typed options to itself — capped at 6, same as
+    // every other group's option limit. It still follows the same
+    // never-shows-a-footer rule as any other spawned child, since this
+    // box is itself one of the (up to 3-or-4) things that spawned from a
+    // selection, not something that's had a selection made on it.
+    if(isCustomIdeaNode){
+      const inputRowHtml = options.length < 6 ? `
+        <div class="canvas-custom-row canvas-custom-row-persistent">
+          <input type="text" placeholder="Write your own idea…" data-custom-input />
+          <button class="mini-btn" data-action="custom-submit">Add</button>
+        </div>` : '';
+
+      card.innerHTML = `
+        <div class="canvas-group-header" data-drag-handle>
+          <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
+          <div class="canvas-group-title"><span>${escapeHtml(group.label)}</span></div>
+          <div class="header-controls">${controlsHtml}</div>
+        </div>
+        <div class="canvas-group-options">${optionsHtml}</div>
+        ${inputRowHtml}
+      `;
+      layer.appendChild(card);
+      return;
+    }
+
+    // Footer-targeting rule for everything else:
+    //  - root always shows its footer, always targeting its OWN option
+    //    list — unaffected by anything below, by design.
+    //  - any other group shows NO footer until something inside it has
+    //    actually been picked. The moment it has, the footer appears —
+    //    but now it targets whatever spawned from THAT pick, not this
+    //    group's own (already-decided) option list. A freshly spawned
+    //    sibling with nothing chosen in it yet stays footer-less.
+    const liveSelectedOption = isRootGroup ? null : findLiveSelectedOption(options);
+    const footerTargetOptionId = isRootGroup ? null : liveSelectedOption?.id;
+    const showFooter = isRootGroup || !!liveSelectedOption;
+
+    // The toggle-able input row only ever makes sense in root's own mode
+    // (+Custom there adds a typed option to root's existing list). In
+    // post-selection mode, +Custom spawns a whole new sibling group
+    // instead — that row would just be dead, unreachable markup there.
+    const footerHtml = showFooter ? `
+      <div class="canvas-group-footer" ${footerTargetOptionId ? `data-footer-target-option="${footerTargetOptionId}"` : ''}>
+        <button class="mini-btn" data-action="retry" ${disabledAttr}>Retry</button>
+        <button class="mini-btn" data-action="random" ${disabledAttr}>Random</button>
+        <button class="mini-btn" data-action="custom-toggle" ${disabledAttr}>+ Custom</button>
+      </div>
+      ${footerTargetOptionId ? '' : `<div class="canvas-custom-row" style="display:none;">
+        <input type="text" placeholder="Type your own option…" data-custom-input />
+        <button class="mini-btn" data-action="custom-submit">Add</button>
+      </div>`}` : '';
+
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
         <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
@@ -956,15 +1036,7 @@ function renderGroups(visible, infoByGroupId){
         <div class="header-controls">${controlsHtml}</div>
       </div>
       <div class="canvas-group-options">${optionsHtml}</div>
-      <div class="canvas-group-footer">
-        <button class="mini-btn" data-action="retry" ${disabledAttr}>Retry</button>
-        <button class="mini-btn" data-action="random" ${disabledAttr}>Random</button>
-        <button class="mini-btn" data-action="custom-toggle" ${disabledAttr}>+ Custom</button>
-      </div>
-      <div class="canvas-custom-row" style="display:none;">
-        <input type="text" placeholder="Type your own option…" data-custom-input />
-        <button class="mini-btn" data-action="custom-submit">Add</button>
-      </div>
+      ${footerHtml}
     `;
 
     layer.appendChild(card);
@@ -1025,17 +1097,35 @@ function wireGroupEvents(){
     if(prevBtn) prevBtn.addEventListener('click', () => switchVersion(groupId, -1));
     if(nextBtn) nextBtn.addEventListener('click', () => switchVersion(groupId, 1));
 
+    const footerEl = card.querySelector('.canvas-group-footer');
+    const footerTargetOptionId = footerEl?.dataset.footerTargetOption || null;
+
     const retryBtn = card.querySelector('[data-action="retry"]');
-    if(retryBtn) retryBtn.addEventListener('click', () => handleRetry(groupId));
+    if(retryBtn) retryBtn.addEventListener('click', () => {
+      if(footerTargetOptionId) handleRetrySpawned(footerTargetOptionId);
+      else handleRetry(groupId);
+    });
 
     const randomBtn = card.querySelector('[data-action="random"]');
-    if(randomBtn) randomBtn.addEventListener('click', () => handleRandom(groupId));
+    if(randomBtn) randomBtn.addEventListener('click', () => {
+      if(footerTargetOptionId) handleRandomSpawned(footerTargetOptionId);
+      else handleRandom(groupId);
+    });
 
     const customToggle = card.querySelector('[data-action="custom-toggle"]');
     const customRow = card.querySelector('.canvas-custom-row');
-    if(customToggle && customRow){
+    if(customToggle){
       customToggle.addEventListener('click', () => {
-        customRow.style.display = customRow.style.display === 'none' ? 'flex' : 'none';
+        if(footerTargetOptionId){
+          // Post-selection +Custom doesn't toggle an inline row — there
+          // isn't one (see renderGroups). It spawns a whole new sibling
+          // group instead, since "add one more typed option to an
+          // existing group" isn't the same action as "give me a brand
+          // new place to write something."
+          handleCustomSpawnedGroup(footerTargetOptionId);
+        } else if(customRow){
+          customRow.style.display = customRow.style.display === 'none' ? 'flex' : 'none';
+        }
       });
     }
 
@@ -1670,6 +1760,68 @@ async function handleCustomOption(groupId, label){
     await loadGraph();
   } catch (err){
     alert('Something went wrong adding that option.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+// ---- Post-selection Retry/Random/+Custom — see renderGroups for when
+// these actually show up versus the per-group versions above. All three
+// take the SELECTED OPTION's id, not a group id, since "what spawned
+// from this pick" is the thing being acted on. ----
+
+async function handleRetrySpawned(optionId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/options/${optionId}/retry-spawned`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not retry the spawned groups.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong retrying the spawned groups.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleRandomSpawned(optionId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/options/${optionId}/random-spawned`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not auto-branch.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong with Random.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+async function handleCustomSpawnedGroup(optionId){
+  if(canvasState.isLocked) return;
+  setCanvasBusy(true);
+  try {
+    const res = await authedFetch(`/options/${optionId}/custom-spawned-group`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || 'Could not create a custom group.');
+      return;
+    }
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong creating a custom group.');
   } finally {
     setCanvasBusy(false);
   }
