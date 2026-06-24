@@ -849,6 +849,11 @@ function resolveGroupVisualState(group, info){
   return { isOnPath, isBatchFaded };
 }
 
+// Must match GENERATE_IDEAS_BLOCK_NAME in server.js exactly — this is the
+// one card type that isn't really "a group with options," it's a single
+// terminal stop sign at the end of a path that's gone 15 nodes deep.
+const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
+
 function renderGroups(visible, infoByGroupId){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
@@ -860,10 +865,12 @@ function renderGroups(visible, infoByGroupId){
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
     const { isOnPath, isBatchFaded } = resolveGroupVisualState(group, info[group.id]);
+    const isGenerateIdeasNode = group.block_name === GENERATE_IDEAS_BLOCK_NAME;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
     if(isBatchFaded) classNames.push('batch-unpicked');
     if(isOnPath) classNames.push('on-path');
+    if(isGenerateIdeasNode) classNames.push('generate-ideas-node');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -887,6 +894,27 @@ function renderGroups(visible, infoByGroupId){
     // makes the title genuinely centered no matter what's actually in the
     // controls (just a remove button, a version switcher, both, or neither).
     const controlsHtml = `${versionNav}${removeBtnHtml}`;
+
+    // This path has gone 15 nodes deep — render a single clear call to
+    // action instead of an options list. No options to click into, no
+    // Retry/Random/Custom (there's nothing to retry or randomize), just
+    // one button that goes straight to the same idea-generation flow the
+    // header's button triggers.
+    if(isGenerateIdeasNode){
+      card.innerHTML = `
+        <div class="canvas-group-header" data-drag-handle>
+          <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
+          <div class="canvas-group-title"><span>${escapeHtml(group.label)}</span></div>
+          <div class="header-controls">${controlsHtml}</div>
+        </div>
+        <div class="canvas-generate-ideas-body">
+          <p>This path's gone deep enough to turn into a real idea.</p>
+          <button class="btn btn-primary" data-action="generate-ideas-node">Generate Ideas</button>
+        </div>
+      `;
+      layer.appendChild(card);
+      return;
+    }
 
     // Three states per option:
     //  - selected (already activated)  → its dot is the next drag SOURCE
@@ -948,6 +976,11 @@ function wireGroupEvents(){
       }
       // 'inert' options do nothing on their own — they're only reachable as
       // a drop target for someone else's drag (see endLineDrag).
+    });
+
+    const generateIdeasBtn = card.querySelector('[data-action="generate-ideas-node"]');
+    if(generateIdeasBtn) generateIdeasBtn.addEventListener('click', () => {
+      window.location.href = `ideate.html?blueprint=${canvasState.blueprintId}`;
     });
 
     const removeBtn = card.querySelector('.header-controls [data-action="remove-group"]');
