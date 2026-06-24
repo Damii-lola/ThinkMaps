@@ -460,13 +460,97 @@ function pickNextBlocks(usedBlocks, count){
   return [...remaining, ...wraparound];
 }
 
+// Finds the option, living directly inside the ROOT "Niches" group, that
+// this option's ancestor chain traces back to — i.e. which niche was
+// picked to start this whole exploration thread.
+//
+// This existed before under a different job (scoping "which blocks are
+// already used") and was removed when that got correctly rescoped to
+// per-path instead (see getUsedBlockNamesAlongPath) — exploring multiple
+// forks of one niche was draining a shared block-name pool too fast.
+// It's back now for a DIFFERENT, deliberately OPPOSITE-scoped purpose:
+// finding what option TEXT already exists for a given block ANYWHERE in
+// the niche, not just along one path. Per-path scoping is exactly wrong
+// for this — it would never catch the content-level repetition that
+// shows up ACROSS forks: a dozen unrelated "Personal Pull" cards on
+// different branches of the same niche, each generated in isolation,
+// converging on near-identical phrasing because a narrow niche only has
+// so much genuinely different territory to cover for that one block.
+async function findNicheRootOptionId(optionId){
+  let currentOptionId = optionId;
+
+  while(true){
+    const { data: option } = await supabase.from('options').select('id, group_version_id').eq('id', currentOptionId).single();
+    if(!option) return currentOptionId;
+
+    const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+    if(!version) return currentOptionId;
+
+    const { data: group } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
+    if(!group) return currentOptionId;
+
+    if(!group.spawned_from_option_id) return currentOptionId;
+    currentOptionId = group.spawned_from_option_id;
+  }
+}
+
+// Walks the ENTIRE niche subtree (every group descended from
+// nicheOptionId, at any depth, through any fork) and collects every
+// option LABEL from groups whose block_name matches the one given.
+// Capped at the most recent 20 found, purely to keep the prompt a sane
+// size once a niche has been explored heavily.
+async function getExistingOptionLabelsForBlock(nicheOptionId, blockName){
+  const labels = [];
+  let frontierOptionIds = [nicheOptionId];
+
+  while(frontierOptionIds.length > 0){
+    const { data: groups } = await supabase
+      .from('groups')
+      .select('id, block_name')
+      .in('spawned_from_option_id', frontierOptionIds);
+
+    if(!groups || groups.length === 0) break;
+
+    const matchingGroupIds = groups.filter(g => g.block_name === blockName).map(g => g.id);
+    if(matchingGroupIds.length > 0){
+      const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', matchingGroupIds);
+      const versionIds = (versions || []).map(v => v.id);
+      if(versionIds.length > 0){
+        const { data: opts } = await supabase.from('options').select('label').in('group_version_id', versionIds);
+        (opts || []).forEach(o => { if(o.label) labels.push(o.label); });
+      }
+    }
+
+    const allGroupIds = groups.map(g => g.id);
+    const { data: allVersions } = await supabase.from('group_versions').select('id').in('group_id', allGroupIds);
+    const allVersionIds = (allVersions || []).map(v => v.id);
+    if(allVersionIds.length === 0) break;
+
+    const { data: allOptions } = await supabase.from('options').select('id').in('group_version_id', allVersionIds);
+    frontierOptionIds = (allOptions || []).map(o => o.id);
+  }
+
+  return labels.slice(-20);
+}
+
+// Same lookup, for several blocks at once — generateCandidateBatch
+// generates a whole batch in one call, so it needs "what already exists"
+// for EACH assigned block, keyed by name, to build one combined prompt.
+async function getExistingOptionLabelsForBlocks(nicheOptionId, blockNames){
+  const byBlock = {};
+  for(const blockName of blockNames){
+    byBlock[blockName] = await getExistingOptionLabelsForBlock(nicheOptionId, blockName);
+  }
+  return byBlock;
+}
+
 // Shared instruction injected into every option-generating prompt — keeps
 // each option short (fits a line or two) instead of one long run-on
 // sentence. A naturally big/complex idea gets split into several short
 // options rather than crammed into one.
 const SHORT_OPTION_RULE = ' Keep every option SHORT — about 4 to 7 words, never a full sentence. If one underlying idea is naturally big or has multiple parts, split it into two or three separate short options instead of writing one long one.';
 
-async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null } = {}){
+async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null, existingLabels = [] } = {}){
   const pathDescription = pathContext.length === 0
     ? 'This is the very start of the blueprint — no path chosen yet.'
     : pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
@@ -479,7 +563,15 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
     ? ' Give a genuinely different, fresh set of alternatives than what would typically come first — avoid repeating obvious options, but stay within the same block.'
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
+  // Catches repetition ACROSS forks of the same niche — every other guard
+  // in this file only ever sees one path in isolation, which is exactly
+  // why "Personal Pull" kept converging on near-identical phrasing on
+  // unrelated branches of the same niche exploration.
+  const diversityNote = (!isRoot && existingLabels.length > 0)
+    ? ` These exact angles have ALREADY been used elsewhere in this same niche exploration for this exact block — do not repeat them or write close rephrasings of the same underlying idea, find genuinely different territory instead: ${JSON.stringify(existingLabels)}`
+    : '';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -503,11 +595,22 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 // and explicitly asks the model to keep a running, private sense of what
 // app idea this path is converging toward — well before the person
 // finishes the canvas or starts the 45-question ideation intake.
-async function generateCandidateBatch(pathContext, blockNames){
+async function generateCandidateBatch(pathContext, blockNames, existingLabelsByBlock = {}){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  // Same cross-fork repetition guard as generateGroupOptions above, just
+  // assembled per-block since this generates a whole batch in one call.
+  const diversityBlock = blockNames
+    .map(blockName => {
+      const existing = existingLabelsByBlock[blockName] || [];
+      if(existing.length === 0) return '';
+      return `For "${blockName}" specifically, these exact angles have ALREADY been used elsewhere in this same niche exploration — do not repeat them or write close rephrasings of the same underlying idea, find genuinely different territory instead: ${JSON.stringify(existing)}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${diversityBlock ? '\n' + diversityBlock : ''}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -772,6 +875,13 @@ async function activateOption(optionId){
     const ideaCheckpointAlreadyShown = usedBlocks.includes(IDEA_CHECKPOINT_BLOCK_NAME);
     const remainingBeforeCheckpoint = BLOCKS_BEFORE_IDEA_CHECKPOINT.filter(b => !usedBlocks.includes(b));
 
+    // Fetched once here, regardless of which branch below fires — this is
+    // what lets generateCandidateBatch tell the model what's already been
+    // said elsewhere in THIS niche (any fork, not just this path), so
+    // content stops converging on the same handful of phrasings every
+    // time a narrow niche gets explored in more than one direction.
+    const nicheOptionId = await findNicheRootOptionId(optionId);
+
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
       // All 6 of A–F are used along THIS path and the checkpoint hasn't
       // fired yet on it — this is the moment.
@@ -784,13 +894,17 @@ async function activateOption(optionId){
       // end of this phase might be 1 or 2 groups instead of 3; that's a far
       // smaller tradeoff than the checkpoint never cleanly happening.
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
-      generated = await generateCandidateBatch(pathContext, remainingBeforeCheckpoint.slice(0, batchSize));
+      const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
+      const existingLabelsByBlock = await getExistingOptionLabelsForBlocks(nicheOptionId, assignedBlocks);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabelsByBlock);
     } else {
       // Checkpoint already shown along this path — proceed normally
       // through G, H, I (and wrap around the full 9 if this single path
       // goes deep enough to exhaust those too, though the 15-node cap
       // above means that's now a much rarer case than it used to be).
-      generated = await generateCandidateBatch(pathContext, pickNextBlocks(usedBlocks, 3));
+      const assignedBlocks = pickNextBlocks(usedBlocks, 3);
+      const existingLabelsByBlock = await getExistingOptionLabelsForBlocks(nicheOptionId, assignedBlocks);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabelsByBlock);
     }
   }
 
@@ -946,7 +1060,9 @@ async function activateOption(optionId){
     // specific block before giving up.
     if(sanitizedOptions.length === 0){
       try {
-        const retryGenerated = await generateGroupOptions(pathContext, { blockName: spec.blockName });
+        const nicheOptionId = await findNicheRootOptionId(optionId);
+        const existingLabels = await getExistingOptionLabelsForBlock(nicheOptionId, spec.blockName);
+        const retryGenerated = await generateGroupOptions(pathContext, { blockName: spec.blockName, existingLabels });
         sanitizedOptions = sanitizeOptionLabels(retryGenerated.options);
       } catch (retryErr) {
         // still nothing — group will just render with zero options, recoverable via Retry on the canvas
@@ -1064,10 +1180,18 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     const pathContext = groupRow?.spawned_from_option_id
       ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
       : [];
+
+    let existingLabels = [];
+    if(!isRoot && groupRow?.block_name){
+      const nicheOptionId = await findNicheRootOptionId(groupRow.spawned_from_option_id);
+      existingLabels = await getExistingOptionLabelsForBlock(nicheOptionId, groupRow.block_name);
+    }
+
     const generated = await generateGroupOptions(pathContext, {
       isRetry: true,
       isRoot,
-      blockName: groupRow?.block_name || null
+      blockName: groupRow?.block_name || null,
+      existingLabels
     });
 
     const { data: existingVersions } = await supabase
@@ -3873,13 +3997,19 @@ const CONFIRMATION_QUESTION_COUNT = 3;
 // Each of the 3 confirmation questions has a distinct, deliberate job —
 // not "ask 3 more things about the person," but pressure-test the 3
 // load-bearing parts of the idea that just got synthesized from their
-// path: the problem itself, the solution approach, and who it's for /
-// how it makes money. Indexed 0-2, matching answersSoFar.length when
-// generating the NEXT question.
+// path: the problem itself, the solution approach, and who it's for.
+// Deliberately NOT monetization pricing — picking between specific dollar
+// amounts ($9.99 vs $14.99 vs $29) requires real market research nobody
+// has at this stage, which is exactly the kind of question every other
+// generator in this file is explicitly built to avoid. The model can
+// still PROPOSE a monetization approach as part of the idea itself (see
+// synthesizeIdeaDraftFromPath/synthesizeFinalIdea below) — that's the AI
+// doing the work. Asking the person to pick a price point is asking them
+// something they have no way to actually know.
 const CONFIRMATION_INTENTS = [
   'Confirm whether the core problem this idea is built around is genuinely the right one to solve — or surface a sharper, more specific version of it worth considering instead.',
   'Confirm whether the proposed core feature or solution approach is actually the strongest way to solve that problem — or surface a stronger alternative angle.',
-  'Confirm whether the target audience and monetization approach genuinely fit this idea — or surface a better-fitting combination.'
+  'Confirm whether the target audience genuinely fits this idea — or surface a different, better-fitting group of people this should actually be built for instead.'
 ];
 
 // Synthesizes a working idea draft from a FULL 15-node canvas path — far
@@ -3900,7 +4030,11 @@ async function synthesizeIdeaDraftFromPath(pathSummary){
 // person," but pressure-test and sharpen THIS exact idea draft. Informed
 // by whatever's already been confirmed in earlier questions, same
 // "treat prior answers as real signal" principle used everywhere else in
-// this file.
+// this file. Same "answerable from instinct, never market research"
+// guardrail every other generator here already has — this one was
+// missing it, which is exactly how a prior version of this drifted into
+// asking people to pick between specific monetization price points they
+// have no actual way to know.
 async function generateConfirmationQuestion(ideaDraft, pathSummary, answersSoFar){
   const questionIndex = answersSoFar.length;
   const intent = CONFIRMATION_INTENTS[questionIndex] || CONFIRMATION_INTENTS[CONFIRMATION_INTENTS.length - 1];
@@ -3909,7 +4043,7 @@ async function generateConfirmationQuestion(ideaDraft, pathSummary, answersSoFar
     ? 'No confirmation questions answered yet.'
     : answersSoFar.map((a, i) => `Confirmation ${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
 
-  const systemPrompt = `You are writing ONE confirmation question for ThinkMaps. Its purpose is to harden a SPECIFIC app idea before deep competitive research begins — not gather new general information about the person, but pressure-test and sharpen THIS EXACT IDEA. The idea draft so far: ${JSON.stringify(ideaDraft)}. This question's specific job: ${intent} Write the actual question text — one sentence, specific to this exact idea — and exactly 6 answer options, each a genuinely different concrete direction the idea could confirm or pivot toward, not vague yes/no options. Include one honest "this all sounds right, don't change anything" option among the 6.${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
+  const systemPrompt = `You are writing ONE confirmation question for ThinkMaps. Its purpose is to harden a SPECIFIC app idea before deep competitive research begins — not gather new general information about the person, but pressure-test and sharpen THIS EXACT IDEA. The idea draft so far: ${JSON.stringify(ideaDraft)}. This question's specific job: ${intent} Write the actual question text — one sentence, specific to this exact idea — and exactly 6 answer options, each a genuinely different concrete direction the idea could confirm or pivot toward, not vague yes/no options. Every option must be something the person could answer from their own knowledge, instinct, or preference — never a specific number, price, or statistic that would require real market research they don't have (e.g. never ask them to pick between dollar amounts). Include one honest "this all sounds right, don't change anything" option among the 6.${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
