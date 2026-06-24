@@ -46,6 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initNavAuthState();
   initAppPage();
   initIdeatePage();
+  initConfirmPage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -391,18 +392,30 @@ async function handleLogout(){
 }
 
 // ---------- NAV AUTH STATE ----------
-// Runs on every page. If #navCta exists (currently just index.html, but
-// works the same on any future page with this same nav pattern) and the
-// person already has a session — Supabase persists that across visits by
-// default — swap "Sign in" / "Start a blueprint" for a single "Dashboard" link.
+// Runs on every page. If a session already exists — Supabase persists
+// that across visits by default — two things happen:
+//  1. If #navCta exists (currently just index.html), swap "Sign in" /
+//     "Start a blueprint" for a single "Dashboard" link.
+//  2. EVERY other link pointing at auth.html anywhere on the page (hero
+//     CTA, pricing buttons, the closing CTA band — any of them) gets
+//     retargeted straight to the dashboard too. This used to only cover
+//     the nav button: someone already signed in who clicked "Start your
+//     blueprint for free" in the hero, or either pricing button, or the
+//     closing CTA, still got sent to the sign-in screen — a real bug, not
+//     just a missed nav-bar nicety, since auth.html was never going to be
+//     a useful destination for someone who's already authenticated.
 async function initNavAuthState(){
-  const navCta = document.getElementById('navCta');
-  if(!navCta) return;
-
   const session = await getActiveSession();
-  if(session){
+  if(!session) return;
+
+  const navCta = document.getElementById('navCta');
+  if(navCta){
     navCta.innerHTML = `<a href="dashboard.html" class="btn btn-primary">Dashboard</a>`;
   }
+
+  document.querySelectorAll('a[href="auth.html"]').forEach(a => {
+    a.href = 'dashboard.html';
+  });
 }
 
 // ---------- DASHBOARD PAGE ----------
@@ -671,6 +684,19 @@ function escapeHtml(str){
   return div.innerHTML;
 }
 
+// Every canvas interaction (pan, group drag, line drag) needs a single
+// {clientX, clientY} regardless of whether it's driven by a mouse or a
+// finger. TouchEvent never has its own .clientX/.clientY — it carries a
+// .touches (in-progress) or .changedTouches (just lifted) list of Touch
+// objects instead, each of which DOES have clientX/clientY. This is the
+// one place that distinction gets resolved, so every handler below can
+// just work with plain coordinates and not care which input type it is.
+function getEventPoint(e){
+  if(e.touches && e.touches.length > 0) return { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
+  if(e.changedTouches && e.changedTouches.length > 0) return { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY };
+  return { clientX: e.clientX, clientY: e.clientY };
+}
+
 async function initAppPage(){
   const worldEl = document.getElementById('canvasWorld');
   if(!worldEl) return;
@@ -688,13 +714,6 @@ async function initAppPage(){
     return;
   }
   canvasState.blueprintId = blueprintId;
-
-  const generateBtn = document.getElementById('generateIdeasBtn');
-  if(generateBtn){
-    generateBtn.addEventListener('click', () => {
-      window.location.href = `ideate.html?blueprint=${canvasState.blueprintId}`;
-    });
-  }
 
   setupCanvasInteractions();
   setupFullscreenToggle();
@@ -959,7 +978,10 @@ function wireGroupEvents(){
     const groupId = card.dataset.groupId;
 
     const dragHandle = card.querySelector('[data-drag-handle]');
-    if(dragHandle) dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
+    if(dragHandle){
+      dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
+      dragHandle.addEventListener('touchstart', (e) => startGroupDrag(e, groupId), { passive: false });
+    }
 
     card.querySelectorAll('.canvas-option').forEach(optEl => {
       const optionId = optEl.dataset.optionId;
@@ -968,10 +990,17 @@ function wireGroupEvents(){
 
       if(optEl.classList.contains('selected')){
         // Already active — drag FROM here to pick the next step.
-        if(dot) dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+        if(dot){
+          dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+          dot.addEventListener('touchstart', (e) => startLineDrag(e, optionId, groupId, optionIndex), { passive: false });
+        }
       } else if(optEl.classList.contains('root-clickable')){
         // Root, never activated — a plain click is the bootstrap trigger,
-        // since there's nothing before it to drag from.
+        // since there's nothing before it to drag from. 'click' already
+        // fires from a tap on mobile without any extra wiring, as long as
+        // nothing upstream calls preventDefault on the same touch (it
+        // doesn't — the viewport's touchstart handler bails out early for
+        // any touch that started inside a .canvas-group).
         optEl.addEventListener('click', () => handleOptionActivate(optionId));
       }
       // 'inert' options do nothing on their own — they're only reachable as
@@ -980,7 +1009,9 @@ function wireGroupEvents(){
 
     const generateIdeasBtn = card.querySelector('[data-action="generate-ideas-node"]');
     if(generateIdeasBtn) generateIdeasBtn.addEventListener('click', () => {
-      window.location.href = `ideate.html?blueprint=${canvasState.blueprintId}`;
+      const group = canvasState.groups.find(g => g.id === groupId);
+      const sourceOptionId = group?.spawned_from_option_id;
+      window.location.href = `confirm.html?blueprint=${canvasState.blueprintId}&option=${sourceOptionId}`;
     });
 
     const removeBtn = card.querySelector('.header-controls [data-action="remove-group"]');
@@ -1244,23 +1275,25 @@ function setupCanvasInteractions(){
   const viewport = document.getElementById('canvasViewport');
   if(!viewport) return;
 
-  viewport.addEventListener('mousedown', (e) => {
-    if(e.target.closest('.canvas-group')) return; // group drag handles its own mousedown
+  // Shared by both input types below — mouse and touch each just resolve
+  // their own event down to plain coordinates and call into these three.
+  function handlePointerDown(e, clientX, clientY){
+    if(e.target.closest('.canvas-group')) return; // group/option drag handles its own start
     isPanning = true;
-    panStartPointer = { x: e.clientX, y: e.clientY };
+    panStartPointer = { x: clientX, y: clientY };
     panStartValue = { ...canvasState.pan };
     viewport.classList.add('panning');
-  });
+  }
 
-  window.addEventListener('mousemove', (e) => {
+  function handlePointerMove(clientX, clientY){
     if(isPanning){
-      const dx = e.clientX - panStartPointer.x;
-      const dy = e.clientY - panStartPointer.y;
+      const dx = clientX - panStartPointer.x;
+      const dy = clientY - panStartPointer.y;
       canvasState.pan = { x: panStartValue.x + dx, y: panStartValue.y + dy };
       applyWorldTransform();
     } else if(draggingGroupId){
-      const dx = (e.clientX - dragStartPointer.x) / canvasState.zoom;
-      const dy = (e.clientY - dragStartPointer.y) / canvasState.zoom;
+      const dx = (clientX - dragStartPointer.x) / canvasState.zoom;
+      const dy = (clientY - dragStartPointer.y) / canvasState.zoom;
       const group = canvasState.groups.find(g => g.id === draggingGroupId);
       if(group){
         group.position_x = dragStartGroupPos.x + dx;
@@ -1273,11 +1306,11 @@ function setupCanvasInteractions(){
         renderLines(computeVisibleGroups());
       }
     } else if(lineDragState){
-      updateLineDragPreview(e.clientX, e.clientY);
+      updateLineDragPreview(clientX, clientY);
     }
-  });
+  }
 
-  window.addEventListener('mouseup', (e) => {
+  function handlePointerUp(clientX, clientY){
     if(isPanning){
       isPanning = false;
       viewport.classList.remove('panning');
@@ -1293,9 +1326,14 @@ function setupCanvasInteractions(){
       draggingGroupId = null;
     }
     if(lineDragState){
-      endLineDrag(e);
+      endLineDrag({ clientX, clientY });
     }
-  });
+  }
+
+  // ---- mouse ----
+  viewport.addEventListener('mousedown', (e) => handlePointerDown(e, e.clientX, e.clientY));
+  window.addEventListener('mousemove', (e) => handlePointerMove(e.clientX, e.clientY));
+  window.addEventListener('mouseup', (e) => handlePointerUp(e.clientX, e.clientY));
 
   viewport.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -1303,6 +1341,57 @@ function setupCanvasInteractions(){
     canvasState.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, canvasState.zoom + delta));
     applyWorldTransform();
   }, { passive: false });
+
+  // ---- touch — one finger does whatever mouse would (pan / drag a group /
+  // drag a connecting line); two fingers pinch-zoom instead. A pinch
+  // starting cancels any single-finger pan that might have begun with the
+  // first finger, so going from one finger to two never drags the canvas
+  // sideways right as the pinch starts. ----
+  let pinchStartDistance = null;
+  let pinchStartZoom = null;
+
+  function touchDistance(touches){
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  viewport.addEventListener('touchstart', (e) => {
+    if(e.touches.length === 2){
+      isPanning = false;
+      pinchStartDistance = touchDistance(e.touches);
+      pinchStartZoom = canvasState.zoom;
+      return;
+    }
+    if(e.touches.length === 1){
+      const t = e.touches[0];
+      handlePointerDown(e, t.clientX, t.clientY);
+    }
+  }, { passive: true });
+
+  viewport.addEventListener('touchmove', (e) => {
+    if(e.touches.length === 2 && pinchStartDistance){
+      e.preventDefault();
+      const newDistance = touchDistance(e.touches);
+      canvasState.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pinchStartZoom * (newDistance / pinchStartDistance)));
+      applyWorldTransform();
+      return;
+    }
+    if(e.touches.length !== 1) return;
+    if(!isPanning && !draggingGroupId && !lineDragState) return; // nothing active — don't block default behavior for no reason
+    e.preventDefault();
+    const t = e.touches[0];
+    handlePointerMove(t.clientX, t.clientY);
+  }, { passive: false });
+
+  viewport.addEventListener('touchend', (e) => {
+    if(e.touches.length === 0){
+      pinchStartDistance = null;
+      pinchStartZoom = null;
+    }
+    const t = e.changedTouches[0];
+    if(t) handlePointerUp(t.clientX, t.clientY);
+  });
 
   document.getElementById('zoomInBtn')?.addEventListener('click', () => {
     canvasState.zoom = Math.min(ZOOM_MAX, canvasState.zoom + 0.1);
@@ -1318,13 +1407,15 @@ function setupCanvasInteractions(){
   });
 }
 
+
 function startGroupDrag(e, groupId){
   e.stopPropagation();
   e.preventDefault();
   // Dragging is intentionally allowed even on a locked blueprint —
   // repositioning isn't "editing the idea," just rearranging what's there.
   draggingGroupId = groupId;
-  dragStartPointer = { x: e.clientX, y: e.clientY };
+  const pt = getEventPoint(e);
+  dragStartPointer = { x: pt.clientX, y: pt.clientY };
   const group = canvasState.groups.find(g => g.id === groupId);
   dragStartGroupPos = { x: group.position_x || 0, y: group.position_y || 0 };
 }
@@ -1343,17 +1434,18 @@ function startLineDrag(e, optionId, groupId, optionIndex){
   const groupOptions = getGroupOptionsArray(groupId);
   const startX = (group.position_x || 0) + CARD_WIDTH;
   const startY = computeRowCenterY(group, groupOptions, optionIndex);
+  const pt = getEventPoint(e);
 
   lineDragState = {
     optionId,
     startX, startY,
-    initialClientX: e.clientX,
-    initialClientY: e.clientY,
+    initialClientX: pt.clientX,
+    initialClientY: pt.clientY,
     currentWorld: null
   };
 
   highlightEligibleDropTargets(optionId);
-  updateLineDragPreview(e.clientX, e.clientY);
+  updateLineDragPreview(pt.clientX, pt.clientY);
   console.log('[ThinkMaps] line-drag started from option', optionId);
 }
 
@@ -1733,6 +1825,195 @@ function renderIdeateResult(result){
     <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(result.coreProblem)}</p></div>
     <div class="idea-block"><div class="lbl">10x feature</div><p>${escapeHtml(result.tenXFeature)}</p></div>
     <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(result.monetization)}</p></div>
+    <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
+  `;
+}
+
+// ---------- CONFIRMATION PAGE (the 15-node "harden the idea" flow) ----------
+// Skips entirely on pages without #confirmRoot. Same one-question-at-a-time
+// pattern as the ideate page above, except there are only 3 questions, and
+// submitting the 3rd one triggers a genuinely slower deep-research step on
+// the backend (competitive landscape, pros adopted, cons solved) — shown
+// here as its own distinct "researching" state rather than just another
+// quick "Thinking…" flash.
+
+const confirmState = {
+  blueprintId: null,
+  sourceOptionId: null,
+  sessionId: null
+};
+
+async function initConfirmPage(){
+  const root = document.getElementById('confirmRoot');
+  if(!root) return;
+
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const blueprintId = params.get('blueprint');
+  const sourceOptionId = params.get('option');
+  if(!blueprintId || !sourceOptionId){
+    window.location.href = 'dashboard.html';
+    return;
+  }
+  confirmState.blueprintId = blueprintId;
+  confirmState.sourceOptionId = sourceOptionId;
+
+  try {
+    const res = await authedFetch(`/blueprints/${blueprintId}/confirm/start`, {
+      method: 'POST',
+      body: JSON.stringify({ sourceOptionId })
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      showConfirmError(body.error || 'Could not start hardening this idea.');
+      return;
+    }
+
+    confirmState.sessionId = body.sessionId;
+    renderConfirmQuestion(body);
+  } catch (err){
+    showConfirmError('Something went wrong starting this.');
+  }
+}
+
+function showConfirmError(message){
+  const questionEl = document.getElementById('confirmQuestion');
+  const optionsEl = document.getElementById('confirmOptions');
+  if(questionEl) questionEl.textContent = message;
+  if(optionsEl) optionsEl.innerHTML = '';
+}
+
+function renderConfirmQuestion(data){
+  const progressEl = document.getElementById('confirmProgress');
+  const fillEl = document.getElementById('confirmProgressFill');
+  const questionEl = document.getElementById('confirmQuestion');
+  const optionsEl = document.getElementById('confirmOptions');
+
+  if(progressEl) progressEl.textContent = `Confirmation ${data.progress.current} of ${data.progress.total}`;
+  if(fillEl) fillEl.style.width = `${(data.progress.current - 1) / data.progress.total * 100}%`;
+  if(questionEl) questionEl.textContent = data.question.question;
+
+  if(optionsEl){
+    optionsEl.innerHTML = '';
+    (data.question.options || []).forEach(opt => {
+      const btn = document.createElement('button');
+      btn.className = 'ideate-option';
+      btn.textContent = opt;
+      btn.addEventListener('click', () => submitConfirmAnswer(opt, data.progress.current, data.progress.total));
+      optionsEl.appendChild(btn);
+    });
+  }
+}
+
+async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQuestions){
+  const optionsEl = document.getElementById('confirmOptions');
+  const questionEl = document.getElementById('confirmQuestion');
+  const cardEl = document.getElementById('confirmCard');
+  const researchingEl = document.getElementById('confirmResearching');
+
+  if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
+
+  // The 3rd answer kicks off the actual deep-research pipeline on the
+  // backend — genuinely slower than a normal question turnaround, so it
+  // gets its own honest state instead of a "Thinking…" flash that would
+  // otherwise look stuck.
+  const isLastQuestion = currentQuestionNumber >= totalQuestions;
+  if(isLastQuestion){
+    if(cardEl) cardEl.style.display = 'none';
+    if(researchingEl) researchingEl.style.display = 'block';
+  } else if(questionEl){
+    questionEl.textContent = 'Thinking…';
+  }
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ selectedOption })
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      if(researchingEl) researchingEl.style.display = 'none';
+      if(cardEl) cardEl.style.display = 'block';
+      showConfirmError(body.error || 'Something went wrong submitting that.');
+      return;
+    }
+
+    if(body.status === 'completed'){
+      renderConfirmResult(body.result);
+    } else {
+      if(cardEl) cardEl.style.display = 'block';
+      renderConfirmQuestion(body);
+    }
+  } catch (err){
+    if(researchingEl) researchingEl.style.display = 'none';
+    if(cardEl) cardEl.style.display = 'block';
+    showConfirmError('Something went wrong submitting that.');
+  }
+}
+
+function renderConfirmResult(result){
+  const cardEl = document.getElementById('confirmCard');
+  const researchingEl = document.getElementById('confirmResearching');
+  const fillEl = document.getElementById('confirmProgressFill');
+  const progressEl = document.getElementById('confirmProgress');
+  const resultEl = document.getElementById('confirmResult');
+
+  if(cardEl) cardEl.style.display = 'none';
+  if(researchingEl) researchingEl.style.display = 'none';
+  if(fillEl) fillEl.style.width = '100%';
+  if(progressEl) progressEl.textContent = 'Done';
+
+  if(!resultEl) return;
+  resultEl.style.display = 'block';
+
+  const competitorsHtml = (result.competitors || []).map(c => `
+    <div class="competitor-block">
+      <div class="competitor-name">${escapeHtml(c.name)}</div>
+      <div class="competitor-cols">
+        <div>
+          <div class="lbl lbl-pro">What works</div>
+          <ul>${(c.pros || []).map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
+        </div>
+        <div>
+          <div class="lbl lbl-con">What doesn't</div>
+          <ul>${(c.cons || []).map(con => `<li>${escapeHtml(con)}</li>`).join('')}</ul>
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  const solutionsHtml = (result.solutions || []).map(s => `
+    <div class="solution-block">
+      <div class="solution-problem">${escapeHtml(s.problem)}</div>
+      <div class="solution-arrow">→</div>
+      <div class="solution-fix">${escapeHtml(s.solution)}</div>
+    </div>
+  `).join('');
+
+  resultEl.innerHTML = `
+    <span class="idea-tag">Your hardened idea</span>
+    <h2>${escapeHtml(result.name)}</h2>
+    <p class="idea-oneliner">${escapeHtml(result.oneLiner)}</p>
+
+    <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(result.coreProblem)}</p></div>
+    <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(result.targetAudience || '')}</p></div>
+    <div class="idea-block"><div class="lbl">Core feature</div><p>${escapeHtml(result.coreFeature || '')}</p></div>
+    <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(result.monetization)}</p></div>
+    <div class="idea-block"><div class="lbl">Competitive edge</div><p>${escapeHtml(result.competitiveEdge || '')}</p></div>
+
+    ${competitorsHtml ? `<h3 class="confirm-section-title">What's already out there</h3><div class="competitors-list">${competitorsHtml}</div>` : ''}
+    ${solutionsHtml ? `<h3 class="confirm-section-title">How this idea solves their weak points</h3><div class="solutions-list">${solutionsHtml}</div>` : ''}
+    ${result.fullDescription ? `<h3 class="confirm-section-title">The pitch</h3><p class="confirm-full-description">${escapeHtml(result.fullDescription)}</p>` : ''}
+
     <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
   `;
 }
