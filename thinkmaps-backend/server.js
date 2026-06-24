@@ -292,6 +292,30 @@ async function callMistral(messages){
   }
 }
 
+// Same raw call as callMistral above, minus the JSON-mode forcing and
+// parsing — for the one spot (the final idea's fullDescription) that
+// needs real prose back, not a JSON object. Mirrors callMistral's own
+// fetch pattern exactly rather than introducing a different client/SDK
+// shape into the file.
+async function callMistralPlainText(messages){
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({ model: 'mistral-small-latest', messages })
+  });
+
+  if(!res.ok){
+    const errText = await res.text();
+    throw new Error(`Mistral API error (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  return (data.choices?.[0]?.message?.content || '').trim();
+}
+
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
 // pairs — this is the "path so far" context fed into every generation prompt.
 // Walks UP the tree from an OPTION to the root, via spawned_from_option_id —
@@ -3830,6 +3854,189 @@ async function synthesizeBasicIdea(nicheLabel, answers){
   ]);
 }
 
+// ============================================================
+// CONFIRMATION FLOW — the "harden the idea" pipeline triggered by the
+// canvas's 15-node "Ready to Generate Ideas" terminal card.
+//
+// This is a SEPARATE system from the 45-question intake above. The 45Q
+// flow stays exactly as it is, untouched, and keeps doing what it already
+// does (anchored to the blueprint's root niche, powering generic guided
+// ideation and grounding canvas path generation via the same scaffold).
+// This new flow is anchored to one SPECIFIC 15-node-deep canvas path —
+// far more signal than "which niche was picked" — and only ever asks 3
+// short confirmation questions before handing off to real competitive
+// research, not 45 generic intake questions.
+// ============================================================
+
+const CONFIRMATION_QUESTION_COUNT = 3;
+
+// Each of the 3 confirmation questions has a distinct, deliberate job —
+// not "ask 3 more things about the person," but pressure-test the 3
+// load-bearing parts of the idea that just got synthesized from their
+// path: the problem itself, the solution approach, and who it's for /
+// how it makes money. Indexed 0-2, matching answersSoFar.length when
+// generating the NEXT question.
+const CONFIRMATION_INTENTS = [
+  'Confirm whether the core problem this idea is built around is genuinely the right one to solve — or surface a sharper, more specific version of it worth considering instead.',
+  'Confirm whether the proposed core feature or solution approach is actually the strongest way to solve that problem — or surface a stronger alternative angle.',
+  'Confirm whether the target audience and monetization approach genuinely fit this idea — or surface a better-fitting combination.'
+];
+
+// Synthesizes a working idea draft from a FULL 15-node canvas path — far
+// more concrete signal than the 45Q flow's niche-only anchor, so this
+// draft is meant to already be a real, specific concept, not a vague
+// theme. Everything downstream (confirmation questions, competitive
+// research, the final result) builds on this.
+async function synthesizeIdeaDraftFromPath(pathSummary){
+  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. A person just finished a deep, 15-step exploration on the canvas — every choice below is real, specific signal about an idea taking shape, not a generic intake transcript. Based on the FULL path, synthesize ONE specific, concrete app idea draft — a real concept with a clear angle, not a vague theme. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path: ${pathSummary}` }
+  ]);
+}
+
+// Writes ONE confirmation question — not "gather more info about the
+// person," but pressure-test and sharpen THIS exact idea draft. Informed
+// by whatever's already been confirmed in earlier questions, same
+// "treat prior answers as real signal" principle used everywhere else in
+// this file.
+async function generateConfirmationQuestion(ideaDraft, pathSummary, answersSoFar){
+  const questionIndex = answersSoFar.length;
+  const intent = CONFIRMATION_INTENTS[questionIndex] || CONFIRMATION_INTENTS[CONFIRMATION_INTENTS.length - 1];
+
+  const answeredContext = answersSoFar.length === 0
+    ? 'No confirmation questions answered yet.'
+    : answersSoFar.map((a, i) => `Confirmation ${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
+
+  const systemPrompt = `You are writing ONE confirmation question for ThinkMaps. Its purpose is to harden a SPECIFIC app idea before deep competitive research begins — not gather new general information about the person, but pressure-test and sharpen THIS EXACT IDEA. The idea draft so far: ${JSON.stringify(ideaDraft)}. This question's specific job: ${intent} Write the actual question text — one sentence, specific to this exact idea — and exactly 6 answer options, each a genuinely different concrete direction the idea could confirm or pivot toward, not vague yes/no options. Include one honest "this all sounds right, don't change anything" option among the 6.${SHORT_OPTION_RULE} Respond ONLY with valid JSON: {"question": string, "options": [string, string, string, string, string, string]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path that led here: ${pathSummary}\n\nConfirmations so far:\n${answeredContext}` }
+  ]);
+}
+
+// Real, live web search via Serper.dev — entirely optional, and free to
+// actually turn on: 2,500 free queries, no credit card. (This used to call
+// Brave's Search API, which had a real free tier when this was first
+// written — Brave killed that for new signups in early 2026, so it's no
+// longer a genuinely free option. Serper is, confirmed as of June 2026.)
+//
+// Set SEARCH_API_KEY in the environment to turn this on — get a key at
+// serper.dev (sign up, no payment info required, key's on the dashboard
+// immediately). Without it, this returns null and
+// researchCompetitiveLandscape below falls back to Mistral's own
+// training-data knowledge of existing products. That fallback is still
+// genuinely useful, just not live/current — worth knowing which mode is
+// actually running if that matters for your use case.
+async function webSearchForSimilarProducts(query){
+  if(!process.env.SEARCH_API_KEY) return null;
+
+  try {
+    const res = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: { 'X-API-KEY': process.env.SEARCH_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q: query, num: 8 })
+    });
+    if(!res.ok) return null;
+
+    const data = await res.json();
+    const results = data.organic || [];
+    return results.slice(0, 8).map(r => ({ title: r.title, description: r.snippet, url: r.link }));
+  } catch (err) {
+    console.error('[ThinkMaps] live web search failed, falling back to model knowledge:', err.message);
+    return null;
+  }
+}
+
+// Identifies 3-5 REAL existing products that compete with or resemble
+// this idea, with genuine pros and cons for each — grounded in live
+// search results when SEARCH_API_KEY is configured, otherwise in
+// Mistral's own knowledge (explicitly told to only name products it's
+// actually confident exist, never invent a fake one to fill the count).
+async function researchCompetitiveLandscape(ideaDraft, pathSummary, confirmationAnswers){
+  const confirmationContext = confirmationAnswers.map((a, i) => `Confirmation ${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
+
+  const searchResults = await webSearchForSimilarProducts(`${ideaDraft.name} similar apps competitors ${ideaDraft.coreProblem}`);
+
+  const groundingBlock = searchResults
+    ? `Here are real, current search results for similar products — ground your answer in these, don't invent products beyond what's reasonably supported by them:\n${searchResults.map(r => `- ${r.title}: ${r.description}`).join('\n')}`
+    : `No live search was available for this — draw on your own knowledge of real, well-known existing apps or products in this space. Only name products you're genuinely confident actually exist; never invent a fake product name to fill the count.`;
+
+  const systemPrompt = `You are the competitive-research engine for ThinkMaps. A specific app idea has been drafted and confirmed by its creator. Your job: identify 3 to 5 REAL, well-known existing apps or products that compete with or closely resemble this idea, and for each one, list genuine pros (what users/reviews actually praise about it) and genuine cons (what users/reviews actually complain about). ${groundingBlock} Idea draft: ${JSON.stringify(ideaDraft)}. Respond ONLY with valid JSON: {"competitors": [{"name": string, "pros": [string, string], "cons": [string, string]}, ...]} with 3 to 5 entries.`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path: ${pathSummary}\n\nConfirmations:\n${confirmationContext}` }
+  ]);
+}
+
+// For every weakness identified above, proposes a specific, concrete way
+// THIS idea could solve or avoid that exact problem — a real mechanism or
+// design decision, not a vague "we'll just do it better."
+async function synthesizeSolutionsFromCons(competitiveLandscape){
+  const cons = (competitiveLandscape?.competitors || []).flatMap(c => (c.cons || []).map(con => `${c.name}: ${con}`));
+
+  const systemPrompt = `You are the solutions-synthesis engine for ThinkMaps. Below is a list of real complaints/weaknesses from competing products. For EACH ONE, propose a specific, concrete way a new app idea could solve or avoid that exact problem — a real mechanism or design choice, not a vague "we'll do better." Respond ONLY with valid JSON: {"solutions": [{"problem": string, "solution": string}, ...]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Complaints to solve:\n${cons.join('\n')}` }
+  ]);
+}
+
+// Pulls everything together — the original draft, what got confirmed
+// through the 3 confirmation questions, the genuine strengths worth
+// adopting from real competitors, and the concrete solutions to their
+// real weaknesses — into ONE complete, hardened idea description.
+async function synthesizeFinalIdea(ideaDraft, pathSummary, confirmationAnswers, competitiveLandscape, solvedProblems){
+  const confirmationContext = confirmationAnswers.map((a, i) => `Confirmation ${i + 1}: ${a.question}\nAnswer: ${a.selected}`).join('\n\n');
+  const pros = (competitiveLandscape?.competitors || []).flatMap(c => (c.pros || []).map(p => `${c.name}: ${p}`));
+  const solutionLines = (solvedProblems?.solutions || []).map(s => `Problem: ${s.problem}\nSolution: ${s.solution}`).join('\n\n');
+
+  const systemPrompt = `You are the final idea-synthesis engine for ThinkMaps. Pull everything below together into ONE complete, hardened app idea. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string} — competitiveEdge should be 2-3 sentences on what makes this genuinely better than what's already out there, grounded in the real strengths and solved weaknesses below, not generic claims. fullDescription is added separately below, not by you.`;
+
+  const userContent = `Idea draft: ${JSON.stringify(ideaDraft)}
+
+Full path: ${pathSummary}
+
+Confirmations:
+${confirmationContext}
+
+Strengths worth adopting from real competitors:
+${pros.join('\n')}
+
+Competitors' weaknesses and how this idea solves them:
+${solutionLines}`;
+
+  const core = await callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userContent }
+  ]);
+
+  const fullDescriptionPrompt = `You are writing the final polished pitch description for an app idea, for ThinkMaps. Write 2 to 4 cohesive paragraphs — real prose, not a list — that read as a genuine, specific idea pitch: what it is, who it's for, why it matters, and why it's positioned to beat what's already out there. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
+
+  const fullDescriptionMessages = [
+    { role: 'system', content: fullDescriptionPrompt },
+    { role: 'user', content: `${JSON.stringify(core)}\n\nReal competitor strengths adopted:\n${pros.join('\n')}\n\nReal competitor weaknesses solved:\n${solutionLines}` }
+  ];
+
+  let fullDescription = '';
+  try {
+    fullDescription = await callMistralPlainText(fullDescriptionMessages);
+  } catch (err) {
+    console.error('[ThinkMaps] full description generation failed:', err.message);
+  }
+
+  return {
+    ...core,
+    fullDescription,
+    competitors: competitiveLandscape?.competitors || [],
+    solutions: solvedProblems?.solutions || []
+  };
+}
+
 // Starts a new intake — finds the chosen niche, generates question 1, and
 // creates the session row that the rest of the flow reads/writes.
 app.post('/blueprints/:id/ideation/start', requireAuth, async (req, res) => {
@@ -3974,6 +4181,169 @@ app.get('/ideation/:sessionId', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that session.', detail: err.message });
+  }
+});
+
+// ---- Confirmation flow routes — see the pipeline functions above ----
+
+// Starts a confirmation session anchored to ONE specific 15-node canvas
+// path (sourceOptionId is the option that spawned the "Ready to Generate
+// Ideas" terminal card) — not the blueprint's root niche, which is what
+// the 45Q flow above uses. Synthesizes a real idea draft from the full
+// path, then generates confirmation question 1.
+app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
+  try {
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { sourceOptionId } = req.body;
+    if(!sourceOptionId) return res.status(400).json({ error: 'sourceOptionId is required.' });
+
+    const pathContext = await buildPathContextFromOption(sourceOptionId);
+
+    // The frontend only ever shows the "Generate Ideas" button once a path
+    // hits PATH_DEPTH_CAP (15) — but that's a client-side fact, not a
+    // server-side guarantee. Enforcing it here too means calling this
+    // endpoint directly can't skip ahead of a path that hasn't actually
+    // earned it yet.
+    if(pathContext.length < PATH_DEPTH_CAP){
+      return res.status(400).json({ error: `This path needs to be ${PATH_DEPTH_CAP} nodes deep before an idea can be hardened — it's currently ${pathContext.length}.` });
+    }
+
+    const pathSummary = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
+
+    const ideaDraft = await synthesizeIdeaDraftFromPath(pathSummary);
+    const firstQuestion = await generateConfirmationQuestion(ideaDraft, pathSummary, []);
+
+    const { data: session, error } = await supabase
+      .from('confirmation_sessions')
+      .insert({
+        blueprint_id: blueprint.id,
+        source_option_id: sourceOptionId,
+        idea_draft: ideaDraft,
+        path_summary: pathSummary,
+        answers: [],
+        pending_question: firstQuestion,
+        status: 'in_progress'
+      })
+      .select()
+      .single();
+
+    if(error) throw error;
+
+    res.status(201).json({
+      sessionId: session.id,
+      status: 'in_progress',
+      progress: { current: 1, total: CONFIRMATION_QUESTION_COUNT },
+      question: firstQuestion
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not start idea confirmation.', detail: err.message });
+  }
+});
+
+// Records the answer to whatever confirmation question is pending. After
+// the 3rd, runs the full deep-dive pipeline: competitive research (real
+// search if SEARCH_API_KEY is set, model knowledge otherwise), pros
+// adopted, cons solved, then the final hardened idea.
+app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
+  try {
+    const { selectedOption } = req.body;
+    if(!selectedOption) return res.status(400).json({ error: 'selectedOption is required.' });
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(session.status === 'completed'){
+      return res.status(200).json({ status: 'completed', result: session.result });
+    }
+
+    if(!session.pending_question){
+      return res.status(400).json({ error: 'No question is currently pending on this session.' });
+    }
+
+    const updatedAnswers = [...session.answers, {
+      question: session.pending_question.question,
+      options: session.pending_question.options,
+      selected: selectedOption
+    }];
+
+    if(updatedAnswers.length >= CONFIRMATION_QUESTION_COUNT){
+      // All 3 confirmations are in — the deep dive: real competitive
+      // research, pros adopted, cons solved, then the final synthesis.
+      // This is the one part of the whole app that legitimately takes a
+      // while (up to 3 sequential Mistral calls) — the frontend shows a
+      // distinct "doing deep research" state for exactly this step.
+      const competitiveLandscape = await researchCompetitiveLandscape(session.idea_draft, session.path_summary, updatedAnswers);
+      const solvedProblems = await synthesizeSolutionsFromCons(competitiveLandscape);
+      const finalIdea = await synthesizeFinalIdea(session.idea_draft, session.path_summary, updatedAnswers, competitiveLandscape, solvedProblems);
+
+      await supabase.from('confirmation_sessions').update({
+        answers: updatedAnswers,
+        status: 'completed',
+        result: finalIdea,
+        pending_question: null
+      }).eq('id', session.id);
+
+      return res.status(200).json({
+        status: 'completed',
+        progress: { current: updatedAnswers.length, total: CONFIRMATION_QUESTION_COUNT },
+        result: finalIdea
+      });
+    }
+
+    const nextQuestion = await generateConfirmationQuestion(session.idea_draft, session.path_summary, updatedAnswers);
+
+    await supabase.from('confirmation_sessions').update({
+      answers: updatedAnswers,
+      pending_question: nextQuestion
+    }).eq('id', session.id);
+
+    res.status(200).json({
+      status: 'in_progress',
+      progress: { current: updatedAnswers.length + 1, total: CONFIRMATION_QUESTION_COUNT },
+      question: nextQuestion
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not submit that confirmation answer.', detail: err.message });
+  }
+});
+
+// Resumes a confirmation session on page reload, same pattern as the 45Q
+// resume route above.
+app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    res.status(200).json({
+      sessionId: session.id,
+      status: session.status,
+      progress: {
+        current: session.status === 'completed' ? session.answers.length : session.answers.length + 1,
+        total: CONFIRMATION_QUESTION_COUNT
+      },
+      question: session.pending_question,
+      result: session.result
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load that confirmation session.', detail: err.message });
   }
 });
 
