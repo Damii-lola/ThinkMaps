@@ -493,6 +493,18 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .mini-btn:hover:not(:disabled){ border-color:var(--accent); color:var(--ink); }
 .mini-btn:disabled{ opacity:.4; cursor:not-allowed; }
 
+/* Terminal node at the end of a 15-deep path — no options, no
+   Retry/Random/Custom, just a clear stop sign with one button. The
+   slightly heavier border + tinted top edge is a deliberate, gentle
+   "this one's different" cue, distinct from both the plain default card
+   and the orange on-path/frozen-gray treatments used everywhere else. */
+.canvas-group.generate-ideas-node{ border-color:var(--accent); border-width:2px; }
+.canvas-generate-ideas-body{
+  padding:18px 16px; text-align:center; display:flex; flex-direction:column; gap:14px; align-items:center;
+}
+.canvas-generate-ideas-body p{ font-size:13px; color:var(--ink-muted); line-height:1.4; margin:0; }
+.canvas-generate-ideas-body .btn{ width:100%; justify-content:center; }
+
 .canvas-custom-row{ display:flex; gap:6px; padding:8px; border-top:1px solid var(--line); }
 .canvas-custom-row input{
   flex:1; font-size:12px; border:1px solid var(--line); border-radius:6px; padding:6px 8px;
