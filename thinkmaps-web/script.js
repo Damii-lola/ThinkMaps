@@ -2182,7 +2182,18 @@ function renderConfirmResult(result){
     <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
   `;
 
-  renderIdeaCore(result);
+  // Once an idea has been rewritten, the analysis that produced it isn't
+  // shown again — it's already been folded into the rewrite itself.
+  // This applies just as much on a resumed page load as it does right
+  // after clicking Rewrite, so the section never even gets created here.
+  if(confirmState.rewrittenIdea){
+    renderIdeaCore(confirmState.rewrittenIdea, true);
+    const deeperEl = document.getElementById('deeperAnalysisSection');
+    if(deeperEl) deeperEl.remove();
+    return;
+  }
+
+  renderIdeaCore(result, false);
 
   const deeperEl = document.getElementById('deeperAnalysisSection');
   if(deeperEl && !confirmState.deeperAnalysisRendered){
@@ -2205,18 +2216,14 @@ function renderConfirmResult(result){
 // are factual research findings that don't change on rewrite — the
 // rewrite function carries them forward unchanged for exactly this
 // reason).
-function renderIdeaCore(idea){
+function renderIdeaCore(idea, isRewrite = false){
   const coreEl = document.getElementById('ideaCoreSection');
   if(!coreEl) return;
-
-  const isRewrite = !!idea.whatChanged;
 
   coreEl.innerHTML = `
     <span class="idea-tag">${isRewrite ? 'Rewritten using market intel &amp; risk analysis' : "Your hardened idea"}</span>
     <h2>${escapeHtml(idea.name)}</h2>
     <p class="idea-oneliner">${escapeHtml(idea.oneLiner)}</p>
-
-    ${isRewrite ? `<div class="rewrite-changed-note"><strong>What changed and why:</strong> ${escapeHtml(idea.whatChanged)}</div>` : ''}
 
     <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(idea.coreProblem)}</p></div>
     <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(idea.targetAudience || '')}</p></div>
@@ -2330,13 +2337,9 @@ function renderDeeperAnalysis(deeperAnalysis){
 
   const rewriteEl = document.getElementById('rewriteIdeaSection');
   if(rewriteEl){
-    if(confirmState.rewrittenIdea){
-      renderIdeaCore(confirmState.rewrittenIdea);
-    } else {
-      rewriteEl.innerHTML = `<button class="btn btn-secondary" id="runRewriteIdeaBtn" type="button">Rewrite Idea</button>`;
-      const btn = document.getElementById('runRewriteIdeaBtn');
-      if(btn) btn.addEventListener('click', runRewriteIdea);
-    }
+    rewriteEl.innerHTML = `<button class="btn btn-secondary" id="runRewriteIdeaBtn" type="button">Rewrite Idea</button>`;
+    const btn = document.getElementById('runRewriteIdeaBtn');
+    if(btn) btn.addEventListener('click', runRewriteIdea);
   }
 }
 
@@ -2346,7 +2349,10 @@ function renderDeeperAnalysis(deeperAnalysis){
 // sharper, more specifically monetizable version. Updates the SAME core
 // idea block at the top of the page in place (renderIdeaCore), rather
 // than appending a second copy of the idea further down — this is meant
-// to read as "the idea, now improved," not "here's a second idea."
+// to read as "the idea, now improved," not "here's a second idea." Once
+// the rewrite lands, the whole analysis section that produced it goes
+// away entirely — it's already been folded into the rewrite, there's
+// nothing left to look at it for.
 async function runRewriteIdea(){
   const rewriteEl = document.getElementById('rewriteIdeaSection');
   if(!rewriteEl) return;
@@ -2372,8 +2378,10 @@ async function runRewriteIdea(){
     }
 
     confirmState.rewrittenIdea = body.rewrittenIdea;
-    rewriteEl.innerHTML = '';
-    renderIdeaCore(body.rewrittenIdea);
+    renderIdeaCore(body.rewrittenIdea, true);
+
+    const deeperEl = document.getElementById('deeperAnalysisSection');
+    if(deeperEl) deeperEl.remove();
 
     const coreEl = document.getElementById('ideaCoreSection');
     if(coreEl) coreEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
