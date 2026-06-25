@@ -1002,20 +1002,24 @@ function renderGroups(visible, infoByGroupId){
       return;
     }
 
-    // Footer-targeting rule for everything else:
-    //  - root always shows its footer, always targeting its OWN option
-    //    list — unaffected by anything below, by design.
-    //  - any other group shows NO footer until something inside it has
-    //    actually been picked. The moment it has, the footer appears —
-    //    but now it targets whatever spawned from THAT pick, not this
-    //    group's own (already-decided) option list. A freshly spawned
-    //    sibling with nothing chosen in it yet stays footer-less.
-    const liveSelectedOption = isRootGroup ? null : findLiveSelectedOption(options);
-    const footerTargetOptionId = isRootGroup ? null : liveSelectedOption?.id;
+    // Footer-targeting rule, uniform for EVERY group including root:
+    //  - if nothing inside this group has been picked yet, the footer
+    //    targets the group's OWN option list. For root specifically this
+    //    is the only time that's true, since root has no parent to defer
+    //    button-duty to before anything's been picked — for any other
+    //    group, "nothing picked yet" means no footer at all (a freshly
+    //    spawned sibling with nothing chosen in it stays footer-less).
+    //  - the moment something IS picked, the footer targets whatever
+    //    spawned from THAT pick instead — root included. Root can end up
+    //    with more than one live selection at once (exploring two niches
+    //    in parallel); this resolves to whichever one findLiveSelectedOption
+    //    finds first, same deterministic rule used everywhere else.
+    const liveSelectedOption = findLiveSelectedOption(options);
+    const footerTargetOptionId = liveSelectedOption?.id || null;
     const showFooter = isRootGroup || !!liveSelectedOption;
 
-    // The toggle-able input row only ever makes sense in root's own mode
-    // (+Custom there adds a typed option to root's existing list). In
+    // The toggle-able input row only ever makes sense in root's-own-list
+    // mode (+Custom there adds a typed option to root's existing list). In
     // post-selection mode, +Custom spawns a whole new sibling group
     // instead — that row would just be dead, unreachable markup there.
     const footerHtml = showFooter ? `
