@@ -173,6 +173,12 @@ nav.bar{
   background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:28px;
 }
 .idea-tag{ font-family:var(--font-mono); font-size:11px; color:var(--accent-deep); text-transform:uppercase; letter-spacing:.08em; }
+
+.rewrite-changed-note{
+  background:var(--accent-soft); border:1px solid var(--accent); border-radius:8px;
+  padding:12px 14px; font-size:13px; color:var(--ink); line-height:1.5; margin:12px 0 18px;
+}
+.rewrite-changed-note strong{ color:var(--accent-deep); }
 .idea-card h3{ font-size:22px; margin:8px 0 4px; }
 .idea-oneliner{ color:var(--ink-muted); font-size:14.5px; margin-bottom:18px; }
 .idea-block{ margin-bottom:16px; }
