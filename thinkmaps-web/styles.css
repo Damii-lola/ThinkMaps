@@ -342,26 +342,29 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 /* Progress + breadcrumb bar — sits between the header and the canvas.
    Hidden entirely until at least one option has ever been activated
    (computeClientPathTrail returns nothing to show before that), so a
-   brand new blueprint doesn't show an empty bar with nothing in it. */
+   brand new blueprint doesn't show an empty bar with nothing in it.
+   Deliberately NOT using the mono font the rest of the app reserves for
+   bold uppercase labels (card headers, block titles) — this is meant to
+   read as quiet ambient context, not another loud heading, so it uses
+   the regular body font at a smaller size and a much lighter border. */
 .path-progress-bar{
-  display:flex; align-items:center; justify-content:space-between; gap:16px;
-  padding:8px 28px; background:var(--surface); border-bottom:1px solid var(--line);
-  font-family:var(--font-mono); font-size:11.5px;
+  display:flex; align-items:stretch; justify-content:space-between; gap:16px;
+  min-height:34px; box-sizing:border-box;
+  padding:7px 28px; background:var(--bg); border-bottom:1px solid var(--line);
+  font-family:var(--font-body); font-size:12px;
 }
 .path-breadcrumb{
   flex:1; min-width:0; overflow-x:auto; white-space:nowrap; color:var(--ink-muted);
+  display:flex; align-items:center;
 }
 .path-breadcrumb::-webkit-scrollbar{ height:4px; }
-.path-breadcrumb .crumb{ color:var(--ink); }
-.path-breadcrumb .crumb-sep{ color:var(--ink-muted); margin:0 6px; }
+.path-breadcrumb .crumb{ color:var(--ink-muted); }
+.path-breadcrumb .crumb-sep{ color:var(--ink-muted); margin:0 6px; opacity:0.6; }
 .path-progress-count{
   flex-shrink:0; color:var(--ink-muted); display:flex; align-items:center; gap:8px;
 }
-.path-progress-count .cycle-tag{
-  background:var(--accent-soft); color:var(--accent-deep); padding:2px 7px; border-radius:5px; font-weight:600;
-}
 @media (max-width:640px){
-  .path-progress-bar{ padding:8px 14px; }
+  .path-progress-bar{ padding:7px 14px; }
   .path-breadcrumb{ display:none; } /* counter survives on mobile; the trail itself doesn't fit well at this width */
 }
 
