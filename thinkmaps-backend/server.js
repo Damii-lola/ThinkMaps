@@ -4410,6 +4410,82 @@ ${solutionLines}`;
   };
 }
 
+// ============================================================
+// NEXT PHASE — runs only AFTER an idea is already hardened (confirm.html
+// has finished and confirmation_sessions.result exists). Three sequential
+// stages, since stage 3 explicitly depends on what stages 1 and 2 found:
+// Market Intel -> Synthetic Panel -> Risk-Prioritized Plan.
+// ============================================================
+
+// STAGE 1 — Deeper Market Intel. Reuses webSearchForSimilarProducts
+// above for every search here, just pointed at different queries than
+// researchCompetitiveLandscape uses — competitor pricing, sentiment
+// around existing solutions, and chatter about the underlying PAIN POINT
+// itself (deliberately not about the competing products — about whether
+// people genuinely talk about and struggle with this exact problem).
+async function gatherDeeperMarketIntel(ideaDraft){
+  const competitorNames = (ideaDraft?.competitors || []).map(c => c.name).filter(Boolean);
+
+  // One search per competitor (capped at 3) — a combined query mentioning
+  // several names at once tends to return a confusing mix of pages
+  // rather than usable pricing for any one of them.
+  const pricingSearches = await Promise.all(
+    competitorNames.slice(0, 3).map(async (name) => ({
+      name,
+      results: await webSearchForSimilarProducts(`${name} pricing plans cost per month`)
+    }))
+  );
+
+  const sentimentResults = await webSearchForSimilarProducts(`${ideaDraft.name || ideaDraft.coreProblem} reviews complaints reddit`);
+  const painPointResults = await webSearchForSimilarProducts(`${ideaDraft.coreProblem} reddit forum frustrated`);
+
+  const hasAnyLiveSearch = pricingSearches.some(p => p.results) || sentimentResults || painPointResults;
+
+  const groundingBlock = hasAnyLiveSearch
+    ? `Real, current search results below — ground your answer in these, don't invent specifics beyond what's reasonably supported by them:\n\n${pricingSearches.filter(p => p.results).map(p => `Pricing search for "${p.name}":\n${p.results.map(r => `- ${r.title}: ${r.description}`).join('\n')}`).join('\n\n') || '(no pricing results found)'}\n\nSentiment/review search:\n${sentimentResults ? sentimentResults.map(r => `- ${r.title}: ${r.description}`).join('\n') : '(no results)'}\n\nPain-point chatter search:\n${painPointResults ? painPointResults.map(r => `- ${r.title}: ${r.description}`).join('\n') : '(no results)'}`
+    : `No live search was available for any of this — draw on your own general knowledge instead. Be appropriately hedged about anything you're not genuinely confident about, rather than inventing specific numbers or quotes that look like real data but aren't.`;
+
+  const systemPrompt = `You are the market-intel synthesis engine for ThinkMaps. Based on the idea below and the search context provided, produce three things: (1) competitor pricing — real numbers if discoverable, otherwise a reasonable estimate clearly framed as an estimate, never presented as confirmed fact; (2) a short sentiment summary of how people generally seem to feel about existing solutions in this space; (3) a sample of real chatter specifically about the underlying PAIN POINT itself — not about competing products, about whether people genuinely talk about and struggle with this exact problem. ${groundingBlock}\n\nIdea: ${JSON.stringify(ideaDraft)}\n\nRespond ONLY with valid JSON: {"competitorPricing": [{"competitor": string, "pricing": string}], "sentimentSummary": string, "forumChatter": [string, string, string]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Competitors found earlier: ${competitorNames.join(', ') || 'none found'}` }
+  ]);
+}
+
+// STAGE 2 — Synthetic User Panel. This is the single highest-risk spot in
+// the whole app for an AI output to get mistaken for real user research,
+// so the "this is simulated, not real feedback" framing is built into the
+// PROMPT itself, not left to the UI label alone — Mistral is told
+// explicitly these are hypothetical and not to overstate confidence.
+// Personas are grounded in the real audience/path details already
+// established for this specific idea, not generic placeholder people.
+async function generateSyntheticPanel(ideaDraft, pathSummary){
+  const systemPrompt = `You are generating a SIMULATED, hypothetical user panel for ThinkMaps. This is explicitly NOT real user research, NOT real feedback, and must never be written or framed as if it were actual testimonials or validated data. Generate exactly 5 personas, each grounded in the SPECIFIC audience and pain-point details already established on this idea's path below — not generic, interchangeable people. For each persona, write: a name, a one-sentence background tying them concretely to the specific audience and pain point, an honest "reaction" to the actual pitch (genuinely mixed across the 5 — not everyone should be enthusiastic; include at least one lukewarm or skeptical reaction), their single biggest objection, and what would actually make THEM personally pay for it. Write these as plausible, varied hypothetical reactions. Explicitly avoid any language implying these are real opinions or confirmed behavior — these are informed guesses about how people MIGHT react, not data about how they DID react. Idea: ${JSON.stringify(ideaDraft)}. Respond ONLY with valid JSON: {"personas": [{"name": string, "background": string, "reaction": string, "objection": string, "wouldPay": string}, ...]} with exactly 5 entries.`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path that shaped this idea: ${pathSummary}` }
+  ]);
+}
+
+// STAGE 3 — Risk-Prioritized Plan. Depends on stages 1 AND 2 already
+// having finished (sequential, not parallel) — this is what actually
+// makes use of them: for each of the idea's biggest unproven
+// assumptions, explicitly checks whether the market intel or synthetic
+// panel above already partially answers it, rather than treating every
+// assumption as equally untouched and handing back a generic to-do list.
+async function generateRiskPrioritizedPlan(ideaDraft, marketIntel, syntheticPanel){
+  const systemPrompt = `You are the risk-assessment engine for ThinkMaps. Given the idea below plus the market intel and synthetic user panel already gathered, identify the 3 to 5 most important UNPROVEN assumptions this idea currently rests on, ranked by severity (how much the idea's viability depends on this specific assumption being true). For EACH one: explicitly check whether the market intel or synthetic panel data already partially answers it — if so, say so plainly and specifically, citing the actual data point (for example: "competitors charge $8-15/mo, which partially de-risks pricing — but willingness-to-pay for this specific angle is still unverified"). If something is still genuinely open after that check, give ONE clear, specific next step. Only occasionally should that next step be a real-world action (talking to people, running a survey) — most of the time it should be something achievable within the product itself (a smaller test, a narrower initial launch, a specific metric to watch for), framed as a targeted footnote, not the whole deliverable. Respond ONLY with valid JSON: {"risks": [{"assumption": string, "severity": "high"|"medium"|"low", "addressedBy": string | null, "nextStep": string | null}, ...]} with 3 to 5 entries, ordered highest severity first. Set addressedBy to null only if nothing below touches it at all; set nextStep to null only if addressedBy already fully resolves it.`;
+
+  const userContent = `Idea: ${JSON.stringify(ideaDraft)}\n\nMarket intel gathered:\n${JSON.stringify(marketIntel)}\n\nSynthetic panel reactions:\n${JSON.stringify(syntheticPanel)}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userContent }
+  ]);
+}
+
 // Starts a new intake — finds the chosen niche, generates question 1, and
 // creates the session row that the rest of the flow reads/writes.
 app.post('/blueprints/:id/ideation/start', requireAuth, async (req, res) => {
@@ -4713,10 +4789,52 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
         total: CONFIRMATION_QUESTION_COUNT
       },
       question: session.pending_question,
-      result: session.result
+      result: session.result,
+      deeperAnalysis: session.deeper_analysis || null
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that confirmation session.', detail: err.message });
+  }
+});
+
+// The NEXT phase, triggered from the result screen once an idea is
+// already hardened — Market Intel -> Synthetic Panel -> Risk-Prioritized
+// Plan, run sequentially since stage 3 depends on what stages 1 and 2
+// actually found. Idempotent: if this has already run for this session,
+// it just returns the stored result instead of burning more searches and
+// Mistral calls re-doing identical work.
+app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(session.status !== 'completed' || !session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before deeper analysis can run.' });
+    }
+
+    if(session.deeper_analysis){
+      return res.status(200).json({ deeperAnalysis: session.deeper_analysis });
+    }
+
+    const marketIntel = await gatherDeeperMarketIntel(session.result);
+    const syntheticPanel = await generateSyntheticPanel(session.result, session.path_summary);
+    const riskPlan = await generateRiskPrioritizedPlan(session.result, marketIntel, syntheticPanel);
+
+    const deeperAnalysis = { marketIntel, syntheticPanel, riskPlan };
+
+    await supabase.from('confirmation_sessions').update({ deeper_analysis: deeperAnalysis }).eq('id', session.id);
+
+    res.status(200).json({ deeperAnalysis });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not run deeper analysis.', detail: err.message });
   }
 });
 
