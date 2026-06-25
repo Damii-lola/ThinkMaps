@@ -1998,7 +1998,8 @@ const confirmState = {
   sourceOptionId: null,
   sessionId: null,
   deeperAnalysis: null,
-  deeperAnalysisRendered: false
+  deeperAnalysisRendered: false,
+  rewrittenIdea: null
 };
 
 async function initConfirmPage(){
@@ -2035,6 +2036,19 @@ async function initConfirmPage(){
     }
 
     confirmState.sessionId = body.sessionId;
+
+    if(body.status === 'completed'){
+      // This exact path was already hardened before — show what's
+      // already there instead of asking the 3 confirmation questions
+      // again. deeperAnalysis/rewrittenIdea (if either had already been
+      // run too) are picked up here so those sections render directly as
+      // well, not just the base idea.
+      confirmState.deeperAnalysis = body.deeperAnalysis || null;
+      confirmState.rewrittenIdea = body.rewrittenIdea || null;
+      renderConfirmResult(body.result);
+      return;
+    }
+
     renderConfirmQuestion(body);
   } catch (err){
     showConfirmError('Something went wrong starting this.');
@@ -2158,24 +2172,17 @@ function renderConfirmResult(result){
   `).join('');
 
   resultEl.innerHTML = `
-    <span class="idea-tag">Your hardened idea</span>
-    <h2>${escapeHtml(result.name)}</h2>
-    <p class="idea-oneliner">${escapeHtml(result.oneLiner)}</p>
-
-    <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(result.coreProblem)}</p></div>
-    <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(result.targetAudience || '')}</p></div>
-    <div class="idea-block"><div class="lbl">Core feature</div><p>${escapeHtml(result.coreFeature || '')}</p></div>
-    <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(result.monetization)}</p></div>
-    <div class="idea-block"><div class="lbl">Competitive edge</div><p>${escapeHtml(result.competitiveEdge || '')}</p></div>
+    <div id="ideaCoreSection"></div>
 
     ${competitorsHtml ? `<h3 class="confirm-section-title">What's already out there</h3><div class="competitors-list">${competitorsHtml}</div>` : ''}
     ${solutionsHtml ? `<h3 class="confirm-section-title">How this idea solves their weak points</h3><div class="solutions-list">${solutionsHtml}</div>` : ''}
-    ${result.fullDescription ? `<h3 class="confirm-section-title">The pitch</h3><p class="confirm-full-description">${escapeHtml(result.fullDescription)}</p>` : ''}
 
     <div id="deeperAnalysisSection"></div>
 
     <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
   `;
+
+  renderIdeaCore(result);
 
   const deeperEl = document.getElementById('deeperAnalysisSection');
   if(deeperEl && !confirmState.deeperAnalysisRendered){
@@ -2189,6 +2196,36 @@ function renderConfirmResult(result){
       if(btn) btn.addEventListener('click', runDeeperAnalysis);
     }
   }
+}
+
+// The swappable "core idea" block — name through the full pitch
+// description. Rendered once with the original hardened idea; re-rendered
+// in place with the rewritten version if/when "Rewrite Idea" runs,
+// without touching the competitors/solutions sections below it (those
+// are factual research findings that don't change on rewrite — the
+// rewrite function carries them forward unchanged for exactly this
+// reason).
+function renderIdeaCore(idea){
+  const coreEl = document.getElementById('ideaCoreSection');
+  if(!coreEl) return;
+
+  const isRewrite = !!idea.whatChanged;
+
+  coreEl.innerHTML = `
+    <span class="idea-tag">${isRewrite ? 'Rewritten using market intel &amp; risk analysis' : "Your hardened idea"}</span>
+    <h2>${escapeHtml(idea.name)}</h2>
+    <p class="idea-oneliner">${escapeHtml(idea.oneLiner)}</p>
+
+    ${isRewrite ? `<div class="rewrite-changed-note"><strong>What changed and why:</strong> ${escapeHtml(idea.whatChanged)}</div>` : ''}
+
+    <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(idea.coreProblem)}</p></div>
+    <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(idea.targetAudience || '')}</p></div>
+    <div class="idea-block"><div class="lbl">Core feature</div><p>${escapeHtml(idea.coreFeature || '')}</p></div>
+    <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(idea.monetization)}</p></div>
+    <div class="idea-block"><div class="lbl">Competitive edge</div><p>${escapeHtml(idea.competitiveEdge || '')}</p></div>
+
+    ${idea.fullDescription ? `<h3 class="confirm-section-title">The pitch</h3><p class="confirm-full-description">${escapeHtml(idea.fullDescription)}</p>` : ''}
+  `;
 }
 
 // ---- NEXT PHASE: Market Intel -> Synthetic Panel -> Risk-Prioritized
@@ -2287,5 +2324,60 @@ function renderDeeperAnalysis(deeperAnalysis){
 
     <h3 class="confirm-section-title">Risk-prioritized plan</h3>
     <div class="risks-list">${risksHtml}</div>
+
+    <div id="rewriteIdeaSection"></div>
   `;
+
+  const rewriteEl = document.getElementById('rewriteIdeaSection');
+  if(rewriteEl){
+    if(confirmState.rewrittenIdea){
+      renderIdeaCore(confirmState.rewrittenIdea);
+    } else {
+      rewriteEl.innerHTML = `<button class="btn btn-secondary" id="runRewriteIdeaBtn" type="button">Rewrite Idea</button>`;
+      const btn = document.getElementById('runRewriteIdeaBtn');
+      if(btn) btn.addEventListener('click', runRewriteIdea);
+    }
+  }
+}
+
+// Triggered by the "Rewrite Idea" button at the very end of the deeper
+// analysis — takes the original hardened idea plus everything Market
+// Intel / Synthetic Panel / Risk Plan found and rewrites it into a
+// sharper, more specifically monetizable version. Updates the SAME core
+// idea block at the top of the page in place (renderIdeaCore), rather
+// than appending a second copy of the idea further down — this is meant
+// to read as "the idea, now improved," not "here's a second idea."
+async function runRewriteIdea(){
+  const rewriteEl = document.getElementById('rewriteIdeaSection');
+  if(!rewriteEl) return;
+
+  rewriteEl.innerHTML = `
+    <div class="confirm-researching">
+      <div class="confirm-spinner"></div>
+      <p>Rewriting the idea using everything the analysis above just found…</p>
+    </div>
+  `;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/rewrite`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      rewriteEl.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not rewrite the idea.')}</p>`;
+      return;
+    }
+
+    confirmState.rewrittenIdea = body.rewrittenIdea;
+    rewriteEl.innerHTML = '';
+    renderIdeaCore(body.rewrittenIdea);
+
+    const coreEl = document.getElementById('ideaCoreSection');
+    if(coreEl) coreEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    rewriteEl.innerHTML = `<p class="confirm-error">Something went wrong rewriting the idea.</p>`;
+  }
 }
