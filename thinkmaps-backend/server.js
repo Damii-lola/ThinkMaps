@@ -4486,6 +4486,46 @@ async function generateRiskPrioritizedPlan(ideaDraft, marketIntel, syntheticPane
   ]);
 }
 
+// Triggered from the very end of the Stage 1-3 results — takes the
+// original hardened idea plus EVERYTHING the deeper analysis found
+// (competitor pricing, sentiment, pain-point chatter, all 5 synthetic
+// panel reactions, every risk and what's already addressed) and produces
+// a genuinely sharpened rewrite, not a superficial reword. Same two-call
+// pattern as synthesizeFinalIdea above (structured fields, then a
+// separate plain-text pass for the prose pitch) for the same reason: a
+// dedicated prompt focused only on writing good prose tends to produce
+// better prose than asking for it as one field among many.
+async function rewriteIdeaWithDeeperAnalysis(originalIdea, deeperAnalysis){
+  const { marketIntel, syntheticPanel, riskPlan } = deeperAnalysis || {};
+  const evidenceBlock = `Original idea: ${JSON.stringify(originalIdea)}\n\nMarket intel: ${JSON.stringify(marketIntel || {})}\n\nSynthetic panel reactions: ${JSON.stringify(syntheticPanel || {})}\n\nRisk-prioritized plan: ${JSON.stringify(riskPlan || {})}`;
+
+  const systemPrompt = `You are the idea-rewrite engine for ThinkMaps. Below is an app idea that was already hardened once, plus everything a deeper market-intel, synthetic-user-panel, and risk-assessment pass found about it. Rewrite this idea into the strongest, most specifically monetizable version of itself — GREATLY informed by every piece of evidence below, not a superficial reword. Concretely: use the competitor pricing data to set a specific, defensible monetization approach instead of a vague range; use the sentiment summary and pain-point chatter to sharpen the core problem toward what people actually, demonstrably care about; use the synthetic panel's objections and "would pay if" answers to adjust the core feature or positioning toward what would convert skeptics, not just please enthusiasts; use the risk plan to deliberately narrow scope toward whatever's already de-risked and away from whatever's still highest-severity and unproven, rather than keeping the original's broadest possible framing. Be concrete and specific, grounded in the actual data below — if the evidence doesn't support calling something risk-free or guaranteed, don't claim that; the goal is the strongest HONEST version of this idea, not an inflated one.\n\n${evidenceBlock}\n\nRespond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "whatChanged": string} — whatChanged should be 2-4 sentences specifically naming what changed from the original and which piece of evidence drove each change (a specific risk, a specific persona's objection, a specific pricing data point) — not a generic "we improved it."`;
+
+  const core = await callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Rewrite this idea now, using all the evidence above.' }
+  ]);
+
+  const fullDescriptionPrompt = `You are writing the final polished pitch description for a REWRITTEN app idea, for ThinkMaps — this version was specifically sharpened using real market intel, simulated user reactions, and a risk assessment. Write 2 to 4 cohesive paragraphs — real prose, not a list — that read as a genuine, specific, improved idea pitch: what it is, who it's for, why it matters, and why this sharpened version is positioned to actually make money, grounded in the real evidence behind it. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
+
+  let fullDescription = '';
+  try {
+    fullDescription = await callMistralPlainText([
+      { role: 'system', content: fullDescriptionPrompt },
+      { role: 'user', content: `${JSON.stringify(core)}\n\n${evidenceBlock}` }
+    ]);
+  } catch (err) {
+    console.error('[ThinkMaps] rewritten idea description generation failed:', err.message);
+  }
+
+  return {
+    ...core,
+    fullDescription,
+    competitors: originalIdea?.competitors || [],
+    solutions: originalIdea?.solutions || []
+  };
+}
+
 // Starts a new intake — finds the chosen niche, generates question 1, and
 // creates the session row that the rest of the flow reads/writes.
 app.post('/blueprints/:id/ideation/start', requireAuth, async (req, res) => {
@@ -4648,6 +4688,40 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
     const { sourceOptionId } = req.body;
     if(!sourceOptionId) return res.status(400).json({ error: 'sourceOptionId is required.' });
 
+    // This exact 15-node terminal click may have already been hardened
+    // before — clicking "Generate Ideas" again on the SAME path shouldn't
+    // burn another idea-draft synthesis, another 3 confirmation questions,
+    // or (if it got that far) another full research pipeline. Once
+    // generated, it's generated; this just hands back what's already
+    // there instead of redoing real work.
+    const { data: existingSession } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('source_option_id', sourceOptionId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if(existingSession?.status === 'completed'){
+      return res.status(200).json({
+        sessionId: existingSession.id,
+        status: 'completed',
+        progress: { current: existingSession.answers.length, total: CONFIRMATION_QUESTION_COUNT },
+        result: existingSession.result,
+        deeperAnalysis: existingSession.deeper_analysis || null,
+        rewrittenIdea: existingSession.rewritten_idea || null
+      });
+    }
+
+    if(existingSession && existingSession.status === 'in_progress' && existingSession.pending_question){
+      return res.status(200).json({
+        sessionId: existingSession.id,
+        status: 'in_progress',
+        progress: { current: existingSession.answers.length + 1, total: CONFIRMATION_QUESTION_COUNT },
+        question: existingSession.pending_question
+      });
+    }
+
     const pathContext = await buildPathContextFromOption(sourceOptionId);
 
     // The frontend only ever shows the "Generate Ideas" button once a path
@@ -4790,7 +4864,8 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
       },
       question: session.pending_question,
       result: session.result,
-      deeperAnalysis: session.deeper_analysis || null
+      deeperAnalysis: session.deeper_analysis || null,
+      rewrittenIdea: session.rewritten_idea || null
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that confirmation session.', detail: err.message });
@@ -4835,6 +4910,46 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
     res.status(200).json({ deeperAnalysis });
   } catch (err) {
     res.status(500).json({ error: 'Could not run deeper analysis.', detail: err.message });
+  }
+});
+
+// Triggered from the very end of the deeper-analysis results — takes the
+// original hardened idea plus everything Market Intel / Synthetic Panel
+// / Risk Plan found and produces a sharpened rewrite. Idempotent like
+// the route above: a duplicate click returns the existing rewrite
+// instead of burning another Mistral call redoing identical work.
+app.post('/confirm/:sessionId/rewrite', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be rewritten.' });
+    }
+
+    if(!session.deeper_analysis){
+      return res.status(400).json({ error: "Run Market Intel & Risk Analysis first — there's nothing to rewrite with yet." });
+    }
+
+    if(session.rewritten_idea){
+      return res.status(200).json({ rewrittenIdea: session.rewritten_idea });
+    }
+
+    const rewrittenIdea = await rewriteIdeaWithDeeperAnalysis(session.result, session.deeper_analysis);
+
+    await supabase.from('confirmation_sessions').update({ rewritten_idea: rewrittenIdea }).eq('id', session.id);
+
+    res.status(200).json({ rewrittenIdea });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not rewrite the idea.', detail: err.message });
   }
 });
 
