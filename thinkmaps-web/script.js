@@ -881,7 +881,7 @@ function resolveGroupVisualState(group, info){
 
 // Must match GENERATE_IDEAS_BLOCK_NAME in server.js exactly — this is the
 // one card type that isn't really "a group with options," it's a single
-// terminal stop sign at the end of a path that's gone 15 nodes deep.
+// terminal stop sign at the end of a path that's gone 7 nodes deep.
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
 // Must match CUSTOM_IDEA_BLOCK_NAME in server.js exactly — a group of
@@ -959,8 +959,11 @@ function computeClientPathTrail(optionId){
   return { depth: trail.length, trail };
 }
 
+// Must match PATH_DEPTH_CAP in server.js exactly.
+const PATH_DEPTH_CAP = 7;
+
 // Drives the progress bar added between the header and the canvas — the
-// breadcrumb trail and the "{depth} of 15" counter, both built from
+// breadcrumb trail and the "{depth} of 7" counter, both built from
 // whichever option was most recently activated. Hidden entirely until
 // that's ever happened, so a brand new blueprint doesn't show an empty
 // bar with nothing in it yet.
@@ -989,16 +992,11 @@ function renderPathProgress(){
   // where you ARE, not where you started, every time this updates.
   breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
 
-  // Each full cycle is 6 (A-F) + 1 (checkpoint) + 3 (G-H-I) = 10 nodes —
-  // only shown once you've actually gone around more than once, since
-  // "Cycle 1" for everyone's first 10 nodes is just clutter.
-  const cycleNumber = Math.floor((depth - 1) / 10) + 1;
-  const cycleTagHtml = cycleNumber > 1 ? `<span class="cycle-tag">Cycle ${cycleNumber}</span>` : '';
-  countEl.innerHTML = `${cycleTagHtml}<span>${depth} of 15</span>`;
+  countEl.innerHTML = `<span>${depth} of ${PATH_DEPTH_CAP}</span>`;
 }
 
 // The "look what you built" moment — fires exactly once per terminal
-// card, the first time a path reaches depth 15. Walks the WHOLE path
+// card, the first time a path reaches depth 7. Walks the WHOLE path
 // back to root (not just the terminal card) and smoothly zooms/pans to
 // fit all of it on screen at once, instead of the card just quietly
 // appearing wherever it happens to land. framedTerminalGroupIds is what
@@ -1112,7 +1110,7 @@ function renderGroups(visible, infoByGroupId){
     // controls (just a remove button, a version switcher, both, or neither).
     const controlsHtml = `${versionNav}${removeBtnHtml}`;
 
-    // This path has gone 15 nodes deep — render a single clear call to
+    // This path has gone 7 nodes deep — render a single clear call to
     // action instead of an options list. No options to click into, no
     // Retry/Random/Custom (there's nothing to retry or randomize), just
     // one button that goes straight to the same idea-generation flow the
@@ -2196,7 +2194,7 @@ function renderIdeateResult(result){
   `;
 }
 
-// ---------- CONFIRMATION PAGE (the 15-node "harden the idea" flow) ----------
+// ---------- CONFIRMATION PAGE (the 7-node "harden the idea" flow) ----------
 // Skips entirely on pages without #confirmRoot. Same one-question-at-a-time
 // pattern as the ideate page above, except there are only 3 questions, and
 // submitting the 3rd one triggers a genuinely slower deep-research step on
