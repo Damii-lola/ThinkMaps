@@ -595,3 +595,66 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 }
 
 .confirm-full-description{ font-size:14.5px; line-height:1.7; color:var(--ink); white-space:pre-line; }
+
+.btn-secondary{
+  background:var(--bg); color:var(--ink); border:1px solid var(--line);
+}
+.btn-secondary:hover{ border-color:var(--accent); color:var(--accent-deep); }
+
+.idea-block-p{ font-size:14px; color:var(--ink-muted); line-height:1.6; margin-bottom:14px; }
+
+.confirm-error{ color:#C24A3D; font-size:14px; }
+
+/* Market intel pricing */
+.pricing-list{ display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+.pricing-row{
+  display:flex; justify-content:space-between; align-items:center;
+  background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 14px;
+  font-size:13px;
+}
+.pricing-competitor{ color:var(--ink); font-weight:500; }
+.pricing-amount{ font-family:var(--font-mono); color:var(--ink-muted); }
+
+/* This is the one place in the whole app a model output could plausibly
+   get mistaken for real validation data — deliberately the LOUDEST visual
+   treatment on the page, breaking from the calm neutral palette used
+   everywhere else on purpose. Shown once as a section banner and again
+   directly above the persona grid (see script.js), not just once at the
+   top where it's easy to scroll past. */
+.simulated-disclaimer{
+  background:#FBEFD9; border:1.5px solid #D9A33E; color:#7A5418;
+  border-radius:8px; padding:10px 14px; font-size:13px; font-weight:600;
+  margin-bottom:16px;
+}
+
+.personas-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:8px; }
+@media (max-width:640px){ .personas-grid{ grid-template-columns:1fr; } }
+.persona-card{
+  background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px;
+}
+.persona-name{ font-family:var(--font-mono); font-size:13px; font-weight:600; margin-bottom:4px; }
+.persona-background{ font-size:12.5px; color:var(--ink-muted); margin-bottom:12px; line-height:1.5; }
+.persona-row{ margin-bottom:8px; }
+.persona-row .lbl{ font-family:var(--font-mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink-muted); display:block; margin-bottom:2px; }
+.persona-row p{ font-size:13px; color:var(--ink); margin:0; line-height:1.5; }
+
+.risks-list{ display:flex; flex-direction:column; gap:12px; }
+.risk-card{
+  background:var(--bg); border:1px solid var(--line); border-left:4px solid var(--line);
+  border-radius:8px; padding:14px 16px;
+}
+.risk-card.risk-high{ border-left-color:#C24A3D; }
+.risk-card.risk-medium{ border-left-color:#D9A33E; }
+.risk-card.risk-low{ border-left-color:#5C8A5C; }
+.risk-header{ display:flex; align-items:baseline; gap:10px; margin-bottom:8px; }
+.risk-severity-tag{
+  font-family:var(--font-mono); font-size:10px; font-weight:700; letter-spacing:.05em;
+  padding:2px 7px; border-radius:5px; background:var(--surface-2); color:var(--ink-muted); flex-shrink:0;
+}
+.risk-card.risk-high .risk-severity-tag{ background:rgba(194,74,61,0.15); color:#C24A3D; }
+.risk-card.risk-medium .risk-severity-tag{ background:rgba(217,163,62,0.18); color:#9A7320; }
+.risk-card.risk-low .risk-severity-tag{ background:rgba(92,138,92,0.15); color:#5C8A5C; }
+.risk-assumption{ font-size:14px; font-weight:500; color:var(--ink); }
+.risk-addressed{ font-size:13px; color:var(--ink-muted); margin:0 0 6px; line-height:1.5; }
+.risk-next-step{ font-size:13px; color:var(--ink); margin:0; line-height:1.5; }
+.risk-addressed strong, .risk-next-step strong{ color:var(--ink); font-weight:600; }
