@@ -399,7 +399,7 @@ const BLOCKS_BEFORE_IDEA_CHECKPOINT = IDEATION_BLOCK_NAMES.slice(0, 6);
 
 // Hard cap on path depth — see GENERATE_IDEAS_BLOCK_NAME below for what
 // happens once a single continuous path reaches this many picks deep.
-const PATH_DEPTH_CAP = 15;
+const PATH_DEPTH_CAP = 7;
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
 // A group of this block_name never gets AI-generated content — it's a
@@ -944,7 +944,7 @@ async function activateOption(optionId){
     } else {
       // Checkpoint already shown along this path — proceed normally
       // through G, H, I (and wrap around the full 9 if this single path
-      // goes deep enough to exhaust those too, though the 15-node cap
+      // goes deep enough to exhaust those too, though the 7-node cap
       // above means that's now a much rarer case than it used to be).
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
       const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
@@ -4256,45 +4256,51 @@ async function synthesizeBasicIdea(nicheLabel, answers){
 
 // ============================================================
 // CONFIRMATION FLOW — the "harden the idea" pipeline triggered by the
-// canvas's 15-node "Ready to Generate Ideas" terminal card.
+// canvas's 7-node "Ready to Generate Ideas" terminal card.
 //
 // This is a SEPARATE system from the 45-question intake above. The 45Q
 // flow stays exactly as it is, untouched, and keeps doing what it already
 // does (anchored to the blueprint's root niche, powering generic guided
 // ideation and grounding canvas path generation via the same scaffold).
-// This new flow is anchored to one SPECIFIC 15-node-deep canvas path —
+// This new flow is anchored to one SPECIFIC 7-node-deep canvas path —
 // far more signal than "which niche was picked" — and only ever asks 3
 // short confirmation questions before handing off to real competitive
 // research, not 45 generic intake questions.
 // ============================================================
 
-const CONFIRMATION_QUESTION_COUNT = 3;
+const CONFIRMATION_QUESTION_COUNT = 5;
 
-// Each of the 3 confirmation questions has a distinct, deliberate job —
-// not "ask 3 more things about the person," but pressure-test the 3
+// Each of the 5 confirmation questions has a distinct, deliberate job —
+// not "ask 5 more things about the person," but pressure-test the 5
 // load-bearing parts of the idea that just got synthesized from their
-// path: the problem itself, the solution approach, and who it's for.
-// Deliberately NOT monetization pricing — picking between specific dollar
-// amounts ($9.99 vs $14.99 vs $29) requires real market research nobody
-// has at this stage, which is exactly the kind of question every other
-// generator in this file is explicitly built to avoid. The model can
-// still PROPOSE a monetization approach as part of the idea itself (see
-// synthesizeIdeaDraftFromPath/synthesizeFinalIdea below) — that's the AI
-// doing the work. Asking the person to pick a price point is asking them
-// something they have no way to actually know.
+// path: the problem itself, the solution approach, who it's for, what
+// makes it genuinely different, and how it should make money. Deliberately
+// NOT monetization PRICING — picking between specific dollar amounts
+// ($9.99 vs $14.99 vs $29) requires real market research nobody has at
+// this stage, which is exactly the kind of question every other generator
+// in this file is explicitly built to avoid. The 5th intent below asks
+// about the MODEL (subscription vs one-time vs freemium vs ad-supported),
+// which is a values/preference question a person CAN actually have an
+// instinct about — a meaningfully different question from "what number."
+// The model can still PROPOSE a specific approach as part of the idea
+// itself (see synthesizeIdeaDraftFromPath/synthesizeFinalIdea below) —
+// that's the AI doing the work. Asking the person to pick a price point
+// is asking them something they have no way to actually know.
 const CONFIRMATION_INTENTS = [
   'Confirm whether the core problem this idea is built around is genuinely the right one to solve — or surface a sharper, more specific version of it worth considering instead.',
   'Confirm whether the proposed core feature or solution approach is actually the strongest way to solve that problem — or surface a stronger alternative angle.',
-  'Confirm whether the target audience genuinely fits this idea — or surface a different, better-fitting group of people this should actually be built for instead.'
+  'Confirm whether the target audience genuinely fits this idea — or surface a different, better-fitting group of people this should actually be built for instead.',
+  'Confirm whether what supposedly makes this idea different from what already exists is actually sharp and defensible — or surface a stronger, more specific point of differentiation.',
+  'Confirm whether the broad monetization MODEL (subscription vs one-time purchase vs freemium vs ad-supported vs something else — never a specific price) genuinely fits how this audience would actually want to pay — or surface a better-fitting model entirely.'
 ];
 
-// Synthesizes a working idea draft from a FULL 15-node canvas path — far
+// Synthesizes a working idea draft from a FULL 7-node canvas path — far
 // more concrete signal than the 45Q flow's niche-only anchor, so this
 // draft is meant to already be a real, specific concept, not a vague
 // theme. Everything downstream (confirmation questions, competitive
 // research, the final result) builds on this.
 async function synthesizeIdeaDraftFromPath(pathSummary){
-  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. A person just finished a deep, 15-step exploration on the canvas — every choice below is real, specific signal about an idea taking shape, not a generic intake transcript. Based on the FULL path, synthesize ONE specific, concrete app idea draft — a real concept with a clear angle, not a vague theme. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string}`;
+  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. A person just finished a deep, 7-step exploration on the canvas — every choice below is real, specific signal about an idea taking shape, not a generic intake transcript. Based on the FULL path, synthesize ONE specific, concrete app idea draft — a real concept with a clear angle, not a vague theme. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -4712,7 +4718,7 @@ app.get('/ideation/:sessionId', requireAuth, async (req, res) => {
 
 // ---- Confirmation flow routes — see the pipeline functions above ----
 
-// Starts a confirmation session anchored to ONE specific 15-node canvas
+// Starts a confirmation session anchored to ONE specific 7-node canvas
 // path (sourceOptionId is the option that spawned the "Ready to Generate
 // Ideas" terminal card) — not the blueprint's root niche, which is what
 // the 45Q flow above uses. Synthesizes a real idea draft from the full
@@ -4725,7 +4731,7 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
     const { sourceOptionId } = req.body;
     if(!sourceOptionId) return res.status(400).json({ error: 'sourceOptionId is required.' });
 
-    // This exact 15-node terminal click may have already been hardened
+    // This exact 7-node terminal click may have already been hardened
     // before — clicking "Generate Ideas" again on the SAME path shouldn't
     // burn another idea-draft synthesis, another 3 confirmation questions,
     // or (if it got that far) another full research pipeline. Once
