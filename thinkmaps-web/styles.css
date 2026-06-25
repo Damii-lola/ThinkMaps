@@ -174,11 +174,6 @@ nav.bar{
 }
 .idea-tag{ font-family:var(--font-mono); font-size:11px; color:var(--accent-deep); text-transform:uppercase; letter-spacing:.08em; }
 
-.rewrite-changed-note{
-  background:var(--accent-soft); border:1px solid var(--accent); border-radius:8px;
-  padding:12px 14px; font-size:13px; color:var(--ink); line-height:1.5; margin:12px 0 18px;
-}
-.rewrite-changed-note strong{ color:var(--accent-deep); }
 .idea-card h3{ font-size:22px; margin:8px 0 4px; }
 .idea-oneliner{ color:var(--ink-muted); font-size:14.5px; margin-bottom:18px; }
 .idea-block{ margin-bottom:16px; }
@@ -537,6 +532,14 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 /* ---------- IDEATE PAGE ---------- */
 .ideate-main{ padding:60px 0 100px; }
 .ideate-wrap{ max-width:640px; }
+
+/* confirm.html's result page is much richer than a single question —
+   idea fields, two-column competitor/persona grids, risk cards — and
+   feels cramped at the same 640px ideate.html uses for one question and
+   6 options at a time. Scoped to #confirmRoot specifically so this
+   doesn't widen the simpler 45-question flow, which shares the same
+   .ideate-wrap class but doesn't need the extra room. */
+#confirmRoot .ideate-wrap{ max-width:880px; }
 .ideate-meta{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px; }
 .ideate-progress{ font-family:var(--font-mono); font-size:12px; color:var(--ink-muted); }
 .ideate-progress-track{ height:4px; background:var(--line); border-radius:999px; margin-bottom:40px; overflow:hidden; }
