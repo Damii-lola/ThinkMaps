@@ -661,7 +661,16 @@ const canvasState = {
   options: [],
   pan: { x: 0, y: 0 },
   zoom: 1,
-  hasCenteredOnce: false
+  hasCenteredOnce: false,
+  // Whichever option the person most recently clicked/dropped onto —
+  // drives the progress counter and breadcrumb trail, recomputed fresh
+  // after every graph reload rather than incrementally maintained, so it
+  // can't drift out of sync with whatever's actually in canvasState.
+  lastActivatedOptionId: null,
+  // Terminal "Generate Ideas" groups that have already gotten their
+  // one-time auto-frame moment — without this, EVERY graph reload while
+  // that card is on screen would re-trigger the zoom-to-fit animation.
+  framedTerminalGroupIds: new Set()
 };
 
 // Zoom range — 0.15 is "see almost the whole sprawling graph at once,"
@@ -752,6 +761,8 @@ async function loadGraph(){
     }
 
     renderCanvas();
+    renderPathProgress();
+    maybeAutoFrameCompletedPath();
   } catch (err){
     if(loadingMsg){
       loadingMsg.textContent = err.message;
@@ -878,6 +889,32 @@ const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 // persistent text box the person fills in themselves.
 const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
 
+// Must match IDEA_CHECKPOINT_BLOCK_NAME in server.js exactly.
+const IDEA_CHECKPOINT_BLOCK_NAME = 'The Idea Taking Shape';
+
+// A small, consistent color per canonical block — purely a "what
+// territory am I in" recognition cue, built up over enough repeat visits
+// that the color alone starts to register before the title text does.
+// Deliberately NOT applied to the card border (that's already claimed by
+// on-path/frozen signaling) — it lives as a small dot in the header
+// instead, so it never competes with or gets overridden by those states.
+const BLOCK_COLORS = {
+  'Personal Pull': '#A8763E',
+  'Personal Connection to the Audience': '#3E7CA8',
+  'Personal Read on the Pain': '#A85C5C',
+  'Honest Awareness of What Exists': '#5C8C5C',
+  'Cross-Pollination & Creative Inspiration': '#8A5CA8',
+  'Your Vision for the Experience': '#3E9999',
+  'Context, Distribution & Values': '#A88A3E',
+  'Personal Stakes & Long-Term Vision': '#6B5CA8',
+  'What You Actually Know About Yourself': '#5C73A8'
+};
+
+function blockColorDotHtml(blockName){
+  const color = BLOCK_COLORS[blockName];
+  return color ? `<span class="block-color-dot" style="background:${color}" aria-hidden="true"></span>` : '';
+}
+
 // Finds whichever option in this group is the LIVE selected one — not
 // just "is_selected", but specifically the one that hasn't been
 // superseded by a sibling picked later in the same group. More than one
@@ -896,6 +933,140 @@ function findLiveSelectedOption(options){
   return live || selectedOptions[selectedOptions.length - 1];
 }
 
+// Walks from optionId up to the root, entirely from canvasState — no
+// network call. Mirrors the backend's buildPathContextFromOption logic,
+// just reading already-loaded client state instead of querying the DB,
+// since the progress counter and breadcrumb need to update instantly on
+// every graph reload, not wait on a dedicated round trip of their own.
+// Returns { depth, trail } where trail is root-to-current option labels.
+function computeClientPathTrail(optionId){
+  const trail = [];
+  let currentOptionId = optionId;
+
+  while(currentOptionId){
+    const option = canvasState.options.find(o => o.id === currentOptionId);
+    if(!option) break;
+    trail.unshift(option.label);
+
+    const version = canvasState.groupVersions.find(v => v.id === option.group_version_id);
+    if(!version) break;
+    const group = canvasState.groups.find(g => g.id === version.group_id);
+    if(!group) break;
+
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  return { depth: trail.length, trail };
+}
+
+// Drives the progress bar added between the header and the canvas — the
+// breadcrumb trail and the "{depth} of 15" counter, both built from
+// whichever option was most recently activated. Hidden entirely until
+// that's ever happened, so a brand new blueprint doesn't show an empty
+// bar with nothing in it yet.
+function renderPathProgress(){
+  const bar = document.getElementById('pathProgressBar');
+  const breadcrumbEl = document.getElementById('pathBreadcrumb');
+  const countEl = document.getElementById('pathProgressCount');
+  if(!bar || !breadcrumbEl || !countEl) return;
+
+  if(!canvasState.lastActivatedOptionId){
+    bar.style.display = 'none';
+    return;
+  }
+
+  const { depth, trail } = computeClientPathTrail(canvasState.lastActivatedOptionId);
+  if(depth === 0){
+    bar.style.display = 'none';
+    return;
+  }
+
+  bar.style.display = 'flex';
+  breadcrumbEl.innerHTML = trail
+    .map(label => `<span class="crumb">${escapeHtml(label)}</span>`)
+    .join('<span class="crumb-sep">→</span>');
+  // Scrolled to the most recent end on purpose — a long path should show
+  // where you ARE, not where you started, every time this updates.
+  breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
+
+  // Each full cycle is 6 (A-F) + 1 (checkpoint) + 3 (G-H-I) = 10 nodes —
+  // only shown once you've actually gone around more than once, since
+  // "Cycle 1" for everyone's first 10 nodes is just clutter.
+  const cycleNumber = Math.floor((depth - 1) / 10) + 1;
+  const cycleTagHtml = cycleNumber > 1 ? `<span class="cycle-tag">Cycle ${cycleNumber}</span>` : '';
+  countEl.innerHTML = `${cycleTagHtml}<span>${depth} of 15</span>`;
+}
+
+// The "look what you built" moment — fires exactly once per terminal
+// card, the first time a path reaches depth 15. Walks the WHOLE path
+// back to root (not just the terminal card) and smoothly zooms/pans to
+// fit all of it on screen at once, instead of the card just quietly
+// appearing wherever it happens to land. framedTerminalGroupIds is what
+// makes this one-time — without it, every subsequent graph reload while
+// that card is still on screen would re-trigger the animation.
+function maybeAutoFrameCompletedPath(){
+  const newlyCompleted = canvasState.groups.find(g =>
+    g.block_name === GENERATE_IDEAS_BLOCK_NAME && !canvasState.framedTerminalGroupIds.has(g.id)
+  );
+  if(!newlyCompleted) return;
+
+  canvasState.framedTerminalGroupIds.add(newlyCompleted.id);
+
+  const pathGroups = [newlyCompleted];
+  let currentOptionId = newlyCompleted.spawned_from_option_id;
+
+  while(currentOptionId){
+    const option = canvasState.options.find(o => o.id === currentOptionId);
+    if(!option) break;
+    const version = canvasState.groupVersions.find(v => v.id === option.group_version_id);
+    if(!version) break;
+    const group = canvasState.groups.find(g => g.id === version.group_id);
+    if(!group) break;
+    pathGroups.push(group);
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  const viewport = document.getElementById('canvasViewport');
+  const world = document.getElementById('canvasWorld');
+  if(!viewport || !world || pathGroups.length === 0) return;
+
+  // A rough estimate, not pixel-perfect — overshooting the real card
+  // height just means slightly more breathing room in the frame, which
+  // is a fine trade for not having to measure every actual rendered card.
+  const ESTIMATED_CARD_HEIGHT = 260;
+  const xs = pathGroups.map(g => g.position_x || 0);
+  const ys = pathGroups.map(g => g.position_y || 0);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs) + CARD_WIDTH;
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys) + ESTIMATED_CARD_HEIGHT;
+
+  const pathWidth = Math.max(maxX - minX, 1);
+  const pathHeight = Math.max(maxY - minY, 1);
+  const PADDING = 80;
+
+  const availableWidth = viewport.clientWidth - PADDING * 2;
+  const availableHeight = viewport.clientHeight - PADDING * 2;
+
+  // Capped at 1x — the goal is "reveal the whole path," not "zoom in
+  // tighter than normal" on a path short enough to already fit.
+  const fitZoom = Math.min(availableWidth / pathWidth, availableHeight / pathHeight, 1);
+  const targetZoom = Math.max(ZOOM_MIN, Math.min(fitZoom, ZOOM_MAX));
+
+  const pathCenterX = (minX + maxX) / 2;
+  const pathCenterY = (minY + maxY) / 2;
+
+  const targetPanX = viewport.clientWidth / 2 - pathCenterX * targetZoom;
+  const targetPanY = viewport.clientHeight / 2 - pathCenterY * targetZoom;
+
+  world.classList.add('auto-framing');
+  canvasState.zoom = targetZoom;
+  canvasState.pan = { x: targetPanX, y: targetPanY };
+  applyWorldTransform();
+
+  setTimeout(() => world.classList.remove('auto-framing'), 900);
+}
+
 function renderGroups(visible, infoByGroupId){
   const layer = document.getElementById('groupsLayer');
   if(!layer) return;
@@ -909,12 +1080,14 @@ function renderGroups(visible, infoByGroupId){
     const { isOnPath, isBatchFaded } = resolveGroupVisualState(group, info[group.id]);
     const isGenerateIdeasNode = group.block_name === GENERATE_IDEAS_BLOCK_NAME;
     const isCustomIdeaNode = group.block_name === CUSTOM_IDEA_BLOCK_NAME;
+    const isCheckpointNode = group.block_name === IDEA_CHECKPOINT_BLOCK_NAME;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
     if(isBatchFaded) classNames.push('batch-unpicked');
     if(isOnPath) classNames.push('on-path');
     if(isGenerateIdeasNode) classNames.push('generate-ideas-node');
     if(isCustomIdeaNode) classNames.push('custom-idea-node');
+    if(isCheckpointNode) classNames.push('checkpoint-node');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -961,11 +1134,18 @@ function renderGroups(visible, infoByGroupId){
     }
 
     // Three states per option:
-    //  - selected (already activated)  → its dot is the next drag SOURCE
-    //  - root + not yet activated      → plain click activates it
-    //  - non-root + not yet activated  → inert; only reachable as a drop target
+    //  - selected (already activated)        → its dot is the next drag SOURCE
+    //  - root, or the checkpoint's one big
+    //    fork, and not yet activated         → plain click activates it
+    //  - any other non-root, not yet picked  → inert; only reachable as a drop target
+    //
+    // The checkpoint gets folded into root's directly-clickable treatment
+    // on purpose — it's the one deliberately dramatic, forced-choice
+    // moment in the whole path, and making it click-anywhere instead of
+    // drag-to-connect is part of what makes it feel different from every
+    // other card, not just look different.
     const optionsHtml = options.map((opt, optionIndex) => {
-      const stateClass = opt.is_selected ? 'selected' : (isRootGroup ? 'root-clickable' : 'inert');
+      const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode) ? 'root-clickable' : 'inert');
       return `
         <div class="canvas-option ${stateClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
           <span class="opt-dot"></span>
@@ -1033,12 +1213,17 @@ function renderGroups(visible, infoByGroupId){
         <button class="mini-btn" data-action="custom-submit">Add</button>
       </div>`}` : '';
 
+    const checkpointIntroHtml = isCheckpointNode
+      ? `<div class="checkpoint-intro">An idea is taking shape. Which way does it lean?</div>`
+      : '';
+
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
         <div class="header-spacer" aria-hidden="true">${controlsHtml}</div>
-        <div class="canvas-group-title"><span>${escapeHtml(group.label)}</span></div>
+        <div class="canvas-group-title">${blockColorDotHtml(group.block_name)}<span>${escapeHtml(group.label)}</span></div>
         <div class="header-controls">${controlsHtml}</div>
       </div>
+      ${checkpointIntroHtml}
       <div class="canvas-group-options">${optionsHtml}</div>
       ${footerHtml}
     `;
@@ -1254,11 +1439,35 @@ function centerCanvasOnRoot(){
   applyWorldTransform();
 }
 
-function setCanvasBusy(isBusy){
+function setCanvasBusy(isBusy, message){
   const viewport = document.getElementById('canvasViewport');
   const indicator = document.getElementById('canvasBusyIndicator');
   if(viewport) viewport.classList.toggle('busy', isBusy);
-  if(indicator) indicator.style.display = isBusy ? 'block' : 'none';
+  if(indicator){
+    indicator.style.display = isBusy ? 'block' : 'none';
+    if(isBusy) indicator.textContent = message || 'Thinking…';
+  }
+}
+
+// A click triggers a real wait every time — generation isn't instant.
+// Rather than a blank "Thinking…" for all 15+ of those per path, this
+// builds one line client-side (no extra AI call) that references the
+// SPECIFIC thing just picked, so the wait reads as "the tool is working
+// on what I chose" instead of "the tool froze." Picked randomly each
+// time so the phrasing itself doesn't become its own repetitive tell.
+const ACTIVATION_ACK_TEMPLATES = [
+  label => `Following your lead on ${label}…`,
+  label => `Building on "${label}"…`,
+  label => `Taking "${label}" somewhere specific…`,
+  label => `Letting "${label}" shape what's next…`,
+  label => `Working out what "${label}" leads to…`
+];
+
+function buildActivationAckMessage(label){
+  if(!label) return 'Thinking…';
+  const trimmed = label.length > 42 ? `${label.slice(0, 39)}…` : label;
+  const template = ACTIVATION_ACK_TEMPLATES[Math.floor(Math.random() * ACTIVATION_ACK_TEMPLATES.length)];
+  return template(trimmed);
 }
 
 // ---------- FULLSCREEN ----------
@@ -1669,7 +1878,8 @@ function endLineDrag(e){
 
 async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
-  setCanvasBusy(true);
+  const option = canvasState.options.find(o => o.id === optionId);
+  setCanvasBusy(true, buildActivationAckMessage(option?.label));
   try {
     const res = await authedFetch(`/options/${optionId}/activate`, { method: 'POST', body: JSON.stringify({}) });
     if(!res) return;
@@ -1679,6 +1889,7 @@ async function handleOptionActivate(optionId){
       alert(body.error || 'Could not activate that option.');
       return;
     }
+    canvasState.lastActivatedOptionId = optionId;
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
     alert('Something went wrong activating that option.');
