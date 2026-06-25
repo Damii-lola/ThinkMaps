@@ -548,7 +548,12 @@ async function getAllExistingOptionLabelsInNiche(nicheOptionId){
     frontierOptionIds = (opts || []).map(o => o.id);
   }
 
-  return labels.slice(-40);
+  // 40 was tuned for a moderate exploration depth — a path that's gone
+  // genuinely deep (10+ levels, the kind that produces 150+ saved
+  // options) pushes content from early in the path out of a window that
+  // small well before it's actually safe to forget. Raised substantially
+  // since correctness here matters more than the extra prompt size.
+  return labels.slice(-150);
 }
 
 // Shared instruction injected into every option-generating prompt — keeps
@@ -577,7 +582,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
   // showing up near-identically in both Personal Pull and Personal
   // Connection elsewhere in this same niche).
   const diversityNote = (!isRoot && existingLabels.length > 0)
-    ? ` This niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (possibly for a different block than this one — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. If the obvious answer for this block would just be a small variation on one of those (same core mechanism, same trigger, same setting, different wording), actively look for a DIFFERENT underlying angle instead — a different mechanism, trigger, setting, or emotional hook entirely, not a rephrasing.`
+    ? ` This niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (possibly for a different block than this one — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. Read these for their UNDERLYING THEME, not just their exact wording — if several share a theme (e.g. several are versions of "guilt about skipping" or "chores as hidden exercise"), treat that whole theme as already covered, not just those specific sentences. If the obvious answer for this block would just be a reword of an already-covered theme, actively look for a genuinely different underlying angle instead — a different mechanism, trigger, setting, or emotional hook entirely.`
     : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
@@ -608,16 +613,30 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  // Same niche-wide repetition guard as generateGroupOptions above — one
-  // shared list covering every block already explored anywhere in this
-  // niche, applied across the WHOLE batch being generated right now, not
-  // separated by block. Cross-block convergence is exactly the failure
-  // mode a per-block-only version of this missed.
+  // Covers repetition against everything ALREADY SAVED, anywhere in this
+  // niche — but that's a different failure mode from the one below.
+  // Reasons at the THEME level, not just exact phrasing: two differently
+  // worded options can still be the same underlying idea (e.g. "chores as
+  // hidden exercise" and "build around chores" are the same angle wearing
+  // different words), and a phrase-only check misses that entirely.
   const diversityNote = existingLabels.length > 0
-    ? `\nThis niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (across various blocks — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. If the obvious answer for any of these ${blockNames.length} blocks would just be a small variation on one of those (same core mechanism, same trigger, same setting, different wording), actively look for a DIFFERENT underlying angle for that block instead — a different mechanism, trigger, setting, or emotional hook entirely, not a rephrasing.`
+    ? `\nThis niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (across various blocks — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. Read these for their UNDERLYING THEME, not just their exact wording — if several of them share a theme (e.g. several are versions of "guilt about skipping" or "chores as hidden exercise"), treat that whole theme as already covered, not just those specific sentences. If the obvious answer for any of these ${blockNames.length} blocks would just be a reword of an already-covered theme, actively look for a genuinely different underlying angle instead — a different mechanism, trigger, setting, or emotional hook entirely.`
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  // This is the OTHER failure mode, and it's the more severe one: options
+  // for DIFFERENT blocks within THIS SAME response converging on the same
+  // underlying idea, since nothing here previously told the model the
+  // blocks below need to be distinct from EACH OTHER too, only that they
+  // need to avoid history. Two blocks asking genuinely different
+  // questions (e.g. "who this is for" vs "what's painful about it")
+  // should basically never land on near-identical answers — if they do,
+  // at least one side wasn't actually engaging with its own block's
+  // specific question.
+  const crossBlockNote = blockNames.length > 1
+    ? `\nCRITICAL — these ${blockNames.length} blocks are being generated together in this one response, and they must be distinct from EACH OTHER, not just from history. Before finalizing, check every option against every OTHER block's options in this same response: if an option in one block is just a reworded version of an option already written for a different block here (same underlying mechanism, trigger, or idea, different words), rewrite it to genuinely engage with its OWN block's specific question instead. This applies across every pair of blocks listed below, not just adjacent ones.`
+    : '';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -632,11 +651,24 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   // the options side too.
   const rawGroups = Array.isArray(result?.groups) ? result.groups : [];
 
-  const groups = blockNames.map((blockName, i) => ({
-    groupLabel: blockName,
-    blockName,
-    options: sanitizeOptionLabels(rawGroups[i]?.options)
-  }));
+  // Code-level safety net on top of the crossBlockNote instruction above
+  // — that's a prompt-level ask, not a guarantee. This catches the worst
+  // case deterministically: if the exact same label (trimmed,
+  // case-insensitive) shows up in an EARLIER block of this same
+  // response, it's dropped from a LATER one rather than shown twice. A
+  // block ending up with 5 options instead of 6 is a far smaller problem
+  // than a verbatim duplicate sitting in two sibling cards at once.
+  const seenLabelsAcrossBatch = new Set();
+  const groups = blockNames.map((blockName, i) => {
+    const sanitized = sanitizeOptionLabels(rawGroups[i]?.options);
+    const deduped = sanitized.filter(o => {
+      const key = o.label.trim().toLowerCase();
+      if(seenLabelsAcrossBatch.has(key)) return false;
+      seenLabelsAcrossBatch.add(key);
+      return true;
+    });
+    return { groupLabel: blockName, blockName, options: deduped };
+  });
 
   return { groups };
 }
@@ -650,8 +682,12 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 // next." Returns the same { groups: [...] } shape generateCandidateBatch
 // does (just with one entry instead of three), so activateOption can pick
 // between them without any change to how the result gets inserted.
-async function generateIdeaSynthesisCheckpoint(pathContext){
+async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
+
+  const diversityNote = existingLabels.length > 0
+    ? `\n\nThis niche has already gone deep in several directions elsewhere — the following specific angles have ALREADY been used: ${JSON.stringify(existingLabels)}. Read these for their underlying theme, not just exact wording. The emerging idea and fork question you write below should reflect what's actually distinct about THIS specific path, not converge on a theme already covered by another branch of this same niche.`
+    : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The person has just finished a deep round of personal exploration: their pull toward this space, who they're building for, the pain they've identified, what's already out there, where their creative instincts point, and their vision for the actual experience. Before this turns back to questions about THEM, pause and actually do the work of synthesizing what's emerged.
 
@@ -659,7 +695,7 @@ Path so far (their actual choices, in order): ${pathDescription}
 
 Privately work out: what is the SPECIFIC, nameable app concept crystallizing out of this exact path? Not a vague theme or restatement of the niche — a real, concrete idea with a clear angle, the kind you could describe in one sharp sentence.
 
-Then generate up to 6 options for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked.${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, ...]}`;
+Then generate up to 6 options for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked.${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, ...]}`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -892,7 +928,8 @@ async function activateOption(optionId){
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
       // All 6 of A–F are used along THIS path and the checkpoint hasn't
       // fired yet on it — this is the moment.
-      generated = await generateIdeaSynthesisCheckpoint(pathContext);
+      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
+      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels);
     } else if(!ideaCheckpointAlreadyShown){
       // Still working through A–F. Capped at however many of THOSE 6 are
       // actually left — never padded out to 3 by reaching into G/H/I, which
@@ -4499,14 +4536,14 @@ async function rewriteIdeaWithDeeperAnalysis(originalIdea, deeperAnalysis){
   const { marketIntel, syntheticPanel, riskPlan } = deeperAnalysis || {};
   const evidenceBlock = `Original idea: ${JSON.stringify(originalIdea)}\n\nMarket intel: ${JSON.stringify(marketIntel || {})}\n\nSynthetic panel reactions: ${JSON.stringify(syntheticPanel || {})}\n\nRisk-prioritized plan: ${JSON.stringify(riskPlan || {})}`;
 
-  const systemPrompt = `You are the idea-rewrite engine for ThinkMaps. Below is an app idea that was already hardened once, plus everything a deeper market-intel, synthetic-user-panel, and risk-assessment pass found about it. Rewrite this idea into the strongest, most specifically monetizable version of itself — GREATLY informed by every piece of evidence below, not a superficial reword. Concretely: use the competitor pricing data to set a specific, defensible monetization approach instead of a vague range; use the sentiment summary and pain-point chatter to sharpen the core problem toward what people actually, demonstrably care about; use the synthetic panel's objections and "would pay if" answers to adjust the core feature or positioning toward what would convert skeptics, not just please enthusiasts; use the risk plan to deliberately narrow scope toward whatever's already de-risked and away from whatever's still highest-severity and unproven, rather than keeping the original's broadest possible framing. Be concrete and specific, grounded in the actual data below — if the evidence doesn't support calling something risk-free or guaranteed, don't claim that; the goal is the strongest HONEST version of this idea, not an inflated one.\n\n${evidenceBlock}\n\nRespond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "whatChanged": string} — whatChanged should be 2-4 sentences specifically naming what changed from the original and which piece of evidence drove each change (a specific risk, a specific persona's objection, a specific pricing data point) — not a generic "we improved it."`;
+  const systemPrompt = `You are the idea-rewrite engine for ThinkMaps. Below is an app idea that was already hardened once, plus everything a deeper market-intel, synthetic-user-panel, and risk-assessment pass found about it. Rewrite this idea into the strongest, most specifically monetizable version of itself — GREATLY informed by every piece of evidence below, not a superficial reword. Concretely: use the competitor pricing data to set a specific, defensible monetization approach instead of a vague range; use the sentiment summary and pain-point chatter to sharpen the core problem toward what people actually, demonstrably care about; use the synthetic panel's objections and "would pay if" answers to adjust the core feature or positioning toward what would convert skeptics, not just please enthusiasts; use the risk plan to deliberately narrow scope toward whatever's already de-risked and away from whatever's still highest-severity and unproven, rather than keeping the original's broadest possible framing. Be concrete and specific, grounded in the actual data below — if the evidence doesn't support calling something risk-free or guaranteed, don't claim that; the goal is the strongest HONEST version of this idea, not an inflated one.\n\nDo NOT write a separate summary of what changed or why — there is no changelog field. Instead, weave the reasoning directly into the idea's own fields: coreFeature and monetization should just BE the sharpened versions (state the specific number, the specific mechanism — don't explain that it's specific), and competitiveEdge should read as a normal pitch sentence that happens to already account for the real findings below, not as a list of fixes. The rewritten idea should simply read as a stronger, more specific idea — someone reading it with no knowledge of the analysis behind it shouldn't be able to tell a separate research pass happened, only that this version is sharper than a generic first draft would be.\n\n${evidenceBlock}\n\nRespond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string}`;
 
   const core = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Rewrite this idea now, using all the evidence above.' }
   ]);
 
-  const fullDescriptionPrompt = `You are writing the final polished pitch description for a REWRITTEN app idea, for ThinkMaps — this version was specifically sharpened using real market intel, simulated user reactions, and a risk assessment. Write 2 to 4 cohesive paragraphs — real prose, not a list — that read as a genuine, specific, improved idea pitch: what it is, who it's for, why it matters, and why this sharpened version is positioned to actually make money, grounded in the real evidence behind it. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
+  const fullDescriptionPrompt = `You are writing the final polished pitch description for a REWRITTEN app idea, for ThinkMaps — this version was specifically sharpened using real market intel, simulated user reactions, and a risk assessment, but it should read as ONE confident, cohesive pitch, not a before/after comparison or a list of fixes. Write 2 to 4 cohesive paragraphs — real prose — that read as a genuine, specific idea pitch: what it is, who it's for, why it matters, and why it's positioned to actually make money. Bake the reasoning in naturally (a sharper price point, a feature that directly addresses why people hesitate, a narrower focus on what's already shown to resonate) without ever saying "this was changed from" or "originally" or otherwise referencing a prior version. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
 
   let fullDescription = '';
   try {
