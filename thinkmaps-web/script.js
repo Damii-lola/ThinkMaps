@@ -1996,7 +1996,9 @@ function renderIdeateResult(result){
 const confirmState = {
   blueprintId: null,
   sourceOptionId: null,
-  sessionId: null
+  sessionId: null,
+  deeperAnalysis: null,
+  deeperAnalysisRendered: false
 };
 
 async function initConfirmPage(){
@@ -2170,6 +2172,120 @@ function renderConfirmResult(result){
     ${solutionsHtml ? `<h3 class="confirm-section-title">How this idea solves their weak points</h3><div class="solutions-list">${solutionsHtml}</div>` : ''}
     ${result.fullDescription ? `<h3 class="confirm-section-title">The pitch</h3><p class="confirm-full-description">${escapeHtml(result.fullDescription)}</p>` : ''}
 
+    <div id="deeperAnalysisSection"></div>
+
     <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
+  `;
+
+  const deeperEl = document.getElementById('deeperAnalysisSection');
+  if(deeperEl && !confirmState.deeperAnalysisRendered){
+    if(confirmState.deeperAnalysis){
+      renderDeeperAnalysis(confirmState.deeperAnalysis);
+    } else {
+      deeperEl.innerHTML = `
+        <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
+      `;
+      const btn = document.getElementById('runDeeperAnalysisBtn');
+      if(btn) btn.addEventListener('click', runDeeperAnalysis);
+    }
+  }
+}
+
+// ---- NEXT PHASE: Market Intel -> Synthetic Panel -> Risk-Prioritized
+// Plan. Triggered from the button rendered above, only once an idea has
+// already been hardened. ----
+
+async function runDeeperAnalysis(){
+  const deeperEl = document.getElementById('deeperAnalysisSection');
+  if(!deeperEl) return;
+
+  deeperEl.innerHTML = `
+    <div class="confirm-researching">
+      <div class="confirm-spinner"></div>
+      <p>Pulling competitor pricing, real chatter about the problem, and running a simulated reaction panel — this takes longer than the steps before it.</p>
+    </div>
+  `;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/deeper-analysis`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      deeperEl.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not run deeper analysis.')}</p>`;
+      return;
+    }
+
+    confirmState.deeperAnalysis = body.deeperAnalysis;
+    renderDeeperAnalysis(body.deeperAnalysis);
+  } catch (err) {
+    deeperEl.innerHTML = `<p class="confirm-error">Something went wrong running deeper analysis.</p>`;
+  }
+}
+
+function renderDeeperAnalysis(deeperAnalysis){
+  const deeperEl = document.getElementById('deeperAnalysisSection');
+  if(!deeperEl) return;
+  confirmState.deeperAnalysisRendered = true;
+
+  const intel = deeperAnalysis.marketIntel || {};
+  const panel = deeperAnalysis.syntheticPanel || {};
+  const riskPlan = deeperAnalysis.riskPlan || {};
+
+  const pricingHtml = (intel.competitorPricing || []).map(p => `
+    <div class="pricing-row">
+      <span class="pricing-competitor">${escapeHtml(p.competitor)}</span>
+      <span class="pricing-amount">${escapeHtml(p.pricing)}</span>
+    </div>
+  `).join('');
+
+  const chatterHtml = (intel.forumChatter || []).map(c => `<li>${escapeHtml(c)}</li>`).join('');
+
+  // Disclaimer rendered TWICE deliberately — once as the section's own
+  // banner, once repeated right above the persona grid itself. This is
+  // the one place in the whole app a model output could plausibly get
+  // mistaken for real validation data, so it's labeled hard everywhere
+  // it's shown, not just once at the top where it's easy to scroll past.
+  const personaDisclaimer = `<p class="simulated-disclaimer">⚠ Simulated reactions, not real feedback — these are hypothetical, AI-generated personas, not actual user research.</p>`;
+
+  const personasHtml = (panel.personas || []).map(p => `
+    <div class="persona-card">
+      <div class="persona-name">${escapeHtml(p.name)}</div>
+      <div class="persona-background">${escapeHtml(p.background)}</div>
+      <div class="persona-row"><span class="lbl">Reaction</span><p>${escapeHtml(p.reaction)}</p></div>
+      <div class="persona-row"><span class="lbl">Biggest objection</span><p>${escapeHtml(p.objection)}</p></div>
+      <div class="persona-row"><span class="lbl">Would actually pay if</span><p>${escapeHtml(p.wouldPay)}</p></div>
+    </div>
+  `).join('');
+
+  const severityRank = { high: 0, medium: 1, low: 2 };
+  const sortedRisks = [...(riskPlan.risks || [])].sort((a, b) => (severityRank[a.severity] ?? 3) - (severityRank[b.severity] ?? 3));
+
+  const risksHtml = sortedRisks.map(r => `
+    <div class="risk-card risk-${escapeHtml(r.severity || 'medium')}">
+      <div class="risk-header">
+        <span class="risk-severity-tag">${escapeHtml((r.severity || 'medium').toUpperCase())}</span>
+        <span class="risk-assumption">${escapeHtml(r.assumption)}</span>
+      </div>
+      ${r.addressedBy ? `<p class="risk-addressed"><strong>Already partly addressed:</strong> ${escapeHtml(r.addressedBy)}</p>` : ''}
+      ${r.nextStep ? `<p class="risk-next-step"><strong>Next step:</strong> ${escapeHtml(r.nextStep)}</p>` : ''}
+    </div>
+  `).join('');
+
+  deeperEl.innerHTML = `
+    <h3 class="confirm-section-title">Deeper market intel</h3>
+    ${pricingHtml ? `<div class="pricing-list">${pricingHtml}</div>` : ''}
+    ${intel.sentimentSummary ? `<p class="idea-block-p">${escapeHtml(intel.sentimentSummary)}</p>` : ''}
+    ${chatterHtml ? `<div class="idea-block"><div class="lbl">Real chatter about the pain point</div><ul>${chatterHtml}</ul></div>` : ''}
+
+    <h3 class="confirm-section-title">Simulated user panel</h3>
+    ${personaDisclaimer}
+    <div class="personas-grid">${personasHtml}</div>
+
+    <h3 class="confirm-section-title">Risk-prioritized plan</h3>
+    <div class="risks-list">${risksHtml}</div>
   `;
 }
