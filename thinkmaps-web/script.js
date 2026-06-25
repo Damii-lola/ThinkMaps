@@ -747,6 +747,16 @@ async function loadGraph(){
     canvasState.groupVersions = data.groupVersions;
     canvasState.options = data.options;
 
+    // canvasState.lastActivatedOptionId only ever gets set by an actual
+    // click within THIS session — on a fresh page load of an already-built
+    // blueprint, nothing's been clicked yet here, so without this it would
+    // stay null (and the progress bar/breadcrumb would stay hidden) right
+    // up until the very next activation. Only runs while it's still null,
+    // so it never overrides a real click's choice once one happens.
+    if(!canvasState.lastActivatedOptionId){
+      canvasState.lastActivatedOptionId = findDeepestLiveOptionId();
+    }
+
     const titleEl = document.getElementById('blueprintTitle');
     if(titleEl) titleEl.textContent = data.blueprint.title;
 
@@ -957,6 +967,36 @@ function computeClientPathTrail(optionId){
   }
 
   return { depth: trail.length, trail };
+}
+
+// Finds a sensible default for "the path to show progress for" when
+// nothing's been clicked yet THIS session (a fresh load of an
+// already-built blueprint) — among every currently-selected option
+// sitting in a non-frozen group anywhere in the graph, whichever has
+// the greatest depth. Not necessarily THE literal most-recently-clicked
+// option (that timestamp isn't tracked anywhere in the data model), but
+// a reasonable stand-in: the single most-developed ongoing thread in
+// the blueprint, which is the thing actually worth showing progress for.
+function findDeepestLiveOptionId(){
+  const candidates = canvasState.options.filter(o => {
+    if(!o.is_selected) return false;
+    const version = canvasState.groupVersions.find(v => v.id === o.group_version_id);
+    if(!version) return false;
+    const group = canvasState.groups.find(g => g.id === version.group_id);
+    return group && !group.is_frozen;
+  });
+
+  let deepestOptionId = null;
+  let deepestDepth = -1;
+  candidates.forEach(o => {
+    const { depth } = computeClientPathTrail(o.id);
+    if(depth > deepestDepth){
+      deepestDepth = depth;
+      deepestOptionId = o.id;
+    }
+  });
+
+  return deepestOptionId;
 }
 
 // Must match PATH_DEPTH_CAP in server.js exactly.
