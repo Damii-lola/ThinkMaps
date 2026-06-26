@@ -13,7 +13,10 @@
 // prefers it over the synthesized pad — see startAmbiance() below.
 
 (function(){
-  const SOUND_PREF_KEY = 'thinkmaps_sound_enabled';
+  const SOUND_PREF_KEY = 'thinkmaps_sound_enabled_v2'; // bumped from _v1 — anyone who toggled
+                                                          // things while the old bug was live
+                                                          // gets a clean default instead of
+                                                          // inheriting whatever got left behind
   const CLICKABLE_SELECTOR = '.btn, .mini-btn, .canvas-option.root-clickable, .opt-dot, [data-action]';
 
   let audioCtx = null;
@@ -215,6 +218,19 @@
     document.body.appendChild(btn);
   }
 
+  // Drag-to-activate (dragging from a selected option's dot onto a
+  // target) is how most of the canvas actually gets used, and it never
+  // fires a real 'click' event on the target — endLineDrag in script.js
+  // detects the drop and calls handleOptionActivate directly. The
+  // document-level delegated listener above only ever sees genuine click
+  // events, so without this, drag completion would be entirely silent —
+  // not a bug exactly, just a gap this fills by exposing the same two
+  // effects endLineDrag can call into directly.
+  window.ThinkMapsFeedback = {
+    pop: triggerPopEffect,
+    sound: () => { if(soundEnabled) playClickTick(); }
+  };
+
   function init(){
     document.addEventListener('click', handleDelegatedClick, true);
     buildToggleButton();
@@ -229,9 +245,11 @@
       ensureAudioContextRunning(() => startAmbiance());
       document.removeEventListener('click', unlockOnFirstInteraction, true);
       document.removeEventListener('touchstart', unlockOnFirstInteraction, true);
+      document.removeEventListener('mousedown', unlockOnFirstInteraction, true);
     }
     document.addEventListener('click', unlockOnFirstInteraction, true);
     document.addEventListener('touchstart', unlockOnFirstInteraction, true);
+    document.addEventListener('mousedown', unlockOnFirstInteraction, true);
   }
 
   if(document.readyState === 'loading'){
