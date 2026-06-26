@@ -9,7 +9,7 @@
 // Sounds are SYNTHESIZED with the Web Audio API, not audio files — there
 // was no real produced audio to ship here, and a few oscillators are
 // enough for a believable soft "tick" and a barely-there ambient pad.
-// If a real file ever gets added at /bg-ambient.mp3, this automatically
+// If a real file ever gets added at ./bg-ambient.mp3, this automatically
 // prefers it over the synthesized pad — see startAmbiance() below.
 
 (function(){
@@ -34,17 +34,33 @@
     try { localStorage.setItem(SOUND_PREF_KEY, String(value)); } catch (e){ /* non-fatal */ }
   }
 
-  // Created lazily, on the first real user gesture — browsers block audio
-  // from starting any earlier than that regardless of what this script
-  // wants, so there's no point trying sooner.
+  // getAudioContext() alone used to call .resume() without waiting for it
+  // to actually resolve, then let callers schedule sound immediately
+  // against ctx.currentTime regardless. Confirmed via testing: under a
+  // slower resume (which real devices/browsers can genuinely hit, even
+  // though fast local testing doesn't naturally surface it), that meant
+  // scheduling a sound against a context still reporting 'suspended' and
+  // a clock stuck at 0 — which doesn't error, it just silently never
+  // produces audible sound. Every sound-producing function below goes
+  // through this instead, which actually waits for the resume promise to
+  // resolve before letting anything get scheduled.
   function getAudioContext(){
     if(!audioCtx){
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if(!Ctx) return null;
       audioCtx = new Ctx();
     }
-    if(audioCtx.state === 'suspended') audioCtx.resume();
     return audioCtx;
+  }
+
+  function ensureAudioContextRunning(callback){
+    const ctx = getAudioContext();
+    if(!ctx) return;
+    if(ctx.state === 'running'){
+      callback(ctx);
+    } else {
+      ctx.resume().then(() => callback(ctx)).catch(() => {});
+    }
   }
 
   // A short, soft downward "tick" — not a beep. Quick pitch drop plus a
@@ -52,27 +68,27 @@
   // like an alarm; the same shape under a hundred different UI sound
   // libraries, just generated here instead of shipped as a file.
   function playClickTick(){
-    const ctx = getAudioContext();
-    if(!ctx) return;
-    const now = ctx.currentTime;
+    ensureAudioContextRunning((ctx) => {
+      const now = ctx.currentTime;
 
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
 
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(720, now);
-    osc.frequency.exponentialRampToValueAtTime(360, now + 0.07);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(720, now);
+      osc.frequency.exponentialRampToValueAtTime(360, now + 0.07);
 
-    gain.gain.setValueAtTime(0.14, now);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
 
-    osc.start(now);
-    osc.stop(now + 0.09);
+      osc.start(now);
+      osc.stop(now + 0.09);
+    });
   }
 
-  // Tries a real ambient track first (drop one at /bg-ambient.mp3 to
+  // Tries a real ambient track first (drop one at ./bg-ambient.mp3 to
   // upgrade from the synthesized pad below with zero code changes), and
   // only falls back to synthesis if that file doesn't exist or fails to
   // load. Either way this only ever runs from inside the toggle button's
@@ -81,7 +97,7 @@
   function startAmbiance(){
     if(ambianceNodes || ambianceAudioEl) return; // already running, just needs unmuting — see setAmbianceMuted
 
-    const probe = new Audio('/bg-ambient.mp3');
+    const probe = new Audio('./bg-ambient.mp3');
     let usedFallback = false;
 
     const useFallback = () => {
@@ -109,38 +125,37 @@
   // deliberately closer to "barely-there room tone" than music, since
   // anything busier than that gets tiring fast on a loop.
   function startSynthesizedPad(){
-    const ctx = getAudioContext();
-    if(!ctx) return;
+    ensureAudioContextRunning((ctx) => {
+      const masterGain = ctx.createGain();
+      masterGain.gain.value = soundEnabled ? 1 : 0;
+      masterGain.connect(ctx.destination);
 
-    const masterGain = ctx.createGain();
-    masterGain.gain.value = soundEnabled ? 1 : 0;
-    masterGain.connect(ctx.destination);
+      const tone = (freq, gainValue) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.value = gainValue;
+        osc.connect(gain);
+        gain.connect(masterGain);
+        osc.start();
+        return osc;
+      };
 
-    const tone = (freq, gainValue) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.value = gainValue;
-      osc.connect(gain);
-      gain.connect(masterGain);
-      osc.start();
-      return osc;
-    };
+      const osc1 = tone(220, 0.025);  // A3
+      const osc2 = tone(329.63, 0.018); // E4, a fifth above
 
-    const osc1 = tone(220, 0.025);  // A3
-    const osc2 = tone(329.63, 0.018); // E4, a fifth above
+      const lfo = ctx.createOscillator();
+      lfo.type = 'sine';
+      lfo.frequency.value = 1 / 12; // one breath roughly every 12 seconds
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.value = 0.5;
+      lfo.connect(lfoGain);
+      lfoGain.connect(masterGain.gain);
+      lfo.start();
 
-    const lfo = ctx.createOscillator();
-    lfo.type = 'sine';
-    lfo.frequency.value = 1 / 12; // one breath roughly every 12 seconds
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = 0.5;
-    lfo.connect(lfoGain);
-    lfoGain.connect(masterGain.gain);
-    lfo.start();
-
-    ambianceNodes = { masterGain, oscillators: [osc1, osc2, lfo] };
+      ambianceNodes = { masterGain, oscillators: [osc1, osc2, lfo] };
+    });
   }
 
   function setAmbianceMuted(muted){
@@ -204,17 +219,19 @@
     document.addEventListener('click', handleDelegatedClick, true);
     buildToggleButton();
 
-    // If sound was already on from a previous visit, the very first
-    // qualifying click anywhere on the page doubles as the user gesture
-    // that unlocks audio — no need to make people hunt for the toggle
-    // just to hear anything.
-    document.addEventListener('click', function unlockOnFirstClick(e){
+    // Deliberately NOT scoped to CLICKABLE_SELECTOR — this just needs to
+    // catch the very first interaction with the page, whatever it is, to
+    // satisfy the user-gesture requirement audio needs as early as
+    // possible. Scoping it to specific elements only delays things if the
+    // person's first click happens to land somewhere outside that list.
+    function unlockOnFirstInteraction(){
       if(!soundEnabled) return;
-      if(!e.target.closest(CLICKABLE_SELECTOR)) return;
-      getAudioContext();
-      startAmbiance();
-      document.removeEventListener('click', unlockOnFirstClick, true);
-    }, true);
+      ensureAudioContextRunning(() => startAmbiance());
+      document.removeEventListener('click', unlockOnFirstInteraction, true);
+      document.removeEventListener('touchstart', unlockOnFirstInteraction, true);
+    }
+    document.addEventListener('click', unlockOnFirstInteraction, true);
+    document.addEventListener('touchstart', unlockOnFirstInteraction, true);
   }
 
   if(document.readyState === 'loading'){
