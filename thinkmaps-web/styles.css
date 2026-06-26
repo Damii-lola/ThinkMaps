@@ -447,17 +447,6 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.checkpoint-node .canvas-option{ padding:14px 12px; font-size:13px; font-weight:500; }
 .canvas-group.checkpoint-node .canvas-option.root-clickable:hover{ background:var(--accent-soft); }
 
-/* The "More Pathways" continuation card — much lighter touch than the
-   checkpoint above, since this is just a minor "click for more," not a
-   dramatic moment. A thin accent border is enough to read as "this one's
-   an action, not a topic" without competing for attention against the
-   pathway topic cards sitting right next to it. Same placement reasoning
-   as checkpoint above: before .frozen/.batch-unpicked so those still win. */
-.canvas-group.more-pathways-node{ border-color:var(--accent); }
-.canvas-group.more-pathways-node .canvas-group-header{ background:var(--accent-soft); }
-.canvas-group.more-pathways-node .canvas-option.root-clickable{ font-weight:600; color:var(--accent-deep); }
-.canvas-group.more-pathways-node .canvas-option.root-clickable:hover{ background:var(--accent-soft); }
-
 .combined-pick-note{
   padding:6px 14px; font-size:11px; color:var(--accent-deep); background:var(--accent-soft);
   line-height:1.4;
