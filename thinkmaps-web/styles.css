@@ -447,6 +447,11 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-group.checkpoint-node .canvas-option{ padding:14px 12px; font-size:13px; font-weight:500; }
 .canvas-group.checkpoint-node .canvas-option.root-clickable:hover{ background:var(--accent-soft); }
 
+.combined-pick-note{
+  padding:6px 14px; font-size:11px; color:var(--accent-deep); background:var(--accent-soft);
+  line-height:1.4;
+}
+
 /* Frozen — grayed out by definition (no longer the active branch). Stays
    grayed out PERMANENTLY regardless of any render/animation timing, since
    it's driven purely by group.is_frozen on every render, never a transient
@@ -535,6 +540,13 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-option.root-clickable{ cursor:pointer; }
 .canvas-option.root-clickable:hover{ background:var(--accent-soft); }
 .canvas-option.inert{ cursor:default; }
+/* Staged for a combined activation (ctrl+click). Deliberately an INSET
+   box-shadow, not a real border — a real border would change this row's
+   box height slightly, and the server's layout math (estimateOptionHeight)
+   assumes a fixed, predictable row height for every state. Works on top
+   of .selected, .root-clickable, or .inert; never replaces them. */
+.canvas-option.multi-staged{ background:var(--accent-soft); box-shadow:inset 0 0 0 2px var(--accent); }
+.canvas-option.multi-staged .opt-dot{ background:var(--accent); }
 .canvas-option .opt-dot{ width:12px; height:12px; border-radius:50%; background:var(--line); flex-shrink:0; }
 .canvas-option .opt-label{
   flex:1; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2;
@@ -568,12 +580,15 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .canvas-generate-ideas-body p{ font-size:13px; color:var(--ink-muted); line-height:1.4; margin:0; }
 .canvas-generate-ideas-body .btn{ width:100%; justify-content:center; }
 
-.canvas-custom-row{ display:flex; gap:6px; padding:8px; border-top:1px solid var(--line); }
-.canvas-custom-row input{
-  flex:1; font-size:12px; border:1px solid var(--line); border-radius:6px; padding:6px 8px;
+.canvas-custom-row{ display:flex; gap:6px; padding:8px; border-top:1px solid var(--line); align-items:flex-end; }
+.canvas-custom-row textarea{
+  flex:1; font-family:var(--font-body); font-size:12px; line-height:1.4;
+  border:1px solid var(--line); border-radius:6px; padding:6px 8px;
   background:var(--bg); color:var(--ink); outline:none;
+  resize:none; overflow:hidden; min-height:30px; max-height:140px;
+  white-space:pre-wrap; word-wrap:break-word;
 }
-.canvas-custom-row input:focus{ border-color:var(--accent); }
+.canvas-custom-row textarea:focus{ border-color:var(--accent); }
 
 .canvas-controls{ position:absolute; bottom:20px; right:20px; display:flex; flex-direction:column; gap:6px; z-index:5; }
 .zoom-btn{
@@ -743,3 +758,4 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .risk-addressed{ font-size:13px; color:var(--ink-muted); margin:0 0 6px; line-height:1.5; }
 .risk-next-step{ font-size:13px; color:var(--ink); margin:0; line-height:1.5; }
 .risk-addressed strong, .risk-next-step strong{ color:var(--ink); font-weight:600; }
+
