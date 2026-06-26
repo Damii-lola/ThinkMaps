@@ -1010,29 +1010,30 @@ async function activateOption(optionId, combinedOptionIds = []){
   // fallback as a last resort) — NICHE_PATHWAYS uses the identical 45 keys
   // as NICHE_TEMPLATES, so reusing it here is exact, not approximate.
   const nichePathwayMatch = isNicheActivation ? await matchNicheToTemplate(option.label) : { key: null };
-  const pathwayEntries = nichePathwayMatch.key ? (NICHE_PATHWAYS[nichePathwayMatch.key] || []) : [];
+  const pathwayTopics = nichePathwayMatch.key ? (NICHE_PATHWAYS[nichePathwayMatch.key] || []) : [];
 
   let generated;
-  if(isNicheActivation && pathwayEntries.length > 0){
+  if(isNicheActivation && pathwayTopics.length > 0){
     // The moment a niche gets picked — hand back the 50 static, hand-
-    // written pathway options for THIS niche, chunked across exactly 8
-    // groups (matching the 8 compass directions the layout below radiates
-    // into) instead of the normal AI-generated first batch. No Mistral
-    // call needed for the content itself; this is fixed content. Picking —
-    // or ctrl+click combining several — proceeds into the completely
-    // normal 9-block flow afterward: pathway groups carry the
-    // PATHWAYS_BLOCK_NAME sentinel, which getUsedBlockNamesAlongPath
-    // collects but pickNextBlocks never filters against, so they're
-    // invisible to the normal block rotation while still being real,
-    // ordinary groups for every other purpose — path-walking, the combine
-    // feature, breadcrumbs, all of it already just works with no further
-    // special-casing.
-    const chunks = chunkEvenly(pathwayEntries, 8);
+    // written PATHWAY TOPICS for THIS niche (raw sub-topics/activities/
+    // angles, e.g. "Calisthenics for all ages" — deliberately NOT
+    // finished app ideas), chunked across exactly 8 groups (matching the
+    // 8 compass directions the layout below radiates into) instead of
+    // the normal AI-generated first batch. No Mistral call needed for
+    // the content itself; this is fixed content. Picking — or ctrl+click
+    // combining several — proceeds into the completely normal 9-block
+    // flow afterward: pathway groups carry the PATHWAYS_BLOCK_NAME
+    // sentinel, which getUsedBlockNamesAlongPath collects but
+    // pickNextBlocks never filters against, so they're invisible to the
+    // normal block rotation while still being real, ordinary groups for
+    // every other purpose — path-walking, the combine feature, breadcrumbs,
+    // all of it already just works with no further special-casing.
+    const chunks = chunkEvenly(pathwayTopics, 8);
     generated = {
       groups: chunks.map((chunk, idx) => ({
         groupLabel: `Pick a Pathway — Set ${idx + 1} of ${chunks.length}`,
         blockName: PATHWAYS_BLOCK_NAME,
-        options: chunk.map(p => ({ label: `${p.name} — ${p.pitch}` }))
+        options: chunk.map(topic => ({ label: topic }))
       }))
     };
   } else if(pathContext.length >= PATH_DEPTH_CAP){
