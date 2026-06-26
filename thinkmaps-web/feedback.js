@@ -71,6 +71,7 @@
   // like an alarm; the same shape under a hundred different UI sound
   // libraries, just generated here instead of shipped as a file.
   function playClickTick(){
+    if(!soundEnabled) return; // checked here too, not just by callers — this is the one function that actually makes sound, so it's the right place for the final guard
     ensureAudioContextRunning((ctx) => {
       const now = ctx.currentTime;
 
@@ -113,7 +114,7 @@
     probe.addEventListener('canplaythrough', () => {
       if(usedFallback) return; // fallback already kicked in while this was loading
       probe.loop = true;
-      probe.volume = 0.18;
+      probe.volume = soundEnabled ? 0.18 : 0; // re-checked here, not assumed — soundEnabled may have changed while this file was still loading
       probe.play().catch(useFallback);
       ambianceAudioEl = probe;
     }, { once: true });
@@ -167,7 +168,7 @@
     }
     if(ambianceNodes){
       const ctx = getAudioContext();
-      if(ctx) ambianceNodes.masterGain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.3);
+      if(ctx) ambianceNodes.masterGain.gain.setValueAtTime(muted ? 0 : 1, ctx.currentTime);
     }
   }
 
