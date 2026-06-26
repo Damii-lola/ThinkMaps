@@ -1477,6 +1477,10 @@ function wireGroupEvents(){
       customInput.addEventListener('keydown', (e) => {
         if(e.key === 'Enter' && !e.shiftKey){
           e.preventDefault();
+          if(window.ThinkMapsFeedback){
+            window.ThinkMapsFeedback.pop(customSubmit);
+            window.ThinkMapsFeedback.sound();
+          }
           handleCustomOption(groupId, customInput.value);
         }
       });
@@ -2042,11 +2046,19 @@ function endLineDrag(e){
   if(canvasState.multiSelectStagedIds.size >= 2 && canvasState.multiSelectStagedIds.has(targetOptionId)){
     const others = [...canvasState.multiSelectStagedIds].filter(id => id !== targetOptionId);
     console.log('[ThinkMaps] line-drag completed — combined activation', { primary: targetOptionId, others });
+    if(window.ThinkMapsFeedback){
+      window.ThinkMapsFeedback.pop(targetOptionEl);
+      window.ThinkMapsFeedback.sound();
+    }
     handleCombinedActivate([targetOptionId, ...others]);
     return;
   }
 
   console.log('[ThinkMaps] line-drag completed — activating option', targetOptionId);
+  if(window.ThinkMapsFeedback){
+    window.ThinkMapsFeedback.pop(targetOptionEl);
+    window.ThinkMapsFeedback.sound();
+  }
   handleOptionActivate(targetOptionId);
 }
 
