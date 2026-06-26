@@ -913,13 +913,6 @@ const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
 // Must match IDEA_CHECKPOINT_BLOCK_NAME in server.js exactly.
 const IDEA_CHECKPOINT_BLOCK_NAME = 'The Idea Taking Shape';
 
-// Must match PATHWAYS_BLOCK_NAME in server.js exactly.
-// Must match PATHWAYS_BLOCK_NAME in server.js exactly.
-const PATHWAYS_BLOCK_NAME = 'Pick a Pathway';
-
-// Must match MORE_PATHWAYS_BLOCK_NAME in server.js exactly.
-const MORE_PATHWAYS_BLOCK_NAME = 'More Pathways';
-
 // A small, consistent color per canonical block — purely a "what
 // territory am I in" recognition cue, built up over enough repeat visits
 // that the color alone starts to register before the title text does.
@@ -1137,8 +1130,6 @@ function renderGroups(visible, infoByGroupId){
     const isGenerateIdeasNode = group.block_name === GENERATE_IDEAS_BLOCK_NAME;
     const isCustomIdeaNode = group.block_name === CUSTOM_IDEA_BLOCK_NAME;
     const isCheckpointNode = group.block_name === IDEA_CHECKPOINT_BLOCK_NAME;
-    const isPathwaysNode = group.block_name === PATHWAYS_BLOCK_NAME;
-    const isMorePathwaysNode = group.block_name === MORE_PATHWAYS_BLOCK_NAME;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
     if(isBatchFaded) classNames.push('batch-unpicked');
@@ -1146,7 +1137,6 @@ function renderGroups(visible, infoByGroupId){
     if(isGenerateIdeasNode) classNames.push('generate-ideas-node');
     if(isCustomIdeaNode) classNames.push('custom-idea-node');
     if(isCheckpointNode) classNames.push('checkpoint-node');
-    if(isMorePathwaysNode) classNames.push('more-pathways-node');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -1204,7 +1194,7 @@ function renderGroups(visible, infoByGroupId){
     // drag-to-connect is part of what makes it feel different from every
     // other card, not just look different.
     const optionsHtml = options.map((opt, optionIndex) => {
-      const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode || isPathwaysNode || isMorePathwaysNode) ? 'root-clickable' : 'inert');
+      const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode) ? 'root-clickable' : 'inert');
       const stagedClass = canvasState.multiSelectStagedIds.has(opt.id) ? ' multi-staged' : '';
       return `
         <div class="canvas-option ${stateClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
@@ -1319,7 +1309,6 @@ function renderGroups(visible, infoByGroupId){
 function toggleMultiSelectStage(optionId, groupId){
   const group = canvasState.groups.find(g => g.id === groupId);
   if(!group || !group.spawned_from_option_id) return;
-  if(group.block_name === MORE_PATHWAYS_BLOCK_NAME) return; // a navigation action, not a real topic — never combinable
 
   if(canvasState.multiSelectStagedIds.has(optionId)){
     canvasState.multiSelectStagedIds.delete(optionId);
