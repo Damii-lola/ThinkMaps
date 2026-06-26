@@ -425,37 +425,6 @@ const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 // blocks since pickNextBlocks only ever filters against those by name.
 const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
 
-// Marks the static, hand-written "pick a pathway" groups spawned the
-// MOMENT a niche is picked — see NICHE_PATHWAYS in niche_pathways.js and
-// the isNicheActivation branch in activateOption below. Like the other
-// sentinels above, this never collides with the 9 real blocks since
-// pickNextBlocks only ever filters against those by name — a niche's
-// pathway groups get silently, harmlessly folded into "used blocks" for
-// path-tracking purposes without ever affecting the normal 9-block
-// rotation that follows once one (or several, combined) get picked.
-const PATHWAYS_BLOCK_NAME = 'Pick a Pathway';
-
-// Splits an array into `numChunks` pieces as evenly as possible (sizes
-// differing by at most 1) rather than a flat fixed chunk size — 50 items
-// across 8 chunks should come out as six 6s and two 7s, not seven 6s and
-// a nearly-empty leftover chunk of 2. 8 is deliberately the number of
-// compass directions activateOption's layout logic radiates outward in;
-// going beyond 8 groups in one batch falls back to the "no free direction
-// left" positioning case, which works but looks worse, so pathway
-// chunking is sized to exactly match the layout system it's spawned into.
-function chunkEvenly(arr, numChunks){
-  const chunks = [];
-  const baseSize = Math.floor(arr.length / numChunks);
-  const remainder = arr.length % numChunks;
-  let index = 0;
-  for(let i = 0; i < numChunks; i++){
-    const size = baseSize + (i < remainder ? 1 : 0);
-    chunks.push(arr.slice(index, index + size));
-    index += size;
-  }
-  return chunks;
-}
-
 // Every block_name "used" for the purpose of deciding what to assign
 // NEXT, scoped to ONE continuous path: every ancestor of optionId, PLUS
 // every SIBLING generated in the same batch as each ancestor (siblings
@@ -602,6 +571,28 @@ async function getAllExistingOptionLabelsInNiche(nicheOptionId){
   return labels.slice(-150);
 }
 
+// Fetches a niche's full pathway topic list purely as background
+// grounding for the generation prompts below — these topics are NEVER
+// shown to the person directly and never spawn as their own clickable
+// group. The idea: someone using this tool typically doesn't know yet
+// which specific angle they want, which is exactly why the app asks them
+// guided questions instead of handing them a raw list to browse — but
+// the model answering those questions can still benefit from seeing the
+// concrete vocabulary of this niche (e.g. "Calisthenics for all ages,"
+// "Calories tracking") to ground its own generated options in something
+// specific, rather than staying generic. The niche option's own label is
+// whatever the AI freely generated for the root "Niches" group, not
+// guaranteed to match one of the 45 canonical names exactly, so this
+// reuses the same exact/alias/AI-fallback matching matchNicheToTemplate
+// already does for the older 45-question flow.
+async function getNicheTopicsForGrounding(nicheOptionId){
+  const { data: nicheOption } = await supabase.from('options').select('label').eq('id', nicheOptionId).single();
+  if(!nicheOption) return [];
+  const match = await matchNicheToTemplate(nicheOption.label);
+  return match.key ? (NICHE_PATHWAYS[match.key] || []) : [];
+}
+
+
 // Shared instruction injected into every option-generating prompt — keeps
 // each option short (fits a line or two) instead of one long run-on
 // sentence. A naturally big/complex idea gets split into several short
@@ -655,7 +646,7 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 // and explicitly asks the model to keep a running, private sense of what
 // app idea this path is converging toward — well before the person
 // finishes the canvas or starts the 45-question ideation intake.
-async function generateCandidateBatch(pathContext, blockNames, existingLabels = []){
+async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], nicheTopics = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
@@ -682,7 +673,20 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
     ? `\nCRITICAL — these ${blockNames.length} blocks are being generated together in this one response, and they must be distinct from EACH OTHER, not just from history. Before finalizing, check every option against every OTHER block's options in this same response: if an option in one block is just a reworded version of an option already written for a different block here (same underlying mechanism, trigger, or idea, different words), rewrite it to genuinely engage with its OWN block's specific question instead. This applies across every pair of blocks listed below, not just adjacent ones.`
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  // Background grounding ONLY — see getNicheTopicsForGrounding in
+  // activateOption. The person using this app typically doesn't know yet
+  // which specific angle they want, which is exactly why they're being
+  // asked guided questions instead of handed a raw list to pick from —
+  // but the model answering those questions can lean on this concrete
+  // vocabulary to ground its own phrasing in something specific instead
+  // of staying generic, as long as it never just echoes one back verbatim
+  // as if restating it were an answer, and never lets on that this list
+  // exists at all.
+  const groundingNote = nicheTopics.length > 0
+    ? `\nFor your own background grounding only (the person has never seen this and it must never be mentioned to them, directly or by implication): here is a broad set of specific sub-topics, activities, and angles that exist within this niche — ${JSON.stringify(nicheTopics)}. Let this concrete vocabulary sharpen and ground your own phrasing where genuinely relevant to THIS specific path, instead of staying abstract — but every option must still directly answer its OWN block's specific question and build on the path so far. Never just restate one of these topics verbatim as if doing so were itself the answer.`
+    : '';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${groundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -728,11 +732,17 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 // next." Returns the same { groups: [...] } shape generateCandidateBatch
 // does (just with one entry instead of three), so activateOption can pick
 // between them without any change to how the result gets inserted.
-async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = []){
+async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = [], nicheTopics = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
 
   const diversityNote = existingLabels.length > 0
     ? `\n\nThis niche has already gone deep in several directions elsewhere — the following specific angles have ALREADY been used: ${JSON.stringify(existingLabels)}. Read these for their underlying theme, not just exact wording. The emerging idea and fork question you write below should reflect what's actually distinct about THIS specific path, not converge on a theme already covered by another branch of this same niche.`
+    : '';
+
+  // Same background-grounding-only purpose as generateCandidateBatch —
+  // never shown to the person, never to be echoed back verbatim.
+  const groundingNote = nicheTopics.length > 0
+    ? `\n\nFor your own background grounding only (the person has never seen this and it must never be mentioned to them): here is a broad set of specific sub-topics and angles that exist within this niche — ${JSON.stringify(nicheTopics)}. Let this concrete vocabulary sharpen the emerging idea and fork question below where genuinely relevant, instead of staying abstract — but the idea must still be a real synthesis of THIS path's actual choices, not a restatement of one of these topics.`
     : '';
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The person has just finished a deep round of personal exploration: their pull toward this space, who they're building for, the pain they've identified, what's already out there, where their creative instincts point, and their vision for the actual experience. Before this turns back to questions about THEM, pause and actually do the work of synthesizing what's emerged.
@@ -741,7 +751,7 @@ Path so far (their actual choices, in order): ${pathDescription}
 
 Privately work out: what is the SPECIFIC, nameable app concept crystallizing out of this exact path? Not a vague theme or restatement of the niche — a real, concrete idea with a clear angle, the kind you could describe in one sharp sentence.
 
-Then generate EXACTLY 2 options — not up to 6, exactly 2 — for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked. The two options should read as genuinely opposed directions, not two flavors of the same thing — this is the one deliberately stark, forced-choice moment in the whole path.${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, {"label": string}]}`;
+Then generate EXACTLY 2 options — not up to 6, exactly 2 — for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked. The two options should read as genuinely opposed directions, not two flavors of the same thing — this is the one deliberately stark, forced-choice moment in the whole path.${diversityNote}${groundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, {"label": string}]}`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
@@ -994,49 +1004,8 @@ async function activateOption(optionId, combinedOptionIds = []){
 
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
-  // Is the option just activated sitting in the TRUE root (Niches) group?
-  // Checked fresh here rather than reusing `version` from higher up, since
-  // this needs the OPTION's own containing group's parent, not anything
-  // about combinedOptionIds.
-  const { data: optionGroupRow } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
-  const isNicheActivation = !optionGroupRow?.spawned_from_option_id;
-
-  // The root "Niches" group is AI-generated freely (see generateGroupOptions'
-  // isRoot branch) — it is NOT constrained to produce exactly one of the 45
-  // canonical names, so a direct NICHE_PATHWAYS[option.label] lookup would
-  // silently miss anytime the model wrote "Fitness" instead of "Health,
-  // Fitness & Wellness." matchNicheToTemplate already solves exactly this
-  // problem for the older 45-question flow (exact match → alias match → AI
-  // fallback as a last resort) — NICHE_PATHWAYS uses the identical 45 keys
-  // as NICHE_TEMPLATES, so reusing it here is exact, not approximate.
-  const nichePathwayMatch = isNicheActivation ? await matchNicheToTemplate(option.label) : { key: null };
-  const pathwayTopics = nichePathwayMatch.key ? (NICHE_PATHWAYS[nichePathwayMatch.key] || []) : [];
-
   let generated;
-  if(isNicheActivation && pathwayTopics.length > 0){
-    // The moment a niche gets picked — hand back the 50 static, hand-
-    // written PATHWAY TOPICS for THIS niche (raw sub-topics/activities/
-    // angles, e.g. "Calisthenics for all ages" — deliberately NOT
-    // finished app ideas), chunked across exactly 8 groups (matching the
-    // 8 compass directions the layout below radiates into) instead of
-    // the normal AI-generated first batch. No Mistral call needed for
-    // the content itself; this is fixed content. Picking — or ctrl+click
-    // combining several — proceeds into the completely normal 9-block
-    // flow afterward: pathway groups carry the PATHWAYS_BLOCK_NAME
-    // sentinel, which getUsedBlockNamesAlongPath collects but
-    // pickNextBlocks never filters against, so they're invisible to the
-    // normal block rotation while still being real, ordinary groups for
-    // every other purpose — path-walking, the combine feature, breadcrumbs,
-    // all of it already just works with no further special-casing.
-    const chunks = chunkEvenly(pathwayTopics, 8);
-    generated = {
-      groups: chunks.map((chunk, idx) => ({
-        groupLabel: `Pick a Pathway — Set ${idx + 1} of ${chunks.length}`,
-        blockName: PATHWAYS_BLOCK_NAME,
-        options: chunk.map(topic => ({ label: topic }))
-      }))
-    };
-  } else if(pathContext.length >= PATH_DEPTH_CAP){
+  if(pathContext.length >= PATH_DEPTH_CAP){
     // This path is deep enough now — stop generating more exploration
     // and hand back exactly one terminal group: a button, not a list of
     // options to click into. No AI call needed; there's nothing left to
@@ -1061,11 +1030,16 @@ async function activateOption(optionId, combinedOptionIds = []){
     // time a narrow niche gets explored in more than one direction.
     const nicheOptionId = await findNicheRootOptionId(optionId);
 
+    // Background grounding only — see getNicheTopicsForGrounding above.
+    // Fetched once per activation and threaded into every generation call
+    // below, never surfaced to the person directly.
+    const nicheTopics = await getNicheTopicsForGrounding(nicheOptionId);
+
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
       // All 6 of A–F are used along THIS path and the checkpoint hasn't
       // fired yet on it — this is the moment.
       const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
-      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels);
+      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels, nicheTopics);
     } else if(!ideaCheckpointAlreadyShown){
       // Still working through A–F. Capped at however many of THOSE 6 are
       // actually left — never padded out to 3 by reaching into G/H/I, which
@@ -1076,7 +1050,7 @@ async function activateOption(optionId, combinedOptionIds = []){
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
       const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
     } else {
       // Checkpoint already shown along this path — proceed normally
       // through G, H, I (and wrap around the full 9 if this single path
@@ -1084,7 +1058,7 @@ async function activateOption(optionId, combinedOptionIds = []){
       // above means that's now a much rarer case than it used to be).
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
       const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
     }
   }
 
@@ -1178,11 +1152,10 @@ async function activateOption(optionId, combinedOptionIds = []){
   const shuffledAngles = [...compassAngles].sort(() => Math.random() - 0.5);
   const freeAngles = shuffledAngles.filter(isDirectionFree);
 
-  // 8, not 3, specifically for a pathways spawn — matching the 8 compass
-  // directions just below, and the 8-way chunking used to build
-  // `generated.groups` for this case in the first place. Every other kind
-  // of batch stays capped at 3, exactly as before this feature existed.
-  const maxGroupsThisBatch = isNicheActivation ? 8 : 3;
+  // Every batch — niche or otherwise — stays capped at 3 groups now that
+  // pathways are background grounding only and never spawn as their own
+  // visible groups (see getNicheTopicsForGrounding above).
+  const maxGroupsThisBatch = 3;
   const groupSpecs = (generated.groups || []).slice(0, maxGroupsThisBatch);
   const newGroups = [];
 
