@@ -646,9 +646,69 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 // and explicitly asks the model to keep a running, private sense of what
 // app idea this path is converging toward — well before the person
 // finishes the canvas or starts the 45-question ideation intake.
+// Builds a search query from the path's niche plus its most recent,
+// most specific choices — the niche alone is too broad to find anything
+// useful, and the full path is often too long and noisy for a search
+// engine; the niche plus the last couple of choices is usually the
+// sweet spot of "specific enough to find something real."
+function buildSearchQueryFromPath(pathContext){
+  const nicheLabel = pathContext[0]?.optionLabel || '';
+  const mostRecent = pathContext.slice(1).map(p => p.optionLabel).slice(-2).join(' ');
+  return [nicheLabel, mostRecent].filter(Boolean).join(' ').trim();
+}
+
+// Real, live search for what people actually say about this — reuses
+// webSearchForSimilarProducts (defined further down, but a hoisted
+// function declaration so call order here doesn't matter). Returns null
+// if SEARCH_API_KEY isn't configured or the search fails; callers below
+// degrade gracefully either way.
+async function searchRealPainPoints(pathContext){
+  const baseQuery = buildSearchQueryFromPath(pathContext);
+  if(!baseQuery) return null;
+  return await webSearchForSimilarProducts(`${baseQuery} reddit forum frustrated complaints problems`);
+}
+
+async function searchRealExistingSolutions(pathContext){
+  const baseQuery = buildSearchQueryFromPath(pathContext);
+  if(!baseQuery) return null;
+  return await webSearchForSimilarProducts(`${baseQuery} existing apps solutions reviews`);
+}
+
 async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], nicheTopics = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
+
+  // "Personal Read on the Pain" and "Honest Awareness of What Exists" are
+  // the two blocks that are explicitly about external, verifiable
+  // reality — genuine problems people have, and what actually already
+  // exists — not personal preference or instinct like every other block.
+  // That makes them exactly where an LLM's tendency to generate
+  // plausible-sounding-but-invented content does the most damage: a
+  // fabricated "pain point" that's really a product feature in disguise
+  // (e.g. "micro-workouts in calendar gaps" — a real example that slipped
+  // through here) feels like real grounded research right up until
+  // someone who actually knows the space reads it and immediately spots
+  // that no real person has ever said anything like that. Run live
+  // search for these two specifically, in parallel, only when they're
+  // actually in this batch.
+  const needsPainSearch = blockNames.includes('Personal Read on the Pain');
+  const needsExistingSearch = blockNames.includes('Honest Awareness of What Exists');
+  const [painSearchResults, existingSearchResults] = await Promise.all([
+    needsPainSearch ? searchRealPainPoints(pathContext) : Promise.resolve(null),
+    needsExistingSearch ? searchRealExistingSolutions(pathContext) : Promise.resolve(null)
+  ]);
+
+  const painGroundingNote = needsPainSearch
+    ? (painSearchResults
+        ? `\n\nFor the "Personal Read on the Pain" block specifically: here are REAL, live search results showing what people actually say about this space — ${JSON.stringify(painSearchResults)}. Ground that block's options in what's ACTUALLY being expressed in these results, not invented-sounding "innovations." Every option for this block should read like something a real, ordinary person would genuinely say or feel — a plain frustration, not a clever feature pitch wearing a "problem" costume.`
+        : `\n\nFor the "Personal Read on the Pain" block specifically: no live search was available this time, so draw on your own broad knowledge of what real people ACTUALLY and commonly complain about in this exact space — the kind of plain, ordinary frustration you'd genuinely see in a real forum thread or review. Avoid anything that reads like a clever product feature dressed up as a problem — for example "micro-workouts in calendar gaps" is a FEATURE pitch, not a real complaint anyone has; "I never have time for a real workout" is. If you can't think of a genuinely real, commonly-expressed frustration for this exact angle, write a more obvious, ordinary one rather than inventing something novel-sounding.`)
+    : '';
+
+  const existingGroundingNote = needsExistingSearch
+    ? (existingSearchResults
+        ? `\n\nFor the "Honest Awareness of What Exists" block specifically: here are REAL, live search results about what actually already exists in this space — ${JSON.stringify(existingSearchResults)}. Ground that block's options in genuinely real products, gaps, or limitations these results support — never invent a fake product or a gap that doesn't actually exist.`
+        : `\n\nFor the "Honest Awareness of What Exists" block specifically: no live search was available this time, so draw only on real, well-known existing apps or approaches you're genuinely confident actually exist in this space. Never invent a fake competitor or describe a market gap you're not actually confident is real.`)
+    : '';
 
   // Covers repetition against everything ALREADY SAVED, anywhere in this
   // niche — but that's a different failure mode from the one below.
@@ -668,9 +728,12 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   // questions (e.g. "who this is for" vs "what's painful about it")
   // should basically never land on near-identical answers — if they do,
   // at least one side wasn't actually engaging with its own block's
-  // specific question.
+  // specific question. The concrete example below is a REAL failure that
+  // slipped through with only the abstract instruction in place — naming
+  // the actual failure mode explicitly works better than describing it
+  // generically.
   const crossBlockNote = blockNames.length > 1
-    ? `\nCRITICAL — these ${blockNames.length} blocks are being generated together in this one response, and they must be distinct from EACH OTHER, not just from history. Before finalizing, check every option against every OTHER block's options in this same response: if an option in one block is just a reworded version of an option already written for a different block here (same underlying mechanism, trigger, or idea, different words), rewrite it to genuinely engage with its OWN block's specific question instead. This applies across every pair of blocks listed below, not just adjacent ones.`
+    ? `\nCRITICAL — these ${blockNames.length} blocks are being generated together in this one response, and they must be distinct from EACH OTHER, not just from history. Before finalizing, privately list out every option across all ${blockNames.length} blocks together in one place, then check each one against every OTHER block's options: if an option in one block is just a reworded version of an option already written for a different block here (same underlying mechanism, trigger, or idea, different words), rewrite it to genuinely engage with its OWN block's specific question instead. This applies across every pair of blocks listed below, not just adjacent ones. A real example of the failure this is guarding against: "Cross-Pollination & Creative Inspiration" generating "workout snippets in calendar apps" while "Your Vision for the Experience" independently generates "micro-workouts in calendar gaps" — these are the same idea wearing two different sentences, and both blocks should never converge on it like that.`
     : '';
 
   // Background grounding ONLY — see getNicheTopicsForGrounding in
@@ -686,7 +749,7 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
     ? `\nFor your own background grounding only (the person has never seen this and it must never be mentioned to them, directly or by implication): here is a broad set of specific sub-topics, activities, and angles that exist within this niche — ${JSON.stringify(nicheTopics)}. Let this concrete vocabulary sharpen and ground your own phrasing where genuinely relevant to THIS specific path, instead of staying abstract — but every option must still directly answer its OWN block's specific question and build on the path so far. Never just restate one of these topics verbatim as if doing so were itself the answer.`
     : '';
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${groundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${groundingNote}${painGroundingNote}${existingGroundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
