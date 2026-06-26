@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+const { NICHE_PATHWAYS } = require('./niche_pathways');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -365,6 +366,20 @@ async function buildPathContextFromOption(optionId){
   return path;
 }
 
+// One-level lookup for a single option's own {groupLabel, optionLabel} —
+// used only for the OTHER members of a combined activation, which share
+// the primary's exact parent already (enforced by validateCombinationSet)
+// and so never need a full ancestor walk of their own.
+async function getOptionGroupLabelPair(optionId){
+  const { data: option } = await supabase.from('options').select('label, group_version_id').eq('id', optionId).single();
+  if(!option) return null;
+  const { data: version } = await supabase.from('group_versions').select('group_id').eq('id', option.group_version_id).single();
+  if(!version) return null;
+  const { data: group } = await supabase.from('groups').select('label').eq('id', version.group_id).single();
+  if(!group) return null;
+  return { groupLabel: group.label, optionLabel: option.label };
+}
+
 // Generates up to 6 options for a SINGLE group (used for the root "Niches"
 // group, and for Retry — both deal with one group's own option list).
 // The same 9 blocks driving the 45-question ideation intake. The canvas's
@@ -409,6 +424,37 @@ const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 // the other two sentinels above, this never collides with the 9 real
 // blocks since pickNextBlocks only ever filters against those by name.
 const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
+
+// Marks the static, hand-written "pick a pathway" groups spawned the
+// MOMENT a niche is picked — see NICHE_PATHWAYS in niche_pathways.js and
+// the isNicheActivation branch in activateOption below. Like the other
+// sentinels above, this never collides with the 9 real blocks since
+// pickNextBlocks only ever filters against those by name — a niche's
+// pathway groups get silently, harmlessly folded into "used blocks" for
+// path-tracking purposes without ever affecting the normal 9-block
+// rotation that follows once one (or several, combined) get picked.
+const PATHWAYS_BLOCK_NAME = 'Pick a Pathway';
+
+// Splits an array into `numChunks` pieces as evenly as possible (sizes
+// differing by at most 1) rather than a flat fixed chunk size — 50 items
+// across 8 chunks should come out as six 6s and two 7s, not seven 6s and
+// a nearly-empty leftover chunk of 2. 8 is deliberately the number of
+// compass directions activateOption's layout logic radiates outward in;
+// going beyond 8 groups in one batch falls back to the "no free direction
+// left" positioning case, which works but looks worse, so pathway
+// chunking is sized to exactly match the layout system it's spawned into.
+function chunkEvenly(arr, numChunks){
+  const chunks = [];
+  const baseSize = Math.floor(arr.length / numChunks);
+  const remainder = arr.length % numChunks;
+  let index = 0;
+  for(let i = 0; i < numChunks; i++){
+    const size = baseSize + (i < remainder ? 1 : 0);
+    chunks.push(arr.slice(index, index + size));
+    index += size;
+  }
+  return chunks;
+}
 
 // Every block_name "used" for the purpose of deciding what to assign
 // NEXT, scoped to ONE continuous path: every ancestor of optionId, PLUS
@@ -859,7 +905,15 @@ function sanitizeOptionLabels(rawOptions){
     .map(o => ({ label: o.label.trim() }));
 }
 
-async function activateOption(optionId){
+// combinedOptionIds is the NEW, optional piece: when non-empty, this is a
+// combined multi-select activation (ctrl+click several options, then
+// drag) rather than a normal single one. optionId stays the "primary" —
+// the one spawned_from_option_id on every new group points to, and the
+// one buildPathContextFromOption walks from — while every ID in
+// combinedOptionIds gets selected and frozen-sibling-handled exactly like
+// optionId does, just without becoming the traversal anchor itself. Every
+// existing call site passes nothing here and behaves completely unchanged.
+async function activateOption(optionId, combinedOptionIds = []){
   const { data: option } = await supabase
     .from('options')
     .select('id, label, group_version_id, is_selected')
@@ -876,16 +930,38 @@ async function activateOption(optionId){
 
   if(!version) throw new Error('Group version not found.');
 
-  // Freeze any OTHER option in this same group_version that was previously
-  // activated — only one sibling stays the active continuation at a time.
-  const { data: siblingOptions } = await supabase
-    .from('options')
-    .select('id')
-    .eq('group_version_id', version.id)
-    .neq('id', optionId);
+  // The full combined set (primary + others) — every freeze/select step
+  // below needs to treat ALL of these as "the thing being activated,"
+  // never just the primary alone.
+  const allCombinedIds = [optionId, ...combinedOptionIds];
 
-  for(const sibling of (siblingOptions || [])){
-    await freezeOptionSubtree(sibling.id);
+  // Freeze any OTHER option in EVERY group_version actually involved —
+  // not just the primary's. A combined pick spanning "brother" groups
+  // means each of those groups independently needs its own non-combined
+  // siblings frozen, the exact same way a normal single activation
+  // freezes the primary's siblings. The combined set itself is excluded
+  // everywhere, since two combined options can legitimately share one
+  // group_version (the "same group" case from the spec).
+  const involvedVersionIds = new Set([version.id]);
+  if(combinedOptionIds.length > 0){
+    const { data: combinedOptionRows } = await supabase
+      .from('options')
+      .select('id, group_version_id')
+      .in('id', combinedOptionIds);
+    (combinedOptionRows || []).forEach(o => involvedVersionIds.add(o.group_version_id));
+  }
+
+  for(const versionId of involvedVersionIds){
+    const { data: siblingOptions } = await supabase
+      .from('options')
+      .select('id')
+      .eq('group_version_id', versionId);
+
+    for(const sibling of (siblingOptions || [])){
+      if(!allCombinedIds.includes(sibling.id)){
+        await freezeOptionSubtree(sibling.id);
+      }
+    }
   }
 
   if(option.is_selected){
@@ -894,13 +970,72 @@ async function activateOption(optionId){
     return { groups: existingGroups || [], reactivated: true };
   }
 
-  await supabase.from('options').update({ is_selected: true }).eq('id', optionId);
+  await supabase.from('options').update({ is_selected: true }).in('id', allCombinedIds);
 
-  const pathContext = await buildPathContextFromOption(optionId);
+  let pathContext = await buildPathContextFromOption(optionId);
+
+  // Merge in the OTHER combined options' own {groupLabel, optionLabel}
+  // pairs by replacing the final entry (which buildPathContextFromOption
+  // already built for the primary alone) with one that names every
+  // combined choice together — so the model generating what comes next
+  // sees the full combination, not just whichever one happened to be the
+  // primary. Every combined option shares the primary's exact parent (the
+  // validation layer in the route enforces this), so no separate ancestor
+  // walk is needed for them — just their own one-level label lookup.
+  if(combinedOptionIds.length > 0 && pathContext.length > 0){
+    const extraPairs = await Promise.all(combinedOptionIds.map(getOptionGroupLabelPair));
+    const allPairs = [pathContext[pathContext.length - 1], ...extraPairs.filter(Boolean)];
+    const mergedOptionLabel = allPairs.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' — combined with — ');
+    pathContext = [
+      ...pathContext.slice(0, -1),
+      { groupLabel: 'Combined choice', optionLabel: mergedOptionLabel }
+    ];
+  }
+
   const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
+  // Is the option just activated sitting in the TRUE root (Niches) group?
+  // Checked fresh here rather than reusing `version` from higher up, since
+  // this needs the OPTION's own containing group's parent, not anything
+  // about combinedOptionIds.
+  const { data: optionGroupRow } = await supabase.from('groups').select('spawned_from_option_id').eq('id', version.group_id).single();
+  const isNicheActivation = !optionGroupRow?.spawned_from_option_id;
+
+  // The root "Niches" group is AI-generated freely (see generateGroupOptions'
+  // isRoot branch) — it is NOT constrained to produce exactly one of the 45
+  // canonical names, so a direct NICHE_PATHWAYS[option.label] lookup would
+  // silently miss anytime the model wrote "Fitness" instead of "Health,
+  // Fitness & Wellness." matchNicheToTemplate already solves exactly this
+  // problem for the older 45-question flow (exact match → alias match → AI
+  // fallback as a last resort) — NICHE_PATHWAYS uses the identical 45 keys
+  // as NICHE_TEMPLATES, so reusing it here is exact, not approximate.
+  const nichePathwayMatch = isNicheActivation ? await matchNicheToTemplate(option.label) : { key: null };
+  const pathwayEntries = nichePathwayMatch.key ? (NICHE_PATHWAYS[nichePathwayMatch.key] || []) : [];
+
   let generated;
-  if(pathContext.length >= PATH_DEPTH_CAP){
+  if(isNicheActivation && pathwayEntries.length > 0){
+    // The moment a niche gets picked — hand back the 50 static, hand-
+    // written pathway options for THIS niche, chunked across exactly 8
+    // groups (matching the 8 compass directions the layout below radiates
+    // into) instead of the normal AI-generated first batch. No Mistral
+    // call needed for the content itself; this is fixed content. Picking —
+    // or ctrl+click combining several — proceeds into the completely
+    // normal 9-block flow afterward: pathway groups carry the
+    // PATHWAYS_BLOCK_NAME sentinel, which getUsedBlockNamesAlongPath
+    // collects but pickNextBlocks never filters against, so they're
+    // invisible to the normal block rotation while still being real,
+    // ordinary groups for every other purpose — path-walking, the combine
+    // feature, breadcrumbs, all of it already just works with no further
+    // special-casing.
+    const chunks = chunkEvenly(pathwayEntries, 8);
+    generated = {
+      groups: chunks.map((chunk, idx) => ({
+        groupLabel: `Pick a Pathway — Set ${idx + 1} of ${chunks.length}`,
+        blockName: PATHWAYS_BLOCK_NAME,
+        options: chunk.map(p => ({ label: `${p.name} — ${p.pitch}` }))
+      }))
+    };
+  } else if(pathContext.length >= PATH_DEPTH_CAP){
     // This path is deep enough now — stop generating more exploration
     // and hand back exactly one terminal group: a button, not a list of
     // options to click into. No AI call needed; there's nothing left to
@@ -1042,7 +1177,12 @@ async function activateOption(optionId){
   const shuffledAngles = [...compassAngles].sort(() => Math.random() - 0.5);
   const freeAngles = shuffledAngles.filter(isDirectionFree);
 
-  const groupSpecs = (generated.groups || []).slice(0, 3);
+  // 8, not 3, specifically for a pathways spawn — matching the 8 compass
+  // directions just below, and the 8-way chunking used to build
+  // `generated.groups` for this case in the first place. Every other kind
+  // of batch stays capped at 3, exactly as before this feature existed.
+  const maxGroupsThisBatch = isNicheActivation ? 8 : 3;
+  const groupSpecs = (generated.groups || []).slice(0, maxGroupsThisBatch);
   const newGroups = [];
 
   for(let i = 0; i < groupSpecs.length; i++){
@@ -1082,7 +1222,8 @@ async function activateOption(optionId){
         block_name: spec.blockName || null,
         position_x: x,
         position_y: y,
-        spawned_from_option_id: optionId
+        spawned_from_option_id: optionId,
+        combined_source_option_ids: combinedOptionIds.length > 0 ? allCombinedIds : null
       })
       .select()
       .single();
@@ -1209,6 +1350,78 @@ app.post('/options/:id/activate', requireAuth, async (req, res) => {
     res.status(200).json(result);
   } catch (err) {
     res.status(500).json({ error: 'Could not activate that option.', detail: err.message });
+  }
+});
+
+// Validates a proposed combined activation BEFORE any writes happen.
+// Every rule here mirrors the actual constraint the feature was specced
+// with: none of the options can already be selected (combining is for
+// choosing several NEW things together, not re-triggering something
+// already active), none can belong to the root Niches group (multi-select
+// explicitly doesn't apply there), and every one of them must share the
+// exact same spawned_from_option_id — meaning they're all either in the
+// SAME group, or "brother" groups spawned together in the same batch.
+// That last rule is deliberately exactly as strict as
+// getUsedBlockNamesAlongPath's own definition of "same batch," so a
+// combined pick can never straddle two genuinely unrelated parts of the
+// tree, and the merged path-context logic in activateOption never needs
+// to worry about combined options having divergent ancestor chains.
+async function validateCombinationSet(optionIds){
+  const { data: options } = await supabase
+    .from('options')
+    .select('id, is_selected, group_version_id')
+    .in('id', optionIds);
+
+  if(!options || options.length !== optionIds.length){
+    return { error: 'One or more of the selected options could not be found.' };
+  }
+  if(options.some(o => o.is_selected)){
+    return { error: 'One or more of those is already active — combining only works on options not yet chosen.' };
+  }
+
+  const versionIds = [...new Set(options.map(o => o.group_version_id))];
+  const { data: versions } = await supabase.from('group_versions').select('id, group_id').in('id', versionIds);
+  const groupIds = [...new Set((versions || []).map(v => v.group_id))];
+  const { data: groups } = await supabase.from('groups').select('id, spawned_from_option_id').in('id', groupIds);
+
+  if((groups || []).some(g => !g.spawned_from_option_id)){
+    return { error: 'Combining options is not available on the starting niche selection.' };
+  }
+
+  const parentIds = new Set((groups || []).map(g => g.spawned_from_option_id));
+  if(parentIds.size > 1){
+    return { error: 'Combined options must all be in the same group, or in brother groups from the same batch.' };
+  }
+
+  return { error: null };
+}
+
+// Combined activation — ctrl+click multiple options (same group or
+// brother groups, never the root), then drag onto any one of them. The
+// first ID in the array is treated as the "primary": the one every new
+// spawned group's spawned_from_option_id points to, exactly like a normal
+// single activation. Every other ID rides along — selected, frozen-sibling
+// -handled, and folded into the merged path description — without
+// becoming a second traversal anchor anywhere else in the app.
+app.post('/options/combine-activate', requireAuth, async (req, res) => {
+  try {
+    const { optionIds } = req.body;
+    if(!Array.isArray(optionIds) || optionIds.length < 2){
+      return res.status(400).json({ error: 'At least 2 option IDs are required to combine.' });
+    }
+
+    const [primaryOptionId, ...combinedOptionIds] = optionIds;
+
+    const check = await verifyOptionOwnershipAndLock(primaryOptionId, req.user.id);
+    if(check.error) return res.status(check.status).json({ error: check.error });
+
+    const validation = await validateCombinationSet(optionIds);
+    if(validation.error) return res.status(400).json({ error: validation.error });
+
+    const result = await activateOption(primaryOptionId, combinedOptionIds);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Could not activate that combination.', detail: err.message });
   }
 });
 
