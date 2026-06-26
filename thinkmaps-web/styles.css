@@ -759,3 +759,38 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 .risk-next-step{ font-size:13px; color:var(--ink); margin:0; line-height:1.5; }
 .risk-addressed strong, .risk-next-step strong{ color:var(--ink); font-weight:600; }
 
+/* ---------- CLICK FEEDBACK (feedback.js) ---------- */
+/* Applied as a temporary class by feedback.js to whatever was just
+   clicked — a button, a canvas option, anything actionable. The overshoot
+   in the cubic-bezier (the 1.4 value pushing past 1.0 on the way back up)
+   is what makes this read as a little springy "pop" rather than a flat
+   press-down. Pairs with, doesn't fight, the existing .btn hover
+   transition on transform — an animation always takes priority over a
+   transition on the same property for as long as it's running, so this
+   only ever shows up for the brief moment right after a click. */
+@keyframes satisfying-pop{
+  0%{ transform:scale(1); }
+  35%{ transform:scale(0.93); }
+  100%{ transform:scale(1); }
+}
+.pop-effect{
+  animation:satisfying-pop 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+/* Floating sound toggle — injected into the DOM by feedback.js itself,
+   not present in any page's own markup, so adding sound to every page
+   only ever needed one <script> tag added per page, nothing else. */
+.sound-toggle-btn{
+  position:fixed; bottom:20px; right:20px; z-index:999;
+  width:44px; height:44px; border-radius:50%;
+  background:var(--surface); border:1px solid var(--line);
+  box-shadow:0 2px 10px rgba(0,0,0,0.12);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; font-size:18px; color:var(--ink-muted);
+  transition:transform .15s ease, box-shadow .15s ease, color .15s ease;
+}
+.sound-toggle-btn:hover{ box-shadow:0 4px 14px rgba(0,0,0,0.16); color:var(--ink); }
+.sound-toggle-btn.sound-on{ color:var(--accent); }
+@media (max-width:640px){
+  .sound-toggle-btn{ bottom:14px; right:14px; width:38px; height:38px; font-size:15px; }
+}
