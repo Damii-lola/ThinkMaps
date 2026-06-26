@@ -670,7 +670,14 @@ const canvasState = {
   // Terminal "Generate Ideas" groups that have already gotten their
   // one-time auto-frame moment — without this, EVERY graph reload while
   // that card is on screen would re-trigger the zoom-to-fit animation.
-  framedTerminalGroupIds: new Set()
+  framedTerminalGroupIds: new Set(),
+  // Options ctrl+clicked to stage for a COMBINED activation — cleared on
+  // successful activation, Escape, or a click on empty canvas. Never
+  // includes anything from the root Niches group (enforced at the point
+  // options get added, not just on the backend) and every member always
+  // shares the exact same spawned_from_option_id, so by construction this
+  // can never straddle two unrelated parts of the tree.
+  multiSelectStagedIds: new Set()
 };
 
 // Zoom range — 0.15 is "see almost the whole sprawling graph at once,"
@@ -726,6 +733,10 @@ async function initAppPage(){
 
   setupCanvasInteractions();
   setupFullscreenToggle();
+
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape') clearMultiSelectStage();
+  });
   setupBlueprintTitleEditing();
   await loadGraph();
 }
@@ -901,6 +912,9 @@ const CUSTOM_IDEA_BLOCK_NAME = 'Your Own Idea';
 
 // Must match IDEA_CHECKPOINT_BLOCK_NAME in server.js exactly.
 const IDEA_CHECKPOINT_BLOCK_NAME = 'The Idea Taking Shape';
+
+// Must match PATHWAYS_BLOCK_NAME in server.js exactly.
+const PATHWAYS_BLOCK_NAME = 'Pick a Pathway';
 
 // A small, consistent color per canonical block — purely a "what
 // territory am I in" recognition cue, built up over enough repeat visits
@@ -1119,6 +1133,7 @@ function renderGroups(visible, infoByGroupId){
     const isGenerateIdeasNode = group.block_name === GENERATE_IDEAS_BLOCK_NAME;
     const isCustomIdeaNode = group.block_name === CUSTOM_IDEA_BLOCK_NAME;
     const isCheckpointNode = group.block_name === IDEA_CHECKPOINT_BLOCK_NAME;
+    const isPathwaysNode = group.block_name === PATHWAYS_BLOCK_NAME;
     const classNames = ['canvas-group'];
     if(group.is_frozen) classNames.push('frozen');
     if(isBatchFaded) classNames.push('batch-unpicked');
@@ -1183,9 +1198,10 @@ function renderGroups(visible, infoByGroupId){
     // drag-to-connect is part of what makes it feel different from every
     // other card, not just look different.
     const optionsHtml = options.map((opt, optionIndex) => {
-      const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode) ? 'root-clickable' : 'inert');
+      const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode || isPathwaysNode) ? 'root-clickable' : 'inert');
+      const stagedClass = canvasState.multiSelectStagedIds.has(opt.id) ? ' multi-staged' : '';
       return `
-        <div class="canvas-option ${stateClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
+        <div class="canvas-option ${stateClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
           <span class="opt-dot"></span>
           <span class="opt-label">${escapeHtml(opt.label)}</span>
         </div>
@@ -1203,7 +1219,7 @@ function renderGroups(visible, infoByGroupId){
     if(isCustomIdeaNode){
       const inputRowHtml = options.length < 6 ? `
         <div class="canvas-custom-row canvas-custom-row-persistent">
-          <input type="text" placeholder="Write your own idea…" data-custom-input />
+          <textarea rows="1" placeholder="Write your own idea…" data-custom-input></textarea>
           <button class="mini-btn" data-action="custom-submit">Add</button>
         </div>` : '';
 
@@ -1247,13 +1263,28 @@ function renderGroups(visible, infoByGroupId){
         <button class="mini-btn" data-action="custom-toggle" ${disabledAttr}>+ Custom</button>
       </div>
       ${footerTargetOptionId ? '' : `<div class="canvas-custom-row" style="display:none;">
-        <input type="text" placeholder="Type your own option…" data-custom-input />
+        <textarea rows="1" placeholder="Type your own option…" data-custom-input></textarea>
         <button class="mini-btn" data-action="custom-submit">Add</button>
       </div>`}` : '';
 
     const checkpointIntroHtml = isCheckpointNode
       ? `<div class="checkpoint-intro">An idea is taking shape. Which way does it lean?</div>`
       : '';
+
+    // group.spawned_from_option_id is always the "primary" of a combined
+    // activation — already implied by the connecting line drawn on the
+    // canvas, so it's left out here; this note only needs to surface the
+    // OTHER choices that got folded in alongside it.
+    let combinedNoteHtml = '';
+    if(Array.isArray(group.combined_source_option_ids) && group.combined_source_option_ids.length > 1){
+      const otherLabels = group.combined_source_option_ids
+        .filter(id => id !== group.spawned_from_option_id)
+        .map(id => canvasState.options.find(o => o.id === id)?.label)
+        .filter(Boolean);
+      if(otherLabels.length > 0){
+        combinedNoteHtml = `<div class="combined-pick-note">+ combined with: ${otherLabels.map(escapeHtml).join(', ')}</div>`;
+      }
+    }
 
     card.innerHTML = `
       <div class="canvas-group-header" data-drag-handle>
@@ -1262,6 +1293,7 @@ function renderGroups(visible, infoByGroupId){
         <div class="header-controls">${controlsHtml}</div>
       </div>
       ${checkpointIntroHtml}
+      ${combinedNoteHtml}
       <div class="canvas-group-options">${optionsHtml}</div>
       ${footerHtml}
     `;
@@ -1270,6 +1302,44 @@ function renderGroups(visible, infoByGroupId){
   });
 
   wireGroupEvents();
+}
+
+// Ctrl/Cmd+click toggles an option in or out of the staged combination
+// set. Root is excluded entirely — there's no group lookup fallback here
+// on purpose, since silently allowing it would contradict the one
+// explicit constraint this feature was specced with. Same-batch is
+// enforced here too, not just server-side, so a doomed combination never
+// even gets as far as a drag attempt.
+function toggleMultiSelectStage(optionId, groupId){
+  const group = canvasState.groups.find(g => g.id === groupId);
+  if(!group || !group.spawned_from_option_id) return;
+
+  if(canvasState.multiSelectStagedIds.has(optionId)){
+    canvasState.multiSelectStagedIds.delete(optionId);
+    renderCanvas();
+    return;
+  }
+
+  if(canvasState.multiSelectStagedIds.size > 0){
+    const [firstStagedId] = canvasState.multiSelectStagedIds;
+    const firstStagedOption = canvasState.options.find(o => o.id === firstStagedId);
+    const firstStagedVersion = canvasState.groupVersions.find(v => v.id === firstStagedOption?.group_version_id);
+    const firstStagedGroup = canvasState.groups.find(g => g.id === firstStagedVersion?.group_id);
+
+    if(firstStagedGroup && firstStagedGroup.spawned_from_option_id !== group.spawned_from_option_id){
+      alert('Combined options need to be in the same group, or a brother group from the same batch.');
+      return;
+    }
+  }
+
+  canvasState.multiSelectStagedIds.add(optionId);
+  renderCanvas();
+}
+
+function clearMultiSelectStage(){
+  if(canvasState.multiSelectStagedIds.size === 0) return;
+  canvasState.multiSelectStagedIds.clear();
+  renderCanvas();
 }
 
 function wireGroupEvents(){
@@ -1287,6 +1357,21 @@ function wireGroupEvents(){
       const optionIndex = Number(optEl.dataset.optionIndex);
       const dot = optEl.querySelector('.opt-dot');
 
+      // Ctrl/Cmd+click stages this option for a combined activation,
+      // intercepting BEFORE the normal click/drag behavior below — an
+      // already-selected option can't be staged (it's already active,
+      // there's nothing left to "activate" about it), and root is
+      // rejected inside toggleMultiSelectStage itself.
+      if(!optEl.classList.contains('selected')){
+        optEl.addEventListener('click', (e) => {
+          if(e.ctrlKey || e.metaKey){
+            e.stopPropagation();
+            e.preventDefault();
+            toggleMultiSelectStage(optionId, groupId);
+          }
+        });
+      }
+
       if(optEl.classList.contains('selected')){
         // Already active — drag FROM here to pick the next step.
         if(dot){
@@ -1300,10 +1385,26 @@ function wireGroupEvents(){
         // nothing upstream calls preventDefault on the same touch (it
         // doesn't — the viewport's touchstart handler bails out early for
         // any touch that started inside a .canvas-group).
-        optEl.addEventListener('click', () => handleOptionActivate(optionId));
+        //
+        // Root-clickable AND combinable now genuinely overlaps (pathway
+        // options are both) — without the staged-set check below, plain-
+        // clicking one of 2+ staged options would silently activate just
+        // that one and discard the rest of the staged set with no
+        // explanation. Mirrors endLineDrag's exact same check, so a click
+        // and a completed drag onto a staged option behave identically.
+        optEl.addEventListener('click', (e) => {
+          if(e.ctrlKey || e.metaKey) return; // handled by the listener above instead
+          if(canvasState.multiSelectStagedIds.size >= 2 && canvasState.multiSelectStagedIds.has(optionId)){
+            const others = [...canvasState.multiSelectStagedIds].filter(id => id !== optionId);
+            handleCombinedActivate([optionId, ...others]);
+            return;
+          }
+          handleOptionActivate(optionId);
+        });
       }
-      // 'inert' options do nothing on their own — they're only reachable as
-      // a drop target for someone else's drag (see endLineDrag).
+      // 'inert' options do nothing else on their own — they're only
+      // reachable as a drop target for someone else's drag (see
+      // endLineDrag), or now also via ctrl+click staging above.
     });
 
     const generateIdeasBtn = card.querySelector('[data-action="generate-ideas-node"]');
@@ -1360,6 +1461,25 @@ function wireGroupEvents(){
     const customInput = card.querySelector('[data-custom-input]');
     if(customSubmit && customInput){
       customSubmit.addEventListener('click', () => handleCustomOption(groupId, customInput.value));
+
+      // Textareas don't auto-grow on their own — without this, text would
+      // wrap invisibly inside a fixed-height box, scrolling instead of
+      // actually becoming visible. Resets to 'auto' first so deleting
+      // text shrinks it back down too, not just grows one-way.
+      customInput.addEventListener('input', () => {
+        customInput.style.height = 'auto';
+        customInput.style.height = `${customInput.scrollHeight}px`;
+      });
+
+      // Enter submits (matching the single-line input this replaced);
+      // Shift+Enter still inserts an actual newline for anyone writing
+      // something genuinely multi-part.
+      customInput.addEventListener('keydown', (e) => {
+        if(e.key === 'Enter' && !e.shiftKey){
+          e.preventDefault();
+          handleCustomOption(groupId, customInput.value);
+        }
+      });
     }
   });
 }
@@ -1620,6 +1740,7 @@ function setupCanvasInteractions(){
   // their own event down to plain coordinates and call into these three.
   function handlePointerDown(e, clientX, clientY){
     if(e.target.closest('.canvas-group')) return; // group/option drag handles its own start
+    clearMultiSelectStage();
     isPanning = true;
     panStartPointer = { x: clientX, y: clientY };
     panStartValue = { ...canvasState.pan };
@@ -1910,8 +2031,23 @@ function endLineDrag(e){
     return;
   }
 
-  console.log('[ThinkMaps] line-drag completed — activating option', targetOptionEl.dataset.optionId);
-  handleOptionActivate(targetOptionEl.dataset.optionId);
+  const targetOptionId = targetOptionEl.dataset.optionId;
+
+  // Dropped onto a member of a 2+ staged combination set — the dropped-on
+  // option becomes the "primary" (the one every existing path-walking
+  // function treats as the parent going forward), every OTHER staged
+  // option rides along. A staged set of exactly 1 (just the option being
+  // dropped on, nothing else) isn't actually a combination — that falls
+  // through to the normal single-activation path below unchanged.
+  if(canvasState.multiSelectStagedIds.size >= 2 && canvasState.multiSelectStagedIds.has(targetOptionId)){
+    const others = [...canvasState.multiSelectStagedIds].filter(id => id !== targetOptionId);
+    console.log('[ThinkMaps] line-drag completed — combined activation', { primary: targetOptionId, others });
+    handleCombinedActivate([targetOptionId, ...others]);
+    return;
+  }
+
+  console.log('[ThinkMaps] line-drag completed — activating option', targetOptionId);
+  handleOptionActivate(targetOptionId);
 }
 
 async function handleOptionActivate(optionId){
@@ -1928,9 +2064,41 @@ async function handleOptionActivate(optionId){
       return;
     }
     canvasState.lastActivatedOptionId = optionId;
+    canvasState.multiSelectStagedIds.clear();
     await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
   } catch (err){
     alert('Something went wrong activating that option.');
+  } finally {
+    setCanvasBusy(false);
+  }
+}
+
+// optionIds[0] is the primary — the one the drag was actually dropped on,
+// and the one every subsequent path-walking function (breadcrumb,
+// progress counter, auto-frame) treats as the parent going forward.
+// Every other ID rides along: selected, frozen-sibling-handled, and
+// folded into the generation prompt, without becoming a second traversal
+// anchor anywhere else in the app.
+async function handleCombinedActivate(optionIds){
+  if(canvasState.isLocked) return;
+  const labels = optionIds
+    .map(id => canvasState.options.find(o => o.id === id)?.label)
+    .filter(Boolean);
+  setCanvasBusy(true, buildActivationAckMessage(labels.join(' + ')));
+  try {
+    const res = await authedFetch('/options/combine-activate', { method: 'POST', body: JSON.stringify({ optionIds }) });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      console.error('[ThinkMaps] combined activate failed:', body.error, body.detail);
+      alert(body.error || 'Could not activate that combination.');
+      return;
+    }
+    canvasState.lastActivatedOptionId = optionIds[0];
+    canvasState.multiSelectStagedIds.clear();
+    await loadGraph();
+  } catch (err){
+    alert('Something went wrong activating that combination.');
   } finally {
     setCanvasBusy(false);
   }
