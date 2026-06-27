@@ -3029,10 +3029,10 @@ function renderBuildBriefSection(){
 
   el.innerHTML = `<button class="btn btn-secondary" id="runBuildBriefBtn" type="button">Generate Build Brief</button>`;
   const btn = document.getElementById('runBuildBriefBtn');
-  if(btn) btn.addEventListener('click', runBuildBrief);
+  if(btn) btn.addEventListener('click', () => runBuildBrief(false));
 }
 
-async function runBuildBrief(){
+async function runBuildBrief(regenerate = false){
   const el = document.getElementById('buildBriefSection');
   if(!el) return;
 
@@ -3044,7 +3044,7 @@ async function runBuildBrief(){
   `;
 
   try {
-    const res = await authedFetch(`/confirm/${confirmState.sessionId}/build-brief`, { method: 'POST', body: JSON.stringify({}) });
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/build-brief`, { method: 'POST', body: JSON.stringify({ regenerate }) });
     if(!res) return;
 
     const body = await res.json();
@@ -3095,8 +3095,14 @@ function renderBuildBrief(buildBrief){
     <div class="idea-block"><div class="lbl">Key flows to build first</div>${listHtml(buildBrief.keyFlows)}</div>
     <div class="idea-block"><div class="lbl">Still open</div>${listHtml(buildBrief.openQuestions)}</div>
 
-    <button class="btn btn-ghost" id="copyBuildBriefBtn" type="button">Copy as Markdown</button>
+    <div class="build-brief-actions">
+      <button class="btn btn-ghost" id="copyBuildBriefBtn" type="button">Copy as Markdown</button>
+      <button class="btn btn-ghost" id="regenerateBuildBriefBtn" type="button">Regenerate</button>
+    </div>
   `;
+
+  const regenBtn = document.getElementById('regenerateBuildBriefBtn');
+  if(regenBtn) regenBtn.addEventListener('click', () => runBuildBrief(true));
 
   const copyBtn = document.getElementById('copyBuildBriefBtn');
   if(copyBtn) copyBtn.addEventListener('click', () => copyBuildBriefMarkdown(buildBrief, copyBtn));
