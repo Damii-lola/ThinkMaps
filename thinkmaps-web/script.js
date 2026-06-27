@@ -1105,15 +1105,28 @@ function maybeAutoFrameCompletedPath(){
   const availableHeight = viewport.clientHeight - PADDING * 2;
 
   // Capped at 1x — the goal is "reveal the whole path," not "zoom in
-  // tighter than normal" on a path short enough to already fit.
-  const fitZoom = Math.min(availableWidth / pathWidth, availableHeight / pathHeight, 1);
+  // tighter than normal" on a path short enough to already fit. The
+  // 1.18x boost on top of the raw fit calculation is deliberate: a
+  // perfect mathematical fit reads as more zoomed-out than it needs to
+  // feel in practice, since it always leaves the full PADDING gap on
+  // every side even when the path doesn't need that much breathing
+  // room. Letting the far edges crop slightly closer is a better trade
+  // than the whole path reading small.
+  const rawFitZoom = Math.min(availableWidth / pathWidth, availableHeight / pathHeight, 1);
+  const fitZoom = rawFitZoom * 1.18;
   const targetZoom = Math.max(ZOOM_MIN, Math.min(fitZoom, ZOOM_MAX));
 
-  const pathCenterX = (minX + maxX) / 2;
-  const pathCenterY = (minY + maxY) / 2;
+  // Centers on the Generate Ideas card itself, not the geometric center
+  // of the whole path's bounding box — that terminal card is what
+  // actually matters the moment this fires, not an arbitrary midpoint
+  // that might land somewhere between two unrelated cards with nothing
+  // there. Earlier nodes further from it may sit closer to the edges (or
+  // just outside) as a result, which is the right trade here.
+  const focusX = (newlyCompleted.position_x || 0) + CARD_WIDTH / 2;
+  const focusY = (newlyCompleted.position_y || 0) + ESTIMATED_CARD_HEIGHT / 2;
 
-  const targetPanX = viewport.clientWidth / 2 - pathCenterX * targetZoom;
-  const targetPanY = viewport.clientHeight / 2 - pathCenterY * targetZoom;
+  const targetPanX = viewport.clientWidth / 2 - focusX * targetZoom;
+  const targetPanY = viewport.clientHeight / 2 - focusY * targetZoom;
 
   world.classList.add('auto-framing');
   canvasState.zoom = targetZoom;
@@ -1130,6 +1143,21 @@ function renderGroups(visible, infoByGroupId){
 
   const disabledAttr = canvasState.isLocked ? 'disabled' : '';
   const info = infoByGroupId || computeSiblingBatchInfo(visible);
+
+  // Computed once here rather than per-option below: when N options get
+  // combined, all N end up is_selected — but only the one the line was
+  // actually dragged to (group.spawned_from_option_id) should read as
+  // the "main" pick. The rest were swept along, not individually chosen,
+  // and the dot color below is what actually communicates that
+  // distinction visually.
+  const secondaryCombinedIds = new Set();
+  visible.forEach(({ group }) => {
+    if(Array.isArray(group.combined_source_option_ids) && group.combined_source_option_ids.length > 1){
+      group.combined_source_option_ids.forEach(id => {
+        if(id !== group.spawned_from_option_id) secondaryCombinedIds.add(id);
+      });
+    }
+  });
 
   visible.forEach(({ group, versions, options }) => {
     const card = document.createElement('div');
@@ -1203,8 +1231,9 @@ function renderGroups(visible, infoByGroupId){
     const optionsHtml = options.map((opt, optionIndex) => {
       const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode) ? 'root-clickable' : 'inert');
       const stagedClass = canvasState.multiSelectStagedIds.has(opt.id) ? ' multi-staged' : '';
+      const secondaryClass = secondaryCombinedIds.has(opt.id) ? ' selected-secondary' : '';
       return `
-        <div class="canvas-option ${stateClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
+        <div class="canvas-option ${stateClass}${secondaryClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
           <span class="opt-dot"></span>
           <span class="opt-label">${escapeHtml(opt.label)}</span>
         </div>
@@ -1280,13 +1309,7 @@ function renderGroups(visible, infoByGroupId){
     // OTHER choices that got folded in alongside it.
     let combinedNoteHtml = '';
     if(Array.isArray(group.combined_source_option_ids) && group.combined_source_option_ids.length > 1){
-      const otherLabels = group.combined_source_option_ids
-        .filter(id => id !== group.spawned_from_option_id)
-        .map(id => canvasState.options.find(o => o.id === id)?.label)
-        .filter(Boolean);
-      if(otherLabels.length > 0){
-        combinedNoteHtml = `<div class="combined-pick-note">+ combined with: ${otherLabels.map(escapeHtml).join(', ')}</div>`;
-      }
+      combinedNoteHtml = `<div class="combined-pick-note">+ combined with multiple nodes</div>`;
     }
 
     card.innerHTML = `
