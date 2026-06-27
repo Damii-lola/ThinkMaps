@@ -2429,6 +2429,7 @@ const confirmState = {
   blueprintId: null,
   sourceOptionId: null,
   sessionId: null,
+  ideaDraft: null,
   deeperAnalysis: null,
   deeperAnalysisRendered: false,
   rewrittenIdea: null,
@@ -2487,6 +2488,7 @@ async function initConfirmPage(){
       return;
     }
 
+    renderIdeaDraftContext(body.ideaDraft);
     renderConfirmQuestion(body);
   } catch (err){
     showConfirmError('Something went wrong starting this.');
@@ -2498,6 +2500,34 @@ function showConfirmError(message){
   const optionsEl = document.getElementById('confirmOptions');
   if(questionEl) questionEl.textContent = message;
   if(optionsEl) optionsEl.innerHTML = '';
+}
+
+// Shown above every confirmation question, not just the first — each of
+// the 5 questions pressure-tests a specific part of this exact draft
+// (the problem, the audience, the monetization model, etc.), and without
+// this, someone answering "which monetization model fits" had no way to
+// know what the idea even WAS yet, only the path of canvas choices that
+// led here. Rendered once; the draft itself never changes between
+// confirmation answers, only the questions about it do, so this never
+// needs to re-render on subsequent questions.
+function renderIdeaDraftContext(ideaDraft){
+  const el = document.getElementById('ideaDraftContext');
+  if(!el || !ideaDraft) return;
+
+  confirmState.ideaDraft = ideaDraft;
+
+  el.innerHTML = `
+    <span class="idea-tag">The idea taking shape — these questions are about sharpening this</span>
+    <h3 class="idea-draft-name">${escapeHtml(ideaDraft.name || '')}</h3>
+    <p class="idea-draft-oneliner">${escapeHtml(ideaDraft.oneLiner || '')}</p>
+    <div class="idea-draft-fields">
+      <div><span class="lbl">Problem</span><p>${escapeHtml(ideaDraft.coreProblem || '')}</p></div>
+      <div><span class="lbl">Who it's for</span><p>${escapeHtml(ideaDraft.targetAudience || '')}</p></div>
+      <div><span class="lbl">Core feature</span><p>${escapeHtml(ideaDraft.coreFeature || '')}</p></div>
+      <div><span class="lbl">Monetization</span><p>${escapeHtml(ideaDraft.monetization || '')}</p></div>
+    </div>
+  `;
+  el.style.display = 'block';
 }
 
 function renderConfirmQuestion(data){
@@ -2576,9 +2606,11 @@ function renderConfirmResult(result){
   const fillEl = document.getElementById('confirmProgressFill');
   const progressEl = document.getElementById('confirmProgress');
   const resultEl = document.getElementById('confirmResult');
+  const draftContextEl = document.getElementById('ideaDraftContext');
 
   if(cardEl) cardEl.style.display = 'none';
   if(researchingEl) researchingEl.style.display = 'none';
+  if(draftContextEl) draftContextEl.style.display = 'none';
   if(fillEl) fillEl.style.width = '100%';
   if(progressEl) progressEl.textContent = 'Done';
 
