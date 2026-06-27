@@ -268,7 +268,7 @@ async function callMistral(messages){
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-latest',
+      model: 'mistral-large-latest',
       messages,
       response_format: { type: 'json_object' }
     })
@@ -315,7 +315,7 @@ async function callMistralPlainText(messages){
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
-    body: JSON.stringify({ model: 'mistral-small-latest', messages })
+    body: JSON.stringify({ model: 'mistral-large-latest', messages })
   });
 
   if(!res.ok){
@@ -4846,7 +4846,10 @@ Produce:
 2. mvpScope — 4 to 8 specific features that make up a genuinely shippable v1, ordered roughly by build order. Concrete and scoped (e.g. "User can log a workout with sets/reps/weight" not "tracking functionality").
 3. laterFeatures — 3 to 6 real features deliberately deferred past v1, the kind that are tempting to build first but aren't load-bearing for proving the idea.
 4. suggestedTechStack — a reasonable, boring, well-supported stack for a solo or small-team build: {frontend, backend, database, aiServices (only if genuinely relevant to this idea, else empty string)}. Favor widely-documented, low-operational-overhead choices over anything exotic.
-5. dataModel — the core entities this app needs, each with its main fields. 3 to 7 entities, each {entity: string, fields: [string, ...]} — fields as short descriptive names, not full schema syntax.
+5. dataModel — the core entities this app needs, each with its main fields. 3 to 7 entities, each {entity: string, fields: [string, ...]} — fields as short descriptive names, not full schema syntax. Before finalizing, check the WHOLE set together against these three things, all of which are real failure modes that have slipped through before:
+   (a) No orphaned entities. Every entity should be connected to at least one other entity through a clear reference field (a user_id, device_id, etc). If an entity exists that nothing else points to and that doesn't itself reference anything beyond its owner, that's usually a sign a connecting piece is missing, not a sign the model is appropriately simple — add the missing reference or the missing entity it should connect through.
+   (b) No aggregate without its source. If any entity represents a derived summary — a "pattern," "average," "streak," "score," anything computed FROM other activity rather than entered directly — the raw underlying events it would actually be computed from need their own entity too. Modeling the summary table without the log table it's aggregated from means the summary has no real data to ever be computed from.
+   (c) No silent contradiction of the idea's own claims. Cross-check the model against what the idea itself specifically promises, especially anything about privacy, local-only storage, or no cloud sync. If the idea claims certain data stays on-device or never syncs, the model needs to actually reflect that distinction (a storage-location or sync-status field, or a clear on-device-only entity called out as such) rather than modeling everything as one undifferentiated set of centralized tables that quietly contradicts the pitch.
 6. keyFlows — 3 to 5 specific user flows worth building and testing first (e.g. "New user signs up, completes onboarding, logs their first entry"), the backbone flows everything else hangs off of.
 7. openQuestions — 2 to 5 real, specific decisions still genuinely unresolved at this point (a pricing detail, a platform choice, a scope boundary) — not generic disclaimers, actual open forks a builder would need to resolve.
 
@@ -5339,6 +5342,8 @@ app.post('/confirm/:sessionId/rewrite', requireAuth, async (req, res) => {
 // original once a rewrite has superseded it.
 app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
   try {
+    const { regenerate } = req.body || {};
+
     const { data: session } = await supabase
       .from('confirmation_sessions')
       .select('*')
@@ -5354,7 +5359,7 @@ app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'This idea needs to finish hardening before a build brief can be generated.' });
     }
 
-    if(session.build_brief){
+    if(session.build_brief && !regenerate){
       return res.status(200).json({ buildBrief: session.build_brief });
     }
 
