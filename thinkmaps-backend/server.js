@@ -268,7 +268,7 @@ async function callMistral(messages){
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'mistral-large-latest',
+      model: 'mistral-small-latest',
       messages,
       response_format: { type: 'json_object' }
     })
@@ -315,7 +315,7 @@ async function callMistralPlainText(messages){
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
-    body: JSON.stringify({ model: 'mistral-large-latest', messages })
+    body: JSON.stringify({ model: 'mistral-small-latest', messages })
   });
 
   if(!res.ok){
@@ -5097,7 +5097,8 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
         sessionId: existingSession.id,
         status: 'in_progress',
         progress: { current: existingSession.answers.length + 1, total: CONFIRMATION_QUESTION_COUNT },
-        question: existingSession.pending_question
+        question: existingSession.pending_question,
+        ideaDraft: existingSession.idea_draft || null
       });
     }
 
@@ -5137,7 +5138,8 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
       sessionId: session.id,
       status: 'in_progress',
       progress: { current: 1, total: CONFIRMATION_QUESTION_COUNT },
-      question: firstQuestion
+      question: firstQuestion,
+      ideaDraft
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not start idea confirmation.', detail: err.message });
@@ -5242,6 +5244,7 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
         total: CONFIRMATION_QUESTION_COUNT
       },
       question: session.pending_question,
+      ideaDraft: session.idea_draft || null,
       result: session.result,
       deeperAnalysis: session.deeper_analysis || null,
       rewrittenIdea: session.rewritten_idea || null,
