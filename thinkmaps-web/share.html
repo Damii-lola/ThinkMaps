@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shared Idea — ThinkMaps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=2">
+</head>
+<body>
+<header class="site no-print">
+  <nav class="bar">
+    <a href="index.html" class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </a>
+  </nav>
+</header>
+
+<main class="wrap share-wrap" id="shareRoot">
+  <p id="shareLoading">Loading…</p>
+</main>
+
+<script>
+const API_BASE_URL = 'https://thinkmaps.onrender.com';
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+async function loadSharedIdea(){
+  const root = document.getElementById('shareRoot');
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+
+  if(!token){
+    root.innerHTML = '<p class="confirm-error">This link is missing its token.</p>';
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/share/${token}`);
+    const body = await res.json();
+
+    if(!res.ok){
+      root.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'This link is invalid or has expired.')}</p>`;
+      return;
+    }
+
+    renderSharedIdea(body.idea);
+  } catch (err) {
+    root.innerHTML = '<p class="confirm-error">Could not load this idea. Check your connection and try again.</p>';
+  }
+}
+
+function renderSharedIdea(idea){
+  const root = document.getElementById('shareRoot');
+
+  const competitorsHtml = (idea.competitors || []).map(c => `
+    <div class="competitor-block">
+      <div class="competitor-name">${escapeHtml(c.name)}</div>
+      <div class="competitor-cols">
+        <div>
+          <div class="lbl lbl-pro">What works</div>
+          <ul>${(c.pros || []).map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>
+        </div>
+        <div>
+          <div class="lbl lbl-con">What doesn't</div>
+          <ul>${(c.cons || []).map(con => `<li>${escapeHtml(con)}</li>`).join('')}</ul>
+        </div>
+      </div>
+    </div>
+  `).join('');
+
+  const solutionsHtml = (idea.solutions || []).map(s => `
+    <div class="solution-block">
+      <div class="solution-problem">${escapeHtml(s.problem)}</div>
+      <div class="solution-arrow">→</div>
+      <div class="solution-fix">${escapeHtml(s.solution)}</div>
+    </div>
+  `).join('');
+
+  root.innerHTML = `
+    <div class="share-onepager">
+      <span class="idea-tag">An idea, built with ThinkMaps</span>
+      <h1 class="share-idea-name">${escapeHtml(idea.name)}</h1>
+      <p class="idea-oneliner">${escapeHtml(idea.oneLiner)}</p>
+
+      <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(idea.coreProblem)}</p></div>
+      <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(idea.targetAudience || '')}</p></div>
+      <div class="idea-block"><div class="lbl">Core feature</div><p>${escapeHtml(idea.coreFeature || '')}</p></div>
+      <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(idea.monetization)}</p></div>
+      <div class="idea-block"><div class="lbl">Competitive edge</div><p>${escapeHtml(idea.competitiveEdge || '')}</p></div>
+
+      ${idea.fullDescription ? `<h2 class="confirm-section-title">The pitch</h2><p class="confirm-full-description">${escapeHtml(idea.fullDescription)}</p>` : ''}
+
+      ${competitorsHtml ? `<h2 class="confirm-section-title">What's already out there</h2><div class="competitors-list">${competitorsHtml}</div>` : ''}
+      ${solutionsHtml ? `<h2 class="confirm-section-title">How this idea solves their weak points</h2><div class="solutions-list">${solutionsHtml}</div>` : ''}
+
+      <button class="btn btn-primary no-print" id="printBtn" type="button">Print / Save as PDF</button>
+      <p class="share-footer no-print">Made with <a href="index.html">ThinkMaps</a> — turn a vague idea into a validated one.</p>
+    </div>
+  `;
+
+  const printBtn = document.getElementById('printBtn');
+  if(printBtn) printBtn.addEventListener('click', () => window.print());
+}
+
+loadSharedIdea();
+</script>
+</body>
+</html>
