@@ -765,6 +765,73 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 .risk-next-step{ font-size:13px; color:var(--ink); margin:0; line-height:1.5; }
 .risk-addressed strong, .risk-next-step strong{ color:var(--ink); font-weight:600; }
 
+/* ---------- Suggest Changes (feedback-driven revision + preview) ---------- */
+.revise-form{
+  display:flex; flex-direction:column; gap:10px;
+  background:var(--surface); border:1px solid var(--line); border-radius:10px;
+  padding:16px; margin:18px 0;
+}
+.revise-textarea{
+  width:100%; box-sizing:border-box; resize:vertical; min-height:90px;
+  font-family:var(--font-body); font-size:14px; color:var(--ink);
+  background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+}
+.revise-textarea:focus{ outline:none; border-color:var(--accent); }
+.revise-textarea.input-error{ border-color:#C24A3D; }
+.revise-form-actions{ display:flex; gap:10px; }
+.revise-validation-error{ margin:0; }
+
+.revise-preview{
+  border:1px solid var(--accent); border-radius:10px; padding:18px;
+  background:var(--accent-soft); margin:18px 0;
+}
+.revise-preview h3{ margin:10px 0 4px; }
+.idea-tag-preview{ background:var(--accent); color:#FAF6F1; padding:2px 8px; border-radius:5px; }
+.revise-feedback-echo{
+  font-size:13px; color:var(--ink-muted); font-style:italic;
+  margin:8px 0 16px; line-height:1.5;
+}
+
+/* ---------- Build Brief ---------- */
+.data-model-list{ display:flex; flex-direction:column; gap:12px; }
+.data-model-entity{
+  background:var(--surface); border:1px solid var(--line); border-radius:8px;
+  padding:10px 14px;
+}
+.data-model-entity-name{ font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--accent-deep); margin-bottom:4px; }
+.data-model-entity ul{ margin:0; padding-left:18px; }
+
+/* ---------- Shareable link ---------- */
+.confirm-final-actions{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
+  flex-wrap:wrap; margin-top:28px; padding-top:20px; border-top:1px solid var(--line);
+}
+.share-link-row{ display:flex; gap:8px; align-items:center; max-width:420px; flex:1; }
+.share-link-input{
+  flex:1; min-width:0; font-family:var(--font-mono); font-size:12.5px; color:var(--ink-muted);
+  background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:9px 11px;
+}
+
+/* ---------- Public one-pager (share.html) ---------- */
+.share-wrap{ max-width:680px; padding:48px 24px 80px; margin:0 auto; }
+.share-onepager{ background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:40px; }
+.share-idea-name{ font-family:var(--font-display); font-size:32px; margin:10px 0 8px; }
+.share-footer{ font-size:13px; color:var(--ink-muted); margin-top:24px; }
+.share-onepager .btn-primary{ margin-top:24px; }
+
+@media print{
+  .no-print{ display:none !important; }
+  body{ background:#fff; }
+  .share-onepager{ border:none; box-shadow:none; padding:0; }
+  .share-wrap{ max-width:100%; padding:0; }
+}
+
+@media (max-width:640px){
+  .confirm-final-actions{ flex-direction:column; align-items:stretch; }
+  .share-link-row{ max-width:none; }
+  .share-onepager{ padding:24px; }
+}
+
 /* ---------- CLICK FEEDBACK (feedback.js) ---------- */
 /* Applied as a temporary class by feedback.js to whatever was just
    clicked — a button, a canvas option, anything actionable. The overshoot
