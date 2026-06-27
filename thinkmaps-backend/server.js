@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
@@ -4819,6 +4820,85 @@ async function rewriteIdeaWithDeeperAnalysis(originalIdea, deeperAnalysis){
   };
 }
 
+// Turns a hardened (and possibly rewritten) idea into a structured spec
+// meant to be pasted straight into Claude Code or a similar AI coding
+// tool — MVP scope, a suggested tech stack, a rough data model, the key
+// flows worth building first, and the open questions worth settling
+// before writing code. This is the step that was genuinely missing
+// before: the canvas exploration, confirmation, and research all produce
+// a fully hardened, validated idea, and then the trail went cold exactly
+// where it mattered most — right before someone would actually start
+// building. Deeper analysis (market intel, risk plan) is included when
+// available since a real risk plan should directly shape MVP scope, but
+// this works fine without it too.
+async function generateBuildBrief(idea, pathSummary, deeperAnalysis){
+  const riskContext = deeperAnalysis?.riskPlan?.risks?.length
+    ? `\n\nA risk-prioritized plan already exists for this idea — let its highest-severity, least-addressed risks directly shape what's IN the MVP scope (de-risking those early) and what's deliberately left for later: ${JSON.stringify(deeperAnalysis.riskPlan.risks)}`
+    : '';
+
+  const systemPrompt = `You are the build-brief engine for ThinkMaps. Someone has fully hardened an app idea through this tool and is about to hand it to an AI coding assistant (like Claude Code) or a developer to actually start building. Your job is to translate the idea into a concrete, buildable spec — not a sales pitch, a working document.
+
+Idea: ${JSON.stringify(idea)}
+Path that led here: ${pathSummary}${riskContext}
+
+Produce:
+1. overview — 2-3 sentences, plainly stating what's being built and for whom, written for a developer's first read, not a pitch.
+2. mvpScope — 4 to 8 specific features that make up a genuinely shippable v1, ordered roughly by build order. Concrete and scoped (e.g. "User can log a workout with sets/reps/weight" not "tracking functionality").
+3. laterFeatures — 3 to 6 real features deliberately deferred past v1, the kind that are tempting to build first but aren't load-bearing for proving the idea.
+4. suggestedTechStack — a reasonable, boring, well-supported stack for a solo or small-team build: {frontend, backend, database, aiServices (only if genuinely relevant to this idea, else empty string)}. Favor widely-documented, low-operational-overhead choices over anything exotic.
+5. dataModel — the core entities this app needs, each with its main fields. 3 to 7 entities, each {entity: string, fields: [string, ...]} — fields as short descriptive names, not full schema syntax.
+6. keyFlows — 3 to 5 specific user flows worth building and testing first (e.g. "New user signs up, completes onboarding, logs their first entry"), the backbone flows everything else hangs off of.
+7. openQuestions — 2 to 5 real, specific decisions still genuinely unresolved at this point (a pricing detail, a platform choice, a scope boundary) — not generic disclaimers, actual open forks a builder would need to resolve.
+
+Be specific to THIS idea throughout — every section should clearly be about this exact app, not generic startup advice that could apply to anything. Respond ONLY with valid JSON: {"overview": string, "mvpScope": [string, ...], "laterFeatures": [string, ...], "suggestedTechStack": {"frontend": string, "backend": string, "database": string, "aiServices": string}, "dataModel": [{"entity": string, "fields": [string, ...]}, ...], "keyFlows": [string, ...], "openQuestions": [string, ...]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Generate the build brief now.' }
+  ]);
+}
+
+// Driven by what the PERSON actually typed, not market intel — this is
+// the difference from rewriteIdeaWithDeeperAnalysis above. Their
+// feedback wins over generic best practice every time, since it's their
+// idea, not a best-practice idea. Returns a candidate revision; whether
+// it actually becomes the real idea is a separate, explicit step (see
+// the /revise/commit route) — this function itself never persists
+// anything, callers decide that.
+async function reviseIdeaWithFeedback(currentIdea, feedbackText){
+  const systemPrompt = `You are the idea-revision engine for ThinkMaps. Below is an app idea, and direct feedback from the person who actually owns this idea — things they want added, removed, or changed. Rewrite the idea to genuinely incorporate what they asked for, not just acknowledge it: actually change the relevant fields. If their feedback conflicts with anything in the current idea, their feedback wins — this is their idea, not a generic best-practice idea. If they ask to add something, work it into whichever field it most naturally belongs in (coreFeature, competitiveEdge, monetization, or fullDescription) rather than bolting it on awkwardly. If they ask to remove something, remove it cleanly without leaving a gap or a vague reference to something no longer there. Anything they didn't mention should stay as close to unchanged as still makes sense once the rest has shifted.
+
+Current idea: ${JSON.stringify(currentIdea)}
+
+Their feedback: "${feedbackText}"
+
+Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string}`;
+
+  const core = await callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Revise the idea now, incorporating the feedback above.' }
+  ]);
+
+  const fullDescriptionPrompt = `You are writing the final polished pitch description for a REVISED app idea, for ThinkMaps — this version was revised based on direct feedback from the idea's own creator, but it should read as ONE confident, cohesive pitch, not a before/after comparison or a changelog. Write 2 to 4 cohesive paragraphs — real prose — that read as a genuine, specific idea pitch: what it is, who it's for, why it matters, why it's positioned to make money. Never reference "feedback," "the previous version," or "changes" — just write the pitch for the idea as it now stands. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
+
+  let fullDescription = '';
+  try {
+    fullDescription = await callMistralPlainText([
+      { role: 'system', content: fullDescriptionPrompt },
+      { role: 'user', content: JSON.stringify(core) }
+    ]);
+  } catch (err) {
+    console.error('[ThinkMaps] revised idea description generation failed:', err.message);
+  }
+
+  return {
+    ...core,
+    fullDescription,
+    competitors: currentIdea?.competitors || [],
+    solutions: currentIdea?.solutions || []
+  };
+}
+
 // Starts a new intake — finds the chosen niche, generates question 1, and
 // creates the session row that the rest of the flow reads/writes.
 app.post('/blueprints/:id/ideation/start', requireAuth, async (req, res) => {
@@ -5002,7 +5082,10 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
         progress: { current: existingSession.answers.length, total: CONFIRMATION_QUESTION_COUNT },
         result: existingSession.result,
         deeperAnalysis: existingSession.deeper_analysis || null,
-        rewrittenIdea: existingSession.rewritten_idea || null
+        rewrittenIdea: existingSession.rewritten_idea || null,
+        buildBrief: existingSession.build_brief || null,
+        shareToken: existingSession.share_token || null,
+        pendingRevision: existingSession.pending_revision || null
       });
     }
 
@@ -5158,7 +5241,10 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
       question: session.pending_question,
       result: session.result,
       deeperAnalysis: session.deeper_analysis || null,
-      rewrittenIdea: session.rewritten_idea || null
+      rewrittenIdea: session.rewritten_idea || null,
+      buildBrief: session.build_brief || null,
+      shareToken: session.share_token || null,
+      pendingRevision: session.pending_revision || null
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that confirmation session.', detail: err.message });
@@ -5243,6 +5329,216 @@ app.post('/confirm/:sessionId/rewrite', requireAuth, async (req, res) => {
     res.status(200).json({ rewrittenIdea });
   } catch (err) {
     res.status(500).json({ error: 'Could not rewrite the idea.', detail: err.message });
+  }
+});
+
+// Idempotent like deeper-analysis/rewrite above — generated once,
+// cached, returned from cache on any repeat request. Always built from
+// whichever idea is currently "live" (the rewritten version if one
+// exists, the original hardened idea otherwise) — never the stale
+// original once a rewrite has superseded it.
+app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before a build brief can be generated.' });
+    }
+
+    if(session.build_brief){
+      return res.status(200).json({ buildBrief: session.build_brief });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const buildBrief = await generateBuildBrief(currentIdea, session.path_summary, session.deeper_analysis);
+
+    await supabase.from('confirmation_sessions').update({ build_brief: buildBrief }).eq('id', session.id);
+
+    res.status(200).json({ buildBrief });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not generate the build brief.', detail: err.message });
+  }
+});
+
+// Generates (once — idempotent the same way) a random, unguessable token
+// for the public one-pager view, so a session's real id never needs to
+// be exposed for sharing to work. Returns the same token on any repeat
+// click rather than rotating it, since rotating would silently break any
+// link already sent out.
+app.post('/confirm/:sessionId/share', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be shared.' });
+    }
+
+    if(session.share_token){
+      return res.status(200).json({ shareToken: session.share_token });
+    }
+
+    const shareToken = crypto.randomBytes(24).toString('hex');
+    await supabase.from('confirmation_sessions').update({ share_token: shareToken }).eq('id', session.id);
+
+    res.status(200).json({ shareToken });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not create a shareable link.', detail: err.message });
+  }
+});
+
+// Deliberately public — no requireAuth. This is the whole point: anyone
+// holding the link can view the one-pager, no ThinkMaps account needed.
+// Looked up by share_token specifically, never by session id, so the
+// real session id is never exposed through this route either. Only ever
+// returns the clean, presentable subset of the data (the core idea,
+// competitors, solutions) — never the deeper-analysis internals like the
+// simulated panel or risk plan, which are explicitly labeled as internal
+// working notes elsewhere and would need that same context here to not
+// be misread by someone outside the tool.
+app.get('/share/:token', async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('result, rewritten_idea, path_summary, created_at')
+      .eq('share_token', req.params.token)
+      .maybeSingle();
+
+    if(!session) return res.status(404).json({ error: 'This link is invalid or has expired.' });
+
+    const idea = session.rewritten_idea || session.result;
+    if(!idea) return res.status(404).json({ error: 'This idea is not ready to be shared yet.' });
+
+    res.status(200).json({
+      idea: {
+        name: idea.name,
+        oneLiner: idea.oneLiner,
+        coreProblem: idea.coreProblem,
+        targetAudience: idea.targetAudience,
+        coreFeature: idea.coreFeature,
+        monetization: idea.monetization,
+        competitiveEdge: idea.competitiveEdge,
+        fullDescription: idea.fullDescription,
+        competitors: idea.competitors || [],
+        solutions: idea.solutions || []
+      },
+      createdAt: session.created_at
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load this shared idea.', detail: err.message });
+  }
+});
+
+// Generates a candidate revision from the person's own typed feedback —
+// NEVER persisted as the real idea here. Saved to pending_revision
+// specifically so it survives a page reload without being confused with
+// (or accidentally overwriting) rewritten_idea, the actual current idea.
+// Overwrites any earlier pending_revision on purpose: only one preview
+// is ever live at a time, and submitting new feedback before committing
+// or discarding the last one just means they changed their mind about
+// what to ask for, not that both should coexist.
+app.post('/confirm/:sessionId/revise', requireAuth, async (req, res) => {
+  try {
+    const { feedback } = req.body;
+    if(!feedback || !feedback.trim()){
+      return res.status(400).json({ error: 'Feedback text is required.' });
+    }
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be revised.' });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const revisedIdea = await reviseIdeaWithFeedback(currentIdea, feedback.trim());
+
+    const pendingRevision = { feedback: feedback.trim(), idea: revisedIdea };
+    await supabase.from('confirmation_sessions').update({ pending_revision: pendingRevision }).eq('id', session.id);
+
+    res.status(200).json({ preview: revisedIdea });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not revise the idea.', detail: err.message });
+  }
+});
+
+// Makes a previewed revision permanent. Reads pending_revision from the
+// DATABASE rather than trusting whatever idea object the client might
+// send — the server is the source of truth for what was actually
+// previewed, not the request body.
+app.post('/confirm/:sessionId/revise/commit', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.pending_revision?.idea){
+      return res.status(400).json({ error: 'There is no pending revision to make permanent.' });
+    }
+
+    const rewrittenIdea = session.pending_revision.idea;
+    await supabase.from('confirmation_sessions').update({ rewritten_idea: rewrittenIdea, pending_revision: null }).eq('id', session.id);
+
+    res.status(200).json({ rewrittenIdea });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not save the revision.', detail: err.message });
+  }
+});
+
+// Throws away a previewed revision without touching the real current
+// idea at all — returns whatever the current idea already was so the
+// frontend can cleanly restore that view without a second fetch.
+app.post('/confirm/:sessionId/revise/discard', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    await supabase.from('confirmation_sessions').update({ pending_revision: null }).eq('id', session.id);
+
+    res.status(200).json({ currentIdea: session.rewritten_idea || session.result });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not discard the revision.', detail: err.message });
   }
 });
 
