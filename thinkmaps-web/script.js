@@ -2455,6 +2455,7 @@ const confirmState = {
   ideaDraft: null,
   deeperAnalysis: null,
   deeperAnalysisRendered: false,
+  deeperAnalysisFixes: null,
   rewrittenIdea: null,
   buildBrief: null,
   shareToken: null,
@@ -2504,6 +2505,7 @@ async function initConfirmPage(){
       // well, not just the base idea.
       confirmState.deeperAnalysis = body.deeperAnalysis || null;
       confirmState.rewrittenIdea = body.rewrittenIdea || null;
+      confirmState.deeperAnalysisFixes = body.deeperAnalysisFixes || null;
       confirmState.buildBrief = body.buildBrief || null;
       confirmState.shareToken = body.shareToken || null;
       confirmState.pendingRevision = body.pendingRevision || null;
@@ -2681,28 +2683,23 @@ function renderConfirmResult(result){
     </div>
   `;
 
-  // Once an idea has been rewritten, the analysis that produced it isn't
-  // shown again — it's already been folded into the rewrite itself.
-  // This applies just as much on a resumed page load as it does right
-  // after clicking Rewrite, so the section never even gets created here.
-  if(confirmState.rewrittenIdea){
-    renderIdeaCore(confirmState.rewrittenIdea, true);
-    const deeperEl = document.getElementById('deeperAnalysisSection');
-    if(deeperEl) deeperEl.remove();
-  } else {
-    renderIdeaCore(result, false);
+  // Which idea to show is independent of whether deeper analysis has
+  // run — rewrittenIdea now comes exclusively from a committed Suggest
+  // Changes revision (a completely unrelated feature to deeper
+  // analysis), so committing one should have no bearing on whether the
+  // market intel / risk plan / fixes section below is shown.
+  renderIdeaCore(confirmState.rewrittenIdea || result, !!confirmState.rewrittenIdea);
 
-    const deeperEl = document.getElementById('deeperAnalysisSection');
-    if(deeperEl && !confirmState.deeperAnalysisRendered){
-      if(confirmState.deeperAnalysis){
-        renderDeeperAnalysis(confirmState.deeperAnalysis);
-      } else {
-        deeperEl.innerHTML = `
-          <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
-        `;
-        const btn = document.getElementById('runDeeperAnalysisBtn');
-        if(btn) btn.addEventListener('click', runDeeperAnalysis);
-      }
+  const deeperEl = document.getElementById('deeperAnalysisSection');
+  if(deeperEl && !confirmState.deeperAnalysisRendered){
+    if(confirmState.deeperAnalysis){
+      renderDeeperAnalysis(confirmState.deeperAnalysis);
+    } else {
+      deeperEl.innerHTML = `
+        <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
+      `;
+      const btn = document.getElementById('runDeeperAnalysisBtn');
+      if(btn) btn.addEventListener('click', runDeeperAnalysis);
     }
   }
 
@@ -2838,40 +2835,47 @@ function renderDeeperAnalysis(deeperAnalysis){
     <h3 class="confirm-section-title">Risk-prioritized plan</h3>
     <div class="risks-list">${risksHtml}</div>
 
-    <div id="rewriteIdeaSection"></div>
+    <div id="deeperFixesSection"></div>
   `;
 
-  const rewriteEl = document.getElementById('rewriteIdeaSection');
-  if(rewriteEl){
-    rewriteEl.innerHTML = `<button class="btn btn-secondary" id="runRewriteIdeaBtn" type="button">Rewrite Idea</button>`;
-    const btn = document.getElementById('runRewriteIdeaBtn');
-    if(btn) btn.addEventListener('click', runRewriteIdea);
-  }
+  renderDeeperFixesSection();
 }
 
-// Triggered by the "Rewrite Idea" button at the very end of the deeper
-// analysis — takes the original hardened idea plus everything Market
-// Intel / Synthetic Panel / Risk Plan found and rewrites it into a
-// sharper, more specifically monetizable version. Updates the SAME core
-// idea block at the top of the page in place (renderIdeaCore), rather
-// than appending a second copy of the idea further down — this is meant
-// to read as "the idea, now improved," not "here's a second idea." Once
-// the rewrite lands, the whole analysis section that produced it goes
-// away entirely — it's already been folded into the rewrite, there's
-// nothing left to look at it for.
-async function runRewriteIdea(){
-  const rewriteEl = document.getElementById('rewriteIdeaSection');
-  if(!rewriteEl) return;
+// Below the deeper analysis, not replacing it — the idea itself
+// (ideaCoreSection) is never touched here. Used to regenerate the WHOLE
+// idea in place, but that meant a click could change parts that had
+// nothing to do with what the analysis actually found. This generates
+// concrete fixes for the SPECIFIC risks and objections surfaced, same
+// {problem, solution} visual pattern as the competitor solutions list
+// above, so addressing a real risk reads the same way as addressing a
+// real competitor weakness.
+function renderDeeperFixesSection(){
+  const el = document.getElementById('deeperFixesSection');
+  if(!el) return;
 
-  rewriteEl.innerHTML = `
+  if(confirmState.deeperAnalysisFixes){
+    renderDeeperFixes(confirmState.deeperAnalysisFixes);
+    return;
+  }
+
+  el.innerHTML = `<button class="btn btn-secondary" id="runDeeperFixesBtn" type="button">Find Fixes for These Risks</button>`;
+  const btn = document.getElementById('runDeeperFixesBtn');
+  if(btn) btn.addEventListener('click', runDeeperFixes);
+}
+
+async function runDeeperFixes(){
+  const el = document.getElementById('deeperFixesSection');
+  if(!el) return;
+
+  el.innerHTML = `
     <div class="confirm-researching">
       <div class="confirm-spinner"></div>
-      <p>Rewriting the idea using everything the analysis above just found…</p>
+      <p>Working out how this idea, as it already stands, can address the risks and objections above…</p>
     </div>
   `;
 
   try {
-    const res = await authedFetch(`/confirm/${confirmState.sessionId}/rewrite`, {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/deeper-fixes`, {
       method: 'POST',
       body: JSON.stringify({})
     });
@@ -2879,21 +2883,33 @@ async function runRewriteIdea(){
 
     const body = await res.json();
     if(!res.ok){
-      rewriteEl.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not rewrite the idea.')}</p>`;
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate fixes.')}</p>`;
       return;
     }
 
-    confirmState.rewrittenIdea = body.rewrittenIdea;
-    renderIdeaCore(body.rewrittenIdea, true);
-
-    const deeperEl = document.getElementById('deeperAnalysisSection');
-    if(deeperEl) deeperEl.remove();
-
-    const coreEl = document.getElementById('ideaCoreSection');
-    if(coreEl) coreEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    confirmState.deeperAnalysisFixes = body.fixes;
+    renderDeeperFixes(body.fixes);
   } catch (err) {
-    rewriteEl.innerHTML = `<p class="confirm-error">Something went wrong rewriting the idea.</p>`;
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating fixes.</p>`;
   }
+}
+
+function renderDeeperFixes(fixes){
+  const el = document.getElementById('deeperFixesSection');
+  if(!el) return;
+
+  const fixesHtml = (fixes || []).map(f => `
+    <div class="solution-block">
+      <div class="solution-problem">${escapeHtml(f.problem)}</div>
+      <div class="solution-arrow">→</div>
+      <div class="solution-fix">${escapeHtml(f.solution)}</div>
+    </div>
+  `).join('');
+
+  el.innerHTML = `
+    <h3 class="confirm-section-title">How this idea addresses these risks</h3>
+    <div class="solutions-list">${fixesHtml}</div>
+  `;
 }
 
 // ---- Suggest Changes: a feedback-driven revision with an explicit
