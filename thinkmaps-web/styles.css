@@ -543,6 +543,11 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 .canvas-option.selected .opt-dot{ background:var(--accent); cursor:grab; }
 .canvas-option.selected .opt-dot:hover{ box-shadow:0 0 0 4px var(--accent-soft); }
 .canvas-option.selected .opt-dot:active{ cursor:grabbing; }
+/* The non-primary picks in a combined activation — selected, but not
+   the option the line was actually dragged to. Blended from --accent
+   itself rather than a plain gray, so it still reads as "a version of
+   the selected color," just visually quieter than the primary pick. */
+.canvas-option.selected.selected-secondary .opt-dot{ background:color-mix(in srgb, var(--accent) 50%, var(--ink-muted) 50%); }
 .canvas-option.root-clickable{ cursor:pointer; }
 .canvas-option.root-clickable:hover{ background:var(--accent-soft); }
 .canvas-option.inert{ cursor:default; }
