@@ -1036,11 +1036,18 @@ function renderPathProgress(){
   }
 
   bar.style.display = 'flex';
-  breadcrumbEl.innerHTML = trail
+  // Sliding window of the 3 most recent steps, not the whole path from
+  // the start — a 7-deep path showing all 7 in one breadcrumb line grows
+  // unreadable fast, and "where you are right now" only really needs the
+  // last couple of steps for context. depth/PATH_DEPTH_CAP below still
+  // reflects the TRUE full-path position regardless of this windowing.
+  const windowedTrail = trail.slice(-3);
+  breadcrumbEl.innerHTML = windowedTrail
     .map(label => `<span class="crumb">${escapeHtml(label)}</span>`)
     .join('<span class="crumb-sep">→</span>');
-  // Scrolled to the most recent end on purpose — a long path should show
-  // where you ARE, not where you started, every time this updates.
+  // Scrolled to the most recent end on purpose — even a 3-item window can
+  // overflow on a narrow screen, and it should show where you ARE, not
+  // where the window starts, every time this updates.
   breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
 
   countEl.innerHTML = `<span>${depth} of ${PATH_DEPTH_CAP}</span>`;
@@ -2424,7 +2431,10 @@ const confirmState = {
   sessionId: null,
   deeperAnalysis: null,
   deeperAnalysisRendered: false,
-  rewrittenIdea: null
+  rewrittenIdea: null,
+  buildBrief: null,
+  shareToken: null,
+  pendingRevision: null
 };
 
 async function initConfirmPage(){
@@ -2470,6 +2480,9 @@ async function initConfirmPage(){
       // well, not just the base idea.
       confirmState.deeperAnalysis = body.deeperAnalysis || null;
       confirmState.rewrittenIdea = body.rewrittenIdea || null;
+      confirmState.buildBrief = body.buildBrief || null;
+      confirmState.shareToken = body.shareToken || null;
+      confirmState.pendingRevision = body.pendingRevision || null;
       renderConfirmResult(body.result);
       return;
     }
@@ -2598,13 +2611,19 @@ function renderConfirmResult(result){
 
   resultEl.innerHTML = `
     <div id="ideaCoreSection"></div>
+    <div id="reviseIdeaSection"></div>
 
     ${competitorsHtml ? `<h3 class="confirm-section-title">What's already out there</h3><div class="competitors-list">${competitorsHtml}</div>` : ''}
     ${solutionsHtml ? `<h3 class="confirm-section-title">How this idea solves their weak points</h3><div class="solutions-list">${solutionsHtml}</div>` : ''}
 
     <div id="deeperAnalysisSection"></div>
 
-    <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
+    <div id="buildBriefSection"></div>
+
+    <div class="confirm-final-actions">
+      <div id="shareLinkSection"></div>
+      <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
+    </div>
   `;
 
   // Once an idea has been rewritten, the analysis that produced it isn't
@@ -2615,23 +2634,30 @@ function renderConfirmResult(result){
     renderIdeaCore(confirmState.rewrittenIdea, true);
     const deeperEl = document.getElementById('deeperAnalysisSection');
     if(deeperEl) deeperEl.remove();
-    return;
-  }
+  } else {
+    renderIdeaCore(result, false);
 
-  renderIdeaCore(result, false);
-
-  const deeperEl = document.getElementById('deeperAnalysisSection');
-  if(deeperEl && !confirmState.deeperAnalysisRendered){
-    if(confirmState.deeperAnalysis){
-      renderDeeperAnalysis(confirmState.deeperAnalysis);
-    } else {
-      deeperEl.innerHTML = `
-        <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
-      `;
-      const btn = document.getElementById('runDeeperAnalysisBtn');
-      if(btn) btn.addEventListener('click', runDeeperAnalysis);
+    const deeperEl = document.getElementById('deeperAnalysisSection');
+    if(deeperEl && !confirmState.deeperAnalysisRendered){
+      if(confirmState.deeperAnalysis){
+        renderDeeperAnalysis(confirmState.deeperAnalysis);
+      } else {
+        deeperEl.innerHTML = `
+          <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
+        `;
+        const btn = document.getElementById('runDeeperAnalysisBtn');
+        if(btn) btn.addEventListener('click', runDeeperAnalysis);
+      }
     }
   }
+
+  // These three are independent of whichever branch above just ran —
+  // each works off "whichever idea is currently live" rather than caring
+  // whether a rewrite has happened, so they're rendered once, here,
+  // regardless.
+  renderReviseSection();
+  renderBuildBriefSection();
+  renderShareLinkSection();
 }
 
 // The swappable "core idea" block — name through the full pitch
@@ -2813,4 +2839,394 @@ async function runRewriteIdea(){
   } catch (err) {
     rewriteEl.innerHTML = `<p class="confirm-error">Something went wrong rewriting the idea.</p>`;
   }
+}
+
+// ---- Suggest Changes: a feedback-driven revision with an explicit
+// preview/commit step, distinct from the automatic "Rewrite Idea" above
+// (that one's driven by market intel; this one's driven by whatever the
+// person actually typed, and never touches the real idea until they
+// explicitly say to keep it). Three states, driven entirely by
+// confirmState.pendingRevision: collapsed button, open feedback form, or
+// an active preview — so reloading mid-review lands back in the right
+// one instead of losing the in-progress preview.
+
+function renderReviseSection(){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  if(confirmState.pendingRevision){
+    renderRevisePreview(confirmState.pendingRevision);
+    return;
+  }
+
+  el.innerHTML = `<button class="btn btn-ghost" id="openReviseFormBtn" type="button">Suggest Changes</button>`;
+  const btn = document.getElementById('openReviseFormBtn');
+  if(btn) btn.addEventListener('click', renderReviseForm);
+}
+
+function renderReviseForm(){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  el.innerHTML = `
+    <div class="revise-form">
+      <label class="lbl" for="reviseFeedbackInput">What would you change about this idea?</label>
+      <textarea id="reviseFeedbackInput" class="revise-textarea" rows="4" placeholder="Things you like, things you'd remove, things you'd add or change…"></textarea>
+      <div class="revise-form-actions">
+        <button class="btn btn-primary" id="submitReviseBtn" type="button">Rewrite With This Feedback</button>
+        <button class="btn btn-ghost" id="cancelReviseBtn" type="button">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  const submitBtn = document.getElementById('submitReviseBtn');
+  const cancelBtn = document.getElementById('cancelReviseBtn');
+  const textarea = document.getElementById('reviseFeedbackInput');
+  if(submitBtn) submitBtn.addEventListener('click', () => submitRevise(textarea?.value || ''));
+  if(cancelBtn) cancelBtn.addEventListener('click', renderReviseSection);
+  if(textarea) textarea.focus();
+}
+
+async function submitRevise(feedbackText){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  if(!feedbackText.trim()){
+    const textarea = document.getElementById('reviseFeedbackInput');
+    if(textarea) textarea.classList.add('input-error');
+    let warning = el.querySelector('.revise-validation-error');
+    if(!warning){
+      warning = document.createElement('p');
+      warning.className = 'confirm-error revise-validation-error';
+      el.querySelector('.revise-form')?.appendChild(warning);
+    }
+    warning.textContent = "Type what you'd like changed before submitting.";
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="confirm-researching">
+      <div class="confirm-spinner"></div>
+      <p>Rewriting the idea with your feedback…</p>
+    </div>
+  `;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/revise`, {
+      method: 'POST',
+      body: JSON.stringify({ feedback: feedbackText.trim() })
+    });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not revise the idea.')}</p>`;
+      return;
+    }
+
+    confirmState.pendingRevision = { feedback: feedbackText.trim(), idea: body.preview };
+    renderRevisePreview(confirmState.pendingRevision);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong revising the idea.</p>`;
+  }
+}
+
+// Shows the candidate revision clearly labeled as a preview, not yet the
+// real idea — the actual ideaCoreSection above is left completely
+// untouched until (and unless) "Keep This" is clicked.
+function renderRevisePreview(pendingRevision){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  const idea = pendingRevision.idea;
+
+  el.innerHTML = `
+    <div class="revise-preview">
+      <span class="idea-tag idea-tag-preview">Preview — not saved yet</span>
+      <p class="revise-feedback-echo">Based on: "${escapeHtml(pendingRevision.feedback)}"</p>
+
+      <h3>${escapeHtml(idea.name)}</h3>
+      <p class="idea-oneliner">${escapeHtml(idea.oneLiner)}</p>
+      <div class="idea-block"><div class="lbl">Core problem</div><p>${escapeHtml(idea.coreProblem)}</p></div>
+      <div class="idea-block"><div class="lbl">Who it's for</div><p>${escapeHtml(idea.targetAudience || '')}</p></div>
+      <div class="idea-block"><div class="lbl">Core feature</div><p>${escapeHtml(idea.coreFeature || '')}</p></div>
+      <div class="idea-block"><div class="lbl">Monetization</div><p>${escapeHtml(idea.monetization)}</p></div>
+      <div class="idea-block"><div class="lbl">Competitive edge</div><p>${escapeHtml(idea.competitiveEdge || '')}</p></div>
+      ${idea.fullDescription ? `<p class="confirm-full-description">${escapeHtml(idea.fullDescription)}</p>` : ''}
+
+      <div class="revise-form-actions">
+        <button class="btn btn-primary" id="keepRevisionBtn" type="button">Keep This</button>
+        <button class="btn btn-ghost" id="discardRevisionBtn" type="button">Discard</button>
+      </div>
+    </div>
+  `;
+
+  const keepBtn = document.getElementById('keepRevisionBtn');
+  const discardBtn = document.getElementById('discardRevisionBtn');
+  if(keepBtn) keepBtn.addEventListener('click', commitRevision);
+  if(discardBtn) discardBtn.addEventListener('click', discardRevision);
+}
+
+async function commitRevision(){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  el.innerHTML = `<div class="confirm-researching"><div class="confirm-spinner"></div><p>Saving…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/revise/commit`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not save the revision.')}</p>`;
+      return;
+    }
+
+    confirmState.rewrittenIdea = body.rewrittenIdea;
+    confirmState.pendingRevision = null;
+    renderIdeaCore(body.rewrittenIdea, true);
+    renderReviseSection();
+
+    const coreEl = document.getElementById('ideaCoreSection');
+    if(coreEl) coreEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong saving the revision.</p>`;
+  }
+}
+
+async function discardRevision(){
+  const el = document.getElementById('reviseIdeaSection');
+  if(!el) return;
+
+  el.innerHTML = `<div class="confirm-researching"><div class="confirm-spinner"></div><p>Discarding…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/revise/discard`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+
+    await res.json(); // current idea is unchanged either way — nothing to apply
+    confirmState.pendingRevision = null;
+    renderReviseSection();
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong discarding the revision.</p>`;
+  }
+}
+
+// ---- Build Brief: turns the hardened idea into a structured spec meant
+// to be pasted straight into Claude Code or a similar AI coding tool —
+// the step that was missing before between "idea is fully validated"
+// and "idea actually starts getting built."
+
+function renderBuildBriefSection(){
+  const el = document.getElementById('buildBriefSection');
+  if(!el) return;
+
+  if(confirmState.buildBrief){
+    renderBuildBrief(confirmState.buildBrief);
+    return;
+  }
+
+  el.innerHTML = `<button class="btn btn-secondary" id="runBuildBriefBtn" type="button">Generate Build Brief</button>`;
+  const btn = document.getElementById('runBuildBriefBtn');
+  if(btn) btn.addEventListener('click', runBuildBrief);
+}
+
+async function runBuildBrief(){
+  const el = document.getElementById('buildBriefSection');
+  if(!el) return;
+
+  el.innerHTML = `
+    <div class="confirm-researching">
+      <div class="confirm-spinner"></div>
+      <p>Translating the idea into MVP scope, a suggested stack, and a rough data model…</p>
+    </div>
+  `;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/build-brief`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate the build brief.')}</p>`;
+      return;
+    }
+
+    confirmState.buildBrief = body.buildBrief;
+    renderBuildBrief(body.buildBrief);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating the build brief.</p>`;
+  }
+}
+
+function renderBuildBrief(buildBrief){
+  const el = document.getElementById('buildBriefSection');
+  if(!el) return;
+
+  const listHtml = (items) => `<ul>${(items || []).map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>`;
+
+  const stack = buildBrief.suggestedTechStack || {};
+  const stackRows = [
+    ['Frontend', stack.frontend],
+    ['Backend', stack.backend],
+    ['Database', stack.database],
+    ['AI services', stack.aiServices]
+  ].filter(([, v]) => v);
+
+  const dataModelHtml = (buildBrief.dataModel || []).map(entity => `
+    <div class="data-model-entity">
+      <div class="data-model-entity-name">${escapeHtml(entity.entity)}</div>
+      <ul>${(entity.fields || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
+    </div>
+  `).join('');
+
+  el.innerHTML = `
+    <h3 class="confirm-section-title">Build brief</h3>
+    <p class="idea-block-p">${escapeHtml(buildBrief.overview)}</p>
+
+    <div class="idea-block"><div class="lbl">MVP scope</div>${listHtml(buildBrief.mvpScope)}</div>
+    <div class="idea-block"><div class="lbl">Later (not in v1)</div>${listHtml(buildBrief.laterFeatures)}</div>
+
+    ${stackRows.length ? `<div class="idea-block"><div class="lbl">Suggested stack</div><ul>${stackRows.map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`).join('')}</ul></div>` : ''}
+
+    ${dataModelHtml ? `<div class="idea-block"><div class="lbl">Rough data model</div><div class="data-model-list">${dataModelHtml}</div></div>` : ''}
+
+    <div class="idea-block"><div class="lbl">Key flows to build first</div>${listHtml(buildBrief.keyFlows)}</div>
+    <div class="idea-block"><div class="lbl">Still open</div>${listHtml(buildBrief.openQuestions)}</div>
+
+    <button class="btn btn-ghost" id="copyBuildBriefBtn" type="button">Copy as Markdown</button>
+  `;
+
+  const copyBtn = document.getElementById('copyBuildBriefBtn');
+  if(copyBtn) copyBtn.addEventListener('click', () => copyBuildBriefMarkdown(buildBrief, copyBtn));
+}
+
+// Markdown specifically because that's what pastes cleanly into Claude
+// Code, a GitHub issue, or a planning doc — plain prose with headers
+// would just need reformatting in any of those destinations anyway.
+function buildBriefToMarkdown(buildBrief){
+  const list = (items) => (items || []).map(i => `- ${i}`).join('\n');
+  const stack = buildBrief.suggestedTechStack || {};
+  const stackLines = [
+    stack.frontend ? `- **Frontend:** ${stack.frontend}` : '',
+    stack.backend ? `- **Backend:** ${stack.backend}` : '',
+    stack.database ? `- **Database:** ${stack.database}` : '',
+    stack.aiServices ? `- **AI services:** ${stack.aiServices}` : ''
+  ].filter(Boolean).join('\n');
+
+  const dataModelLines = (buildBrief.dataModel || [])
+    .map(e => `### ${e.entity}\n${list(e.fields)}`)
+    .join('\n\n');
+
+  return `# Build Brief
+
+${buildBrief.overview}
+
+## MVP Scope
+${list(buildBrief.mvpScope)}
+
+## Later (not in v1)
+${list(buildBrief.laterFeatures)}
+
+## Suggested Stack
+${stackLines}
+
+## Data Model
+${dataModelLines}
+
+## Key Flows to Build First
+${list(buildBrief.keyFlows)}
+
+## Still Open
+${list(buildBrief.openQuestions)}
+`;
+}
+
+async function copyBuildBriefMarkdown(buildBrief, btn){
+  try {
+    await navigator.clipboard.writeText(buildBriefToMarkdown(buildBrief));
+    if(btn){
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = original; }, 1800);
+    }
+  } catch (err) {
+    if(btn) btn.textContent = 'Could not copy — select and copy manually';
+  }
+}
+
+// ---- Shareable one-pager link: a public, unauthenticated view of the
+// hardened idea anyone with the link can open, no ThinkMaps account
+// needed — for sending to a friend or co-founder.
+
+function renderShareLinkSection(){
+  const el = document.getElementById('shareLinkSection');
+  if(!el) return;
+
+  if(confirmState.shareToken){
+    renderShareLink(confirmState.shareToken);
+    return;
+  }
+
+  el.innerHTML = `<button class="btn btn-secondary" id="runShareLinkBtn" type="button">Get Shareable Link</button>`;
+  const btn = document.getElementById('runShareLinkBtn');
+  if(btn) btn.addEventListener('click', runShareLink);
+}
+
+async function runShareLink(){
+  const el = document.getElementById('shareLinkSection');
+  if(!el) return;
+
+  el.innerHTML = `<button class="btn btn-secondary" type="button" disabled>Creating link…</button>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/share`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not create a shareable link.')}</p>`;
+      return;
+    }
+
+    confirmState.shareToken = body.shareToken;
+    renderShareLink(body.shareToken);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong creating the link.</p>`;
+  }
+}
+
+function buildShareUrl(token){
+  // Built from the current page's own URL rather than a hardcoded
+  // domain, so this resolves correctly regardless of which subdirectory
+  // ThinkMaps happens to be deployed under.
+  return window.location.origin + window.location.pathname.replace('confirm.html', 'share.html') + '?token=' + token;
+}
+
+function renderShareLink(token){
+  const el = document.getElementById('shareLinkSection');
+  if(!el) return;
+
+  const url = buildShareUrl(token);
+
+  el.innerHTML = `
+    <div class="share-link-row">
+      <input type="text" class="share-link-input" id="shareLinkInput" value="${escapeHtml(url)}" readonly />
+      <button class="btn btn-secondary" id="copyShareLinkBtn" type="button">Copy Link</button>
+    </div>
+  `;
+
+  const copyBtn = document.getElementById('copyShareLinkBtn');
+  const input = document.getElementById('shareLinkInput');
+  if(copyBtn) copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      const original = copyBtn.textContent;
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = original; }, 1800);
+    } catch (err) {
+      input?.select();
+    }
+  });
 }
