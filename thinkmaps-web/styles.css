@@ -669,6 +669,8 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
    isn't wanted here. */
 #deeperAnalysisSection > button,
 #rewriteIdeaSection > button,
+#buildBriefSection > button,
+#reviseIdeaSection > button,
 .confirm-result > a.btn-primary,
 .ideate-result > a.btn-primary{
   display:table;
@@ -800,6 +802,7 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 .data-model-entity-name{ font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--accent-deep); margin-bottom:4px; }
 .data-model-entity ul{ margin:0; padding-left:18px; }
+.build-brief-actions{ display:flex; gap:10px; margin-top:20px; }
 
 /* ---------- Shareable link ---------- */
 .confirm-final-actions{
