@@ -315,7 +315,7 @@ async function callMistralPlainText(messages){
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
-    body: JSON.stringify({ model: 'mistral-embed', messages })
+    body: JSON.stringify({ model: 'mistral-small-2503', messages })
   });
 
   if(!res.ok){
