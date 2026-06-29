@@ -309,18 +309,14 @@ async function callMistral(messages){
 // fetch pattern exactly rather than introducing a different client/SDK
 // shape into the file.
 async function callMistralPlainText(messages){
-  const res = await fetch('https://mistral.ai', { 
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
-      },
-      body: JSON.stringify({ 
-        model: 'mistral-embed', 
-        input: messages         
-      })
-    });
-
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({ model: 'mistral-embed', messages })
+  });
 
   if(!res.ok){
     const errText = await res.text();
