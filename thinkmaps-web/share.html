@@ -47,19 +47,35 @@ async function loadSharedIdea(){
     return;
   }
 
+  let res;
   try {
-    const res = await fetch(`${API_BASE_URL}/share/${token}`);
-    const body = await res.json();
-
-    if(!res.ok){
-      root.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'This link is invalid or has expired.')}</p>`;
-      return;
-    }
-
-    renderSharedIdea(body.idea);
+    res = await fetch(`${API_BASE_URL}/share/${token}`);
   } catch (err) {
-    root.innerHTML = '<p class="confirm-error">Could not load this idea. Check your connection and try again.</p>';
+    // The fetch itself failed — couldn't reach the server at all.
+    root.innerHTML = '<p class="confirm-error">Could not reach the server. Check your connection and try again in a moment — if this keeps happening, the backend may still be starting up.</p>';
+    return;
   }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    // Reached a server, but it didn't return JSON — e.g. a plain HTML
+    // 404 page, which is exactly what happens if this route doesn't
+    // exist yet on whatever's currently deployed. Surfacing the actual
+    // status code here instead of a generic message is what actually
+    // tells someone "the backend doesn't have this route yet" instead
+    // of "something vague is wrong."
+    root.innerHTML = `<p class="confirm-error">The server responded unexpectedly (status ${res.status}), instead of with the idea data. If this link is new, the backend may not have this route deployed yet.</p>`;
+    return;
+  }
+
+  if(!res.ok){
+    root.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'This link is invalid or has expired.')}</p>`;
+    return;
+  }
+
+  renderSharedIdea(body.idea);
 }
 
 function renderSharedIdea(idea){
