@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAuthPage();
   initDashboardPage();
   initNavAuthState();
+  initPricingSection();
   initAppPage();
   initIdeatePage();
   initConfirmPage();
@@ -418,10 +419,78 @@ async function initNavAuthState(){
   });
 }
 
+// ---------- PRICING SECTION (index.html) ----------
+// Only present on index.html (#pricingGrid). Not signed in: both plan
+// cards show as static marketing content, "Go Pro" just leads to sign
+// up — nothing here needs to run. Signed in: fetches the real pro
+// status once, hides the Free card and centers the Pro card if already
+// pro (see applyPricingProState), and turns "Go Pro" into a real toggle
+// instead of a navigation link — clicking it while signed in upgrades
+// (or, if already pro, downgrades — same toggle endpoint both
+// directions) right there on the page, never sending anyone to the
+// dashboard first.
+async function initPricingSection(){
+  const grid = document.getElementById('pricingGrid');
+  const freeCard = document.getElementById('freePlanCard');
+  const goProBtn = document.getElementById('proPlanGoProBtn');
+  if(!grid || !freeCard || !goProBtn) return;
+
+  const session = await getActiveSession();
+  if(!session) return;
+
+  let isPro = false;
+  try {
+    const res = await authedFetch('/profile');
+    if(res && res.ok){
+      const body = await res.json();
+      isPro = !!body.pro_status;
+    }
+  } catch (err) { /* leave isPro false on failure — worst case shows both plans */ }
+
+  applyPricingProState(isPro, freeCard, grid, goProBtn);
+
+  goProBtn.addEventListener('click', async (e) => {
+    e.preventDefault(); // signed in — this always toggles in place, never navigates
+    const originalLabel = goProBtn.textContent;
+    goProBtn.textContent = isPro ? 'Updating…' : 'Upgrading…';
+    goProBtn.style.pointerEvents = 'none';
+
+    try {
+      const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
+      if(res && res.ok){
+        const body = await res.json();
+        isPro = !!body.pro_status;
+        applyPricingProState(isPro, freeCard, grid, goProBtn);
+      } else {
+        goProBtn.textContent = originalLabel;
+        showToast('Could not update your Pro status — try again.');
+      }
+    } catch (err) {
+      goProBtn.textContent = originalLabel;
+      showToast('Could not reach the server — try again.');
+    }
+    goProBtn.style.pointerEvents = '';
+  });
+}
+
+// Shared between initPricingSection above and the dashboard's "Go Pro"
+// modal (see showProPlanModal) — the same on/off visual state, applied
+// in two different places someone might see it.
+function applyPricingProState(isPro, freeCard, grid, goProBtn){
+  freeCard.style.display = isPro ? 'none' : '';
+  grid.classList.toggle('pro-only', isPro);
+  goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
+}
+
 // ---------- DASHBOARD PAGE ----------
 // Skips entirely on pages without #dashboardRoot.
 // Loads profile + blueprint state from server.js, renders one of three states
 // per blueprint (empty / active / locked), and wires up "new blueprint" + logout.
+
+// Set once per loadDashboard() call (see renderProBanner) — lets the Pro
+// plan modal (showProPlanModal) know the current state without needing
+// it threaded through as a function argument from wherever it's opened.
+const dashboardState = { isPro: false };
 
 async function initDashboardPage(){
   const root = document.getElementById('dashboardRoot');
@@ -472,6 +541,8 @@ async function loadDashboard(){
 function renderProBanner(bannerEl, profile){
   if(!bannerEl) return;
 
+  dashboardState.isPro = !!profile.pro_status;
+
   if(profile.pro_status){
     bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no edit lock, never deleted.`;
     bannerEl.classList.add('pro');
@@ -479,37 +550,90 @@ function renderProBanner(bannerEl, profile){
     bannerEl.innerHTML = `
       <span class="eyebrow">Free plan</span>
       One blueprint, 30 minutes to edit, then read-only — deleted after 3 days.
-      <a href="index.html#pricing" class="btn btn-ghost">See Pro</a>
       <button type="button" id="goProTestBtn" class="btn btn-primary">Go Pro</button>
     `;
     bannerEl.classList.remove('pro');
 
-    // TEST MODE — see the big comment on POST /profile/go-pro in
-    // server.js. This sets pro_status directly with no real payment, so
-    // the Pro experience can be built and tested end-to-end before a
-    // real provider is wired in. Must not ship to real users as-is.
+    // Opens the Pro plan modal (showProPlanModal) rather than upgrading
+    // directly — the actual upgrade now happens from the Go Pro button
+    // INSIDE that modal, so someone sees what they're getting before the
+    // (test-mode, no real payment) toggle actually fires.
     const goProBtn = document.getElementById('goProTestBtn');
-    if(goProBtn){
-      goProBtn.addEventListener('click', async () => {
-        goProBtn.disabled = true;
-        goProBtn.textContent = 'Upgrading…';
-        try {
-          const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
-          if(res && res.ok){
-            await loadDashboard();
-          } else {
-            goProBtn.disabled = false;
-            goProBtn.textContent = 'Go Pro';
-            showToast('Could not upgrade — try again.');
-          }
-        } catch (err) {
-          goProBtn.disabled = false;
-          goProBtn.textContent = 'Go Pro';
-          showToast('Could not reach the server — try again.');
-        }
-      });
-    }
+    if(goProBtn) goProBtn.addEventListener('click', () => showProPlanModal());
   }
+}
+
+// Dynamically injected — no static markup needed in dashboard.html for
+// this, the same way showToast injects itself. Reuses the existing
+// .modal-overlay/.modal-card classes (see #newBlueprintModal in
+// dashboard.html) so it looks consistent with the one modal that
+// already existed, rather than inventing a second visual style.
+//
+// NOTE: the feature list text below duplicates index.html's static Pro
+// plan card content — this is the SECOND place that list lives. Keep
+// both in sync by hand if either ever changes; there isn't a shared
+// single source of truth between a static marketing page and this
+// dynamically-built modal.
+function showProPlanModal(){
+  closeProPlanModal(); // guard against a stray double-open leaving two overlays stacked
+
+  const isPro = dashboardState.isPro;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'proPlanModal';
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <div class="plan pro modal-plan-card">
+        <span class="ptag">Pro</span>
+        <h3>For builders who iterate</h3>
+        <div class="price">$12<sup>/month</sup></div>
+        <ul>
+          <li>Unlimited blueprints, no edit lock, never deleted</li>
+          <li>Combine multiple selections into one fused idea</li>
+          <li>Market Intel &amp; Risk Analysis</li>
+          <li>AI-found fixes for surfaced risks</li>
+          <li>Detailed Build Brief for your MVP</li>
+          <li>Suggest Changes — revise with your own feedback</li>
+        </ul>
+        <button type="button" class="btn btn-primary" id="modalGoProBtn">${isPro ? 'Cancel Pro (test)' : 'Go Pro'}</button>
+      </div>
+      <button type="button" class="btn btn-ghost modal-close-btn" id="closeProPlanModalBtn">Close</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', (e) => {
+    if(e.target === overlay) closeProPlanModal(); // click on the dim backdrop itself closes it
+  });
+  document.getElementById('closeProPlanModalBtn').addEventListener('click', closeProPlanModal);
+
+  const goProBtn = document.getElementById('modalGoProBtn');
+  if(goProBtn){
+    goProBtn.addEventListener('click', async () => {
+      goProBtn.disabled = true;
+      goProBtn.textContent = isPro ? 'Updating…' : 'Upgrading…';
+      try {
+        const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
+        if(res && res.ok){
+          closeProPlanModal();
+          await loadDashboard();
+        } else {
+          goProBtn.disabled = false;
+          goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
+          showToast('Could not update Pro status — try again.');
+        }
+      } catch (err) {
+        goProBtn.disabled = false;
+        goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
+        showToast('Could not reach the server — try again.');
+      }
+    });
+  }
+}
+
+function closeProPlanModal(){
+  const overlay = document.getElementById('proPlanModal');
+  if(overlay) overlay.remove();
 }
 
 function renderBlueprintArea(container, blueprints, canCreateNew){
