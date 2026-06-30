@@ -662,6 +662,12 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 .ideate-option:hover:not(:disabled){ border-color:var(--accent); background:var(--accent-soft); }
 .ideate-option:disabled{ opacity:.5; cursor:default; }
+/* Briefly applied to whichever option the AI picked, so there's a
+   visible link between pressing "Let AI Answer" and what got chosen,
+   instead of jumping straight to the next question with no feedback. */
+.ideate-option.ai-picked{ border-color:var(--accent); background:var(--accent-soft); opacity:1; }
+
+.ai-answer-btn{ display:table; margin:18px auto 0; }
 
 .ideate-result{ background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:36px; }
 .ideate-result h2{ font-size:26px; margin:10px 0 8px; }
@@ -693,7 +699,7 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
    but would stretch the button to its container's full width, which
    isn't wanted here. */
 #deeperAnalysisSection > button,
-#rewriteIdeaSection > button,
+#deeperFixesSection > button,
 #buildBriefSection > button,
 #reviseIdeaSection > button,
 .confirm-result > a.btn-primary,
@@ -820,13 +826,13 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 
 /* ---------- Build Brief ---------- */
-.data-model-list{ display:flex; flex-direction:column; gap:12px; }
-.data-model-entity{
-  background:var(--surface); border:1px solid var(--line); border-radius:8px;
-  padding:10px 14px;
+.mvp-list{ display:flex; flex-direction:column; gap:14px; }
+.mvp-item{
+  background:var(--surface); border:1px solid var(--line); border-radius:10px;
+  padding:14px 16px;
 }
-.data-model-entity-name{ font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--accent-deep); margin-bottom:4px; }
-.data-model-entity ul{ margin:0; padding-left:18px; }
+.mvp-item-title{ font-size:14px; font-weight:600; color:var(--ink); margin-bottom:6px; }
+.mvp-item-description{ font-size:13.5px; color:var(--ink-muted); line-height:1.6; margin:0; }
 .build-brief-actions{ display:flex; gap:10px; margin-top:20px; }
 
 /* ---------- Shareable link ---------- */
