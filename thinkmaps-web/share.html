@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=2">
+<link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body>
 <header class="site no-print">
@@ -75,7 +75,18 @@ async function loadSharedIdea(){
     return;
   }
 
-  renderSharedIdea(body.idea);
+  // Final safety net — renderSharedIdea building its template literals
+  // throws synchronously if some field shape doesn't match what's
+  // expected (e.g. idea itself unexpectedly null despite res.ok being
+  // true). Without this, that throw would propagate up uncaught and
+  // leave whatever was already in #shareRoot on screen — which, depending
+  // on timing, could mean a blank-looking page with zero indication
+  // anything went wrong. This guarantees a real, visible error instead.
+  try {
+    renderSharedIdea(body.idea);
+  } catch (err) {
+    root.innerHTML = '<p class="confirm-error">This idea could not be displayed — its data may be incomplete or in an unexpected format.</p>';
+  }
 }
 
 function renderSharedIdea(idea){
