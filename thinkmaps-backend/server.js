@@ -263,15 +263,26 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 
 const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
 
-async function mistralRequest(body){
+// ----------------------------------------------------------
+// JSON-mode call (used for structured node/group generation)
+// Not streamed — partial JSON can't be safely parsed or shown,
+// so we just tighten max_tokens/temperature instead.
+// ----------------------------------------------------------
+async function callMistral(messages, { maxTokens = 600 } = {}){
   const res = await fetch(MISTRAL_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
-      'Connection': 'keep-alive' // reuse TCP/TLS handshake across calls
+      'Connection': 'keep-alive'
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages,
+      response_format: { type: 'json_object' },
+      max_tokens: maxTokens,
+      temperature: 0.3
+    })
   });
 
   if(!res.ok){
@@ -279,18 +290,7 @@ async function mistralRequest(body){
     throw new Error(`Mistral API error (${res.status}): ${errText}`);
   }
 
-  return res.json();
-}
-
-async function callMistral(messages, { maxTokens = 1200 } = {}){
-  const data = await mistralRequest({
-    model: 'mistral-small-latest',
-    messages,
-    response_format: { type: 'json_object' },
-    max_tokens: maxTokens,   // <-- caps generation length, cuts latency
-    temperature: 0.3         // <-- lower = faster convergence, more consistent JSON
-  });
-
+  const data = await res.json();
   const content = data.choices?.[0]?.message?.content;
   if(!content) throw new Error('Mistral returned no content.');
 
@@ -311,17 +311,78 @@ async function callMistral(messages, { maxTokens = 1200 } = {}){
   }
 }
 
-async function callMistralPlainText(messages, { maxTokens = 800 } = {}){
-  const data = await mistralRequest({
-    model: 'mistral-small-2503',
-    messages,
-    max_tokens: maxTokens,
-    temperature: 0.5
+// ----------------------------------------------------------
+// Plain-text call (used for fullDescription prose).
+// Streamed — caller passes an onChunk callback to render text
+// as it arrives instead of waiting for the full response.
+// ----------------------------------------------------------
+async function callMistralPlainText(messages, { maxTokens = 300, onChunk } = {}){
+  const res = await fetch(MISTRAL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
+      'Connection': 'keep-alive'
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-2503',
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.5,
+      stream: true
+    })
   });
 
-  return (data.choices?.[0]?.message?.content || '').trim();
+  if(!res.ok){
+    const errText = await res.text();
+    throw new Error(`Mistral API error (${res.status}): ${errText}`);
+  }
+
+  // No streaming support (e.g. older runtime) — fall back to one-shot read.
+  if(!res.body || !res.body.getReader){
+    const data = await res.json();
+    const full = (data.choices?.[0]?.message?.content || '').trim();
+    if(onChunk) onChunk(full);
+    return full;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '';
+  let buffer = '';
+
+  while(true){
+    const { done, value } = await reader.read();
+    if(done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete line for next chunk
+
+    for(const line of lines){
+      const trimmed = line.trim();
+      if(!trimmed.startsWith('data:')) continue;
+
+      const payload = trimmed.slice(5).trim();
+      if(payload === '[DONE]') continue;
+
+      try {
+        const json = JSON.parse(payload);
+        const delta = json.choices?.[0]?.delta?.content;
+        if(delta){
+          full += delta;
+          if(onChunk) onChunk(delta, full); // emit each chunk + running total
+        }
+      } catch {
+        // ignore malformed SSE fragments (rare, mid-chunk splits)
+      }
+    }
+  }
+
+  return full.trim();
 }
 
+module.exports = { callMistral, callMistralPlainText };
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
 // pairs — this is the "path so far" context fed into every generation prompt.
 // Walks UP the tree from an OPTION to the root, via spawned_from_option_id —
