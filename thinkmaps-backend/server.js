@@ -19,12 +19,25 @@ const supabase = createClient(
 );
 
 // Free tier locks a blueprint to read-only after this much time since
-// creation, unless pro_status is set. Was 7 days; now 24 hours. Single
-// shared constant — both /dashboard's enrichment and checkIsLocked below
-// used to each hardcode their own copy of this number, which is exactly
-// the kind of duplication that causes one of them to quietly drift out of
-// sync on a future change.
-const FREE_TIER_LOCK_MS = 24 * 60 * 60 * 1000;
+// creation, unless pro_status is set. Was 7 days, then 24 hours; now 30
+// minutes. Single shared constant — both /dashboard's enrichment and
+// checkIsLocked below used to each hardcode their own copy of this
+// number, which is exactly the kind of duplication that causes one of
+// them to quietly drift out of sync on a future change.
+const FREE_TIER_LOCK_MS = 30 * 60 * 1000;
+
+// A locked free-tier blueprint isn't just read-only forever — it's
+// permanently deleted this long after creation. Deliberately a SEPARATE
+// constant from the lock window above, not derived from it, since "stop
+// editing" and "delete forever" are different product decisions that
+// could reasonably diverge later even though they happen to both be
+// fixed numbers today. Enforced lazily (see cleanupExpiredFreeBlueprints
+// below), not via a scheduled job — there's no cron/job-runner
+// infrastructure in this app, and a lazy sweep on dashboard load is
+// simple, requires no new infrastructure, and the actual deletion is
+// not so time-sensitive that "approximately on next dashboard visit" is
+// distinguishable from "exactly at 3 days" to a real person.
+const FREE_TIER_DELETE_MS = 3 * 24 * 60 * 60 * 1000;
 
 // Verifies the Supabase access token sent from script.js (Authorization: Bearer <token>)
 // and attaches the real user to req.user. Every route that touches a specific
@@ -148,6 +161,13 @@ app.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
 
+    // Lazy cleanup, right before listing — deletes any of this user's
+    // free-tier blueprints that aged past FREE_TIER_DELETE_MS. A no-op
+    // for pro users (checked once inside, not per blueprint). See the
+    // comment on cleanupExpiredFreeBlueprints above for why "on
+    // dashboard load" rather than a scheduled job is the right call here.
+    await cleanupExpiredFreeBlueprints(userId);
+
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('username, email, pro_status, pro_expires_at')
@@ -169,8 +189,20 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     const enrichedBlueprints = blueprints.map(bp => {
       const ageMs = now - new Date(bp.created_at).getTime();
       const isLocked = !profile.pro_status && ageMs > FREE_TIER_LOCK_MS;
-      const hoursRemaining = Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 60 * 1000)));
-      return { ...bp, isLocked, hoursRemaining: isLocked ? 0 : hoursRemaining };
+      // Minutes, not hours — at a 30-minute window, "hours remaining"
+      // would round to a misleading 0 or 1 for nearly this entire
+      // window, which is exactly the kind of unit choice that LOOKS
+      // fine until the actual numbers involved make it useless.
+      const minutesRemaining = Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 1000)));
+      // Separately: how long until this blueprint is permanently
+      // deleted, regardless of whether it's already locked — locking and
+      // deleting are different moments on the free tier (see
+      // FREE_TIER_DELETE_MS above), so this is its own field, not
+      // derived from isLocked/minutesRemaining.
+      const daysUntilDeletion = profile.pro_status
+        ? null
+        : Math.max(0, Math.ceil((FREE_TIER_DELETE_MS - ageMs) / (24 * 60 * 60 * 1000)));
+      return { ...bp, isLocked, minutesRemaining: isLocked ? 0 : minutesRemaining, daysUntilDeletion };
     });
 
     res.status(200).json({
@@ -180,6 +212,53 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load dashboard.', detail: err.message });
+  }
+});
+
+// Lightweight pro-status check for pages that need to gate UI elements
+// but don't need the full /dashboard payload (blueprint list, etc.) —
+// confirm.html uses this to decide whether to show the post-hardening
+// tools as locked or active, without pulling in data it has no use for.
+app.get('/profile', requireAuth, async (req, res) => {
+  try {
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('pro_status')
+      .eq('id', req.user.id)
+      .single();
+
+    if(error) throw error;
+
+    res.status(200).json({ pro_status: !!profile?.pro_status });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load profile.', detail: err.message });
+  }
+});
+
+// =====================================================================
+// TEST-MODE ONLY — sets pro_status directly with NO real payment of any
+// kind. This exists purely so the Pro experience can be built and tested
+// end-to-end before a real payment provider (Selar, per the placeholder
+// link on the dashboard) is wired in. Any authenticated user can
+// currently make themselves Pro for free by hitting this endpoint —
+// that is fine for development, and would be a genuine, serious revenue
+// hole if this ever reached a real production deployment unguarded.
+// Before this app handles real money, this route needs to either be
+// deleted entirely or rebuilt to only set pro_status from a verified
+// payment-provider webhook, never from a direct client request.
+// =====================================================================
+app.post('/profile/go-pro', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ pro_status: true })
+      .eq('id', req.user.id);
+
+    if(error) throw error;
+
+    res.status(200).json({ pro_status: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not upgrade to Pro.', detail: err.message });
   }
 });
 
@@ -260,7 +339,7 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
-async function callMistral(messages){
+async function callMistral(messages, maxTokens = 1400){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -268,9 +347,19 @@ async function callMistral(messages){
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-latest',
+      model: 'mistral-small-2503',
       messages,
-      response_format: { type: 'json_object' }
+      response_format: { type: 'json_object' },
+      // Every structured call this function backs (option batches,
+      // checkpoints, idea synthesis, build briefs) produces a bounded,
+      // predictable amount of JSON — never anywhere near unlimited
+      // output. Leaving max_tokens unset means the model has no signal
+      // for how long a response should be, which costs real time on
+      // every single call. Defaults to 1400, comfortable for most call
+      // sites here; the build brief passes a higher override since its
+      // MVP descriptions (up to 8 items, each a real paragraph) are
+      // genuinely larger than every other shape produced in this file.
+      max_tokens: maxTokens
     })
   });
 
@@ -304,10 +393,14 @@ async function callMistral(messages){
 }
 
 // Same raw call as callMistral above, minus the JSON-mode forcing and
-// parsing — for the one spot (the final idea's fullDescription) that
-// needs real prose back, not a JSON object. Mirrors callMistral's own
-// fetch pattern exactly rather than introducing a different client/SDK
-// shape into the file.
+// parsing — for plain prose back instead of a JSON object. Currently
+// unused: the two spots that used to need this (synthesizeFinalIdea and
+// reviseIdeaWithFeedback's fullDescription) were merged into their main
+// JSON call instead, removing a full sequential network round trip from
+// each for speed. Left defined as a ready utility for any future spot
+// that genuinely needs a standalone prose response — mirrors
+// callMistral's own fetch pattern exactly rather than introducing a
+// different client/SDK shape into the file.
 async function callMistralPlainText(messages){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
@@ -315,7 +408,7 @@ async function callMistralPlainText(messages){
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
-    body: JSON.stringify({ model: 'mistral-small-latest', messages })
+    body: JSON.stringify({ model: 'mistral-small-2503', messages, max_tokens: 700 })
   });
 
   if(!res.ok){
@@ -542,34 +635,91 @@ async function findNicheRootOptionId(optionId){
 // 40 found (roughly double the old per-block cap, since this is now
 // pooling across every block instead of just one).
 async function getAllExistingOptionLabelsInNiche(nicheOptionId){
+  // First find which blueprint this niche option belongs to, since
+  // everything below is scoped to fetching that ONE blueprint's full
+  // contents in flat queries rather than walking the tree level by level.
+  const { data: nicheOptionRow } = await supabase
+    .from('options')
+    .select('group_version_id')
+    .eq('id', nicheOptionId)
+    .single();
+  if(!nicheOptionRow) return [];
+
+  const { data: nicheVersionRow } = await supabase
+    .from('group_versions')
+    .select('group_id')
+    .eq('id', nicheOptionRow.group_version_id)
+    .single();
+  if(!nicheVersionRow) return [];
+
+  const blueprintId = await getBlueprintIdForGroup(nicheVersionRow.group_id);
+  if(!blueprintId) return [];
+
+  // Exactly 3 queries total, regardless of how deep or wide the
+  // exploration has gone — this is the actual fix. The old version did
+  // this same fetch ONE LEVEL AT A TIME (groups, then versions, then
+  // options, per level), which meant a path 7 levels deep with several
+  // siblings per level could mean dozens of sequential round-trips, paid
+  // fresh on every single node activation. Fetching the whole
+  // blueprint's contents flat and walking the tree in memory below does
+  // the identical BFS, just against data that's already local instead of
+  // re-querying the database at every step.
+  const { data: allGroups } = await supabase.from('groups').select('id, spawned_from_option_id').eq('blueprint_id', blueprintId);
+  const groupIds = (allGroups || []).map(g => g.id);
+  const { data: allVersions } = groupIds.length
+    ? await supabase.from('group_versions').select('id, group_id').in('group_id', groupIds)
+    : { data: [] };
+  const versionIds = (allVersions || []).map(v => v.id);
+  const { data: allOptions } = versionIds.length
+    ? await supabase.from('options').select('id, label, group_version_id').in('group_version_id', versionIds)
+    : { data: [] };
+
+  // Same BFS as before, just walking pre-fetched in-memory arrays
+  // instead of issuing a fresh query at every level.
+  const groupsBySpawnedFrom = new Map();
+  (allGroups || []).forEach(g => {
+    if(!g.spawned_from_option_id) return;
+    if(!groupsBySpawnedFrom.has(g.spawned_from_option_id)) groupsBySpawnedFrom.set(g.spawned_from_option_id, []);
+    groupsBySpawnedFrom.get(g.spawned_from_option_id).push(g.id);
+  });
+  const versionsByGroupId = new Map();
+  (allVersions || []).forEach(v => {
+    if(!versionsByGroupId.has(v.group_id)) versionsByGroupId.set(v.group_id, []);
+    versionsByGroupId.get(v.group_id).push(v.id);
+  });
+  const optionsByVersionId = new Map();
+  (allOptions || []).forEach(o => {
+    if(!optionsByVersionId.has(o.group_version_id)) optionsByVersionId.set(o.group_version_id, []);
+    optionsByVersionId.get(o.group_version_id).push(o);
+  });
+
   const labels = [];
   let frontierOptionIds = [nicheOptionId];
 
   while(frontierOptionIds.length > 0){
-    const { data: groups } = await supabase
-      .from('groups')
-      .select('id')
-      .in('spawned_from_option_id', frontierOptionIds);
-
-    if(!groups || groups.length === 0) break;
-
-    const groupIds = groups.map(g => g.id);
-    const { data: versions } = await supabase.from('group_versions').select('id').in('group_id', groupIds);
-    const versionIds = (versions || []).map(v => v.id);
-    if(versionIds.length === 0) break;
-
-    const { data: opts } = await supabase.from('options').select('id, label').in('group_version_id', versionIds);
-    (opts || []).forEach(o => { if(o.label) labels.push(o.label); });
-
-    frontierOptionIds = (opts || []).map(o => o.id);
+    const nextFrontier = [];
+    for(const optId of frontierOptionIds){
+      const childGroupIds = groupsBySpawnedFrom.get(optId) || [];
+      for(const groupId of childGroupIds){
+        const childVersionIds = versionsByGroupId.get(groupId) || [];
+        for(const versionId of childVersionIds){
+          const childOptions = optionsByVersionId.get(versionId) || [];
+          for(const opt of childOptions){
+            if(opt.label) labels.push(opt.label);
+            nextFrontier.push(opt.id);
+          }
+        }
+      }
+    }
+    frontierOptionIds = nextFrontier;
   }
 
-  // 40 was tuned for a moderate exploration depth — a path that's gone
-  // genuinely deep (10+ levels, the kind that produces 150+ saved
-  // options) pushes content from early in the path out of a window that
-  // small well before it's actually safe to forget. Raised substantially
-  // since correctness here matters more than the extra prompt size.
-  return labels.slice(-150);
+  // Capped at 60 rather than 150 — still a substantial diversity window
+  // (most-recent-first, same recency bias as before), but a meaningful
+  // cut to every generation prompt's size. 150 was tuned purely for
+  // correctness on very deep paths; 60 is the practical tradeoff between
+  // that and actually fast generation.
+  return labels.slice(-60);
 }
 
 // Fetches a niche's full pathway topic list purely as background
@@ -590,7 +740,17 @@ async function getNicheTopicsForGrounding(nicheOptionId){
   const { data: nicheOption } = await supabase.from('options').select('label').eq('id', nicheOptionId).single();
   if(!nicheOption) return [];
   const match = await matchNicheToTemplate(nicheOption.label);
-  return match.key ? (NICHE_PATHWAYS[match.key] || []) : [];
+  const allTopics = match.key ? (NICHE_PATHWAYS[match.key] || []) : [];
+
+  // Sampled down to 40 per call rather than injecting the full 150 every
+  // time — full topic list stays AVAILABLE across the niche overall (a
+  // freshly randomized 40 each call still surfaces different material
+  // over repeated activations, not the literal same 40 forever), but
+  // this cuts roughly two-thirds of what was previously the single
+  // largest contributor to every generation prompt's size.
+  if(allTopics.length <= 40) return allTopics;
+  const shuffled = [...allTopics].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, 40);
 }
 
 
@@ -905,11 +1065,88 @@ async function getOwnedBlueprint(blueprintId, userId){
   return blueprint;
 }
 
-async function checkIsLocked(userId, blueprintCreatedAt){
+// The one shared source of truth for "is this user pro" — every gate in
+// this file (blueprint locking, the newly pro-gated routes below) goes
+// through this rather than each re-writing its own profile query, so
+// there's exactly one place that definition could ever drift.
+async function isUserPro(userId){
   const { data: profile } = await supabase.from('profiles').select('pro_status').eq('id', userId).single();
-  const ageMs = Date.now() - new Date(blueprintCreatedAt).getTime();
-  return !profile?.pro_status && ageMs > FREE_TIER_LOCK_MS;
+  return !!profile?.pro_status;
 }
+
+// Convenience for the top of any pro-gated route — returns true and
+// sends the 403 itself if the user ISN'T pro, so callers can just do
+// `if(await requireProOrReject(req, res)) return;` as their one gate
+// line, the same shape as the requireAuth pattern used throughout this
+// file. Kept deliberately separate from requireAuth (an Express
+// middleware run before the route body) since this needs to run AFTER
+// requireAuth has already populated req.user, and only for the specific
+// routes that need it — not a blanket middleware on every authed route.
+async function requireProOrReject(req, res){
+  const pro = await isUserPro(req.user.id);
+  if(!pro){
+    res.status(403).json({ error: 'This feature is part of the Pro plan.', requiresPro: true });
+    return true;
+  }
+  return false;
+}
+
+async function checkIsLocked(userId, blueprintCreatedAt){
+  const pro = await isUserPro(userId);
+  const ageMs = Date.now() - new Date(blueprintCreatedAt).getTime();
+  return !pro && ageMs > FREE_TIER_LOCK_MS;
+}
+
+// Permanently deletes any of THIS user's free-tier blueprints older than
+// FREE_TIER_DELETE_MS. Pro users are never touched here regardless of
+// age — isUserPro is checked once up front and this becomes a no-op
+// entirely for them, not a per-blueprint check. Called lazily from the
+// top of the /dashboard route (see below) rather than a scheduled job —
+// see the comment on FREE_TIER_DELETE_MS above for why that's an
+// intentional, reasonable choice here rather than a missing piece.
+// Deletion here relies on the database's own ON DELETE CASCADE from
+// blueprints to its groups/group_versions/options/confirmation_sessions
+// — if that cascade isn't actually set up in the schema, this would
+// leave orphaned rows behind; worth a quick check against the real
+// schema before this matters in practice.
+async function cleanupExpiredFreeBlueprints(userId){
+  const pro = await isUserPro(userId);
+  if(pro) return;
+
+  const cutoff = new Date(Date.now() - FREE_TIER_DELETE_MS).toISOString();
+  const { data: expiredBlueprints } = await supabase
+    .from('blueprints')
+    .select('id')
+    .eq('user_id', userId)
+    .lt('created_at', cutoff);
+
+  const expiredIds = (expiredBlueprints || []).map(b => b.id);
+  if(expiredIds.length === 0) return;
+
+  // Deleted explicitly, child-first, rather than trusting an unverified
+  // ON DELETE CASCADE — there's no CREATE TABLE migration anywhere in
+  // this project to confirm cascade is actually configured on the live
+  // schema, only incremental ALTER TABLEs. This is correct either way:
+  // if cascade IS set up, these become harmless no-ops against rows
+  // that are already gone; if it isn't, this is what actually prevents
+  // orphaned groups/options/sessions instead of leaving it to chance.
+  const { data: groupsToDelete } = await supabase.from('groups').select('id').in('blueprint_id', expiredIds);
+  const groupIds = (groupsToDelete || []).map(g => g.id);
+
+  if(groupIds.length > 0){
+    const { data: versionsToDelete } = await supabase.from('group_versions').select('id').in('group_id', groupIds);
+    const versionIds = (versionsToDelete || []).map(v => v.id);
+    if(versionIds.length > 0){
+      await supabase.from('options').delete().in('group_version_id', versionIds);
+    }
+    await supabase.from('group_versions').delete().in('group_id', groupIds);
+  }
+  await supabase.from('groups').delete().in('blueprint_id', expiredIds);
+  await supabase.from('confirmation_sessions').delete().in('blueprint_id', expiredIds);
+  await supabase.from('ideation_sessions').delete().in('blueprint_id', expiredIds);
+  await supabase.from('blueprints').delete().in('id', expiredIds);
+}
+
 
 async function verifyOptionOwnershipAndLock(optionId, userId){
   const { data: option } = await supabase.from('options').select('group_version_id').eq('id', optionId).single();
@@ -1094,15 +1331,19 @@ async function activateOption(optionId, combinedOptionIds = []){
     // time a narrow niche gets explored in more than one direction.
     const nicheOptionId = await findNicheRootOptionId(optionId);
 
-    // Background grounding only — see getNicheTopicsForGrounding above.
-    // Fetched once per activation and threaded into every generation call
-    // below, never surfaced to the person directly.
-    const nicheTopics = await getNicheTopicsForGrounding(nicheOptionId);
+    // nicheTopics and existingLabels are completely independent of each
+    // other — both only depend on nicheOptionId — so they run in
+    // parallel instead of one waiting on the other. This and the
+    // getAllExistingOptionLabelsInNiche rewrite above are the two
+    // biggest single levers on per-activation latency in this file.
+    const [nicheTopics, existingLabels] = await Promise.all([
+      getNicheTopicsForGrounding(nicheOptionId),
+      getAllExistingOptionLabelsInNiche(nicheOptionId)
+    ]);
 
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
       // All 6 of A–F are used along THIS path and the checkpoint hasn't
       // fired yet on it — this is the moment.
-      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
       generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels, nicheTopics);
     } else if(!ideaCheckpointAlreadyShown){
       // Still working through A–F. Capped at however many of THOSE 6 are
@@ -1113,7 +1354,6 @@ async function activateOption(optionId, combinedOptionIds = []){
       // smaller tradeoff than the checkpoint never cleanly happening.
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
-      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
       generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
     } else {
       // Checkpoint already shown along this path — proceed normally
@@ -1121,7 +1361,6 @@ async function activateOption(optionId, combinedOptionIds = []){
       // goes deep enough to exhaust those too, though the 7-node cap
       // above means that's now a much rarer case than it used to be).
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-      const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
       generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
     }
   }
@@ -1319,6 +1558,12 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
 
     const isLocked = await checkIsLocked(req.user.id, blueprint.created_at);
+    // Fetched once here so the frontend can gate pro-only canvas
+    // features (currently: ctrl+click multi-select combining) without a
+    // separate round trip — checkIsLocked above already does its own
+    // profile lookup internally, so this is one more cheap query, not a
+    // duplicated definition of what "pro" means.
+    const isPro = await isUserPro(req.user.id);
 
     let { data: groups, error: groupsError } = await supabase
       .from('groups')
@@ -1367,7 +1612,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
       : { data: [] };
 
     res.status(200).json({
-      blueprint: { id: blueprint.id, title: blueprint.title, isLocked },
+      blueprint: { id: blueprint.id, title: blueprint.title, isLocked, isPro },
       groups,
       groupVersions: groupVersions || [],
       options: allOptions || []
@@ -1443,6 +1688,8 @@ async function validateCombinationSet(optionIds){
 // becoming a second traversal anchor anywhere else in the app.
 app.post('/options/combine-activate', requireAuth, async (req, res) => {
   try {
+    if(await requireProOrReject(req, res)) return;
+
     const { optionIds } = req.body;
     if(!Array.isArray(optionIds) || optionIds.length < 2){
       return res.status(400).json({ error: 'At least 2 option IDs are required to combine.' });
@@ -4648,7 +4895,21 @@ async function synthesizeFinalIdea(ideaDraft, pathSummary, confirmationAnswers, 
   const pros = (competitiveLandscape?.competitors || []).flatMap(c => (c.pros || []).map(p => `${c.name}: ${p}`));
   const solutionLines = (solvedProblems?.solutions || []).map(s => `Problem: ${s.problem}\nSolution: ${s.solution}`).join('\n\n');
 
-  const systemPrompt = `You are the final idea-synthesis engine for ThinkMaps. Pull everything below together into ONE complete, hardened app idea. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string} — competitiveEdge should be 2-3 sentences on what makes this genuinely better than what's already out there, grounded in the real strengths and solved weaknesses below, not generic claims. fullDescription is added separately below, not by you.`;
+  // fullDescription used to be a SEPARATE sequential Mistral call after
+  // this one — a dedicated prompt focused only on prose tends to write
+  // better prose than asking for it as one field among many, which was
+  // the original reasoning. But that doubled the latency of every single
+  // final-idea synthesis (the one step every confirmation flow ends
+  // with) for a quality gain that's real but secondary to actually
+  // getting an answer back quickly. Merged into one call: fullDescription
+  // is now produced in the SAME response, with explicit prose-quality
+  // instructions kept just as detailed as the old dedicated prompt was,
+  // rather than reduced to an afterthought field.
+  const systemPrompt = `You are the final idea-synthesis engine for ThinkMaps. Pull everything below together into ONE complete, hardened app idea. Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "fullDescription": string}.
+
+competitiveEdge should be 2-3 sentences on what makes this genuinely better than what's already out there, grounded in the real strengths and solved weaknesses below, not generic claims.
+
+fullDescription is the final polished pitch description — write 2 to 4 cohesive paragraphs of real prose, not a list, not a recap of the other fields. It should read as a genuine, specific idea pitch: what it is, who it's for, why it matters, and why it's positioned to beat what's already out there. This needs the same craft as if it were the only thing you were writing — don't let it read like a rushed afterthought just because it's one field among several.`;
 
   const userContent = `Idea draft: ${JSON.stringify(ideaDraft)}
 
@@ -4668,23 +4929,8 @@ ${solutionLines}`;
     { role: 'user', content: userContent }
   ]);
 
-  const fullDescriptionPrompt = `You are writing the final polished pitch description for an app idea, for ThinkMaps. Write 2 to 4 cohesive paragraphs — real prose, not a list — that read as a genuine, specific idea pitch: what it is, who it's for, why it matters, and why it's positioned to beat what's already out there. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
-
-  const fullDescriptionMessages = [
-    { role: 'system', content: fullDescriptionPrompt },
-    { role: 'user', content: `${JSON.stringify(core)}\n\nReal competitor strengths adopted:\n${pros.join('\n')}\n\nReal competitor weaknesses solved:\n${solutionLines}` }
-  ];
-
-  let fullDescription = '';
-  try {
-    fullDescription = await callMistralPlainText(fullDescriptionMessages);
-  } catch (err) {
-    console.error('[ThinkMaps] full description generation failed:', err.message);
-  }
-
   return {
     ...core,
-    fullDescription,
     competitors: competitiveLandscape?.competitors || [],
     solutions: solvedProblems?.solutions || []
   };
@@ -4837,7 +5083,7 @@ Be specific to THIS idea throughout — every section should clearly be about th
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate the build brief now.' }
-  ]);
+  ], 3000);
 }
 
 // Driven by what the PERSON actually typed, not market intel — this is
@@ -4848,34 +5094,29 @@ Be specific to THIS idea throughout — every section should clearly be about th
 // the /revise/commit route) — this function itself never persists
 // anything, callers decide that.
 async function reviseIdeaWithFeedback(currentIdea, feedbackText){
+  // Same merge as synthesizeFinalIdea above, same reasoning: fullDescription
+  // used to be a separate sequential call, doubling the latency of every
+  // single revision for a quality gain that's real but secondary to
+  // actually getting an answer back quickly. Now produced in the same
+  // response, with the prose-quality instructions the old dedicated
+  // prompt had kept just as explicit, not reduced to an afterthought.
   const systemPrompt = `You are the idea-revision engine for ThinkMaps. Below is an app idea, and direct feedback from the person who actually owns this idea — things they want added, removed, or changed. Rewrite the idea to genuinely incorporate what they asked for, not just acknowledge it: actually change the relevant fields. If their feedback conflicts with anything in the current idea, their feedback wins — this is their idea, not a generic best-practice idea. If they ask to add something, work it into whichever field it most naturally belongs in (coreFeature, competitiveEdge, monetization, or fullDescription) rather than bolting it on awkwardly. If they ask to remove something, remove it cleanly without leaving a gap or a vague reference to something no longer there. Anything they didn't mention should stay as close to unchanged as still makes sense once the rest has shifted.
 
 Current idea: ${JSON.stringify(currentIdea)}
 
 Their feedback: "${feedbackText}"
 
-Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string}`;
+Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "fullDescription": string}.
+
+fullDescription is the final polished pitch description for this REVISED idea — it should read as ONE confident, cohesive pitch, not a before/after comparison or a changelog. Write 2 to 4 cohesive paragraphs of real prose: what it is, who it's for, why it matters, why it's positioned to make money. Never reference "feedback," "the previous version," or "changes" — just write the pitch for the idea as it now stands, with the same craft as if this were the only thing you were writing.`;
 
   const core = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Revise the idea now, incorporating the feedback above.' }
   ]);
 
-  const fullDescriptionPrompt = `You are writing the final polished pitch description for a REVISED app idea, for ThinkMaps — this version was revised based on direct feedback from the idea's own creator, but it should read as ONE confident, cohesive pitch, not a before/after comparison or a changelog. Write 2 to 4 cohesive paragraphs — real prose — that read as a genuine, specific idea pitch: what it is, who it's for, why it matters, why it's positioned to make money. Never reference "feedback," "the previous version," or "changes" — just write the pitch for the idea as it now stands. Respond with ONLY the plain text of the description, no JSON, no headers, no markdown.`;
-
-  let fullDescription = '';
-  try {
-    fullDescription = await callMistralPlainText([
-      { role: 'system', content: fullDescriptionPrompt },
-      { role: 'user', content: JSON.stringify(core) }
-    ]);
-  } catch (err) {
-    console.error('[ThinkMaps] revised idea description generation failed:', err.message);
-  }
-
   return {
     ...core,
-    fullDescription,
     competitors: currentIdea?.competitors || [],
     solutions: currentIdea?.solutions || []
   };
@@ -5277,6 +5518,8 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
 // Mistral calls re-doing identical work.
 app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) => {
   try {
+    if(await requireProOrReject(req, res)) return;
+
     const { data: session } = await supabase
       .from('confirmation_sessions')
       .select('*')
@@ -5296,8 +5539,18 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
       return res.status(200).json({ deeperAnalysis: session.deeper_analysis });
     }
 
-    const marketIntel = await gatherDeeperMarketIntel(session.result);
-    const syntheticPanel = await generateSyntheticPanel(session.result, session.path_summary);
+    // marketIntel and syntheticPanel are genuinely independent of each
+    // other — neither's input depends on the other's output, both only
+    // ever take session.result/path_summary. Running them sequentially
+    // was paying for the SUM of both calls' latency for no real reason;
+    // Promise.all here means this step only ever takes as long as the
+    // slower of the two, not both added together. riskPlan still runs
+    // after, since it genuinely depends on what both of these found —
+    // that dependency is real and can't be removed the same way.
+    const [marketIntel, syntheticPanel] = await Promise.all([
+      gatherDeeperMarketIntel(session.result),
+      generateSyntheticPanel(session.result, session.path_summary)
+    ]);
     const riskPlan = await generateRiskPrioritizedPlan(session.result, marketIntel, syntheticPanel);
 
     const deeperAnalysis = { marketIntel, syntheticPanel, riskPlan };
@@ -5319,6 +5572,8 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
 // Mistral call redoing identical work.
 app.post('/confirm/:sessionId/deeper-fixes', requireAuth, async (req, res) => {
   try {
+    if(await requireProOrReject(req, res)) return;
+
     const { data: session } = await supabase
       .from('confirmation_sessions')
       .select('*')
@@ -5361,6 +5616,8 @@ app.post('/confirm/:sessionId/deeper-fixes', requireAuth, async (req, res) => {
 // original once a rewrite has superseded it.
 app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
   try {
+    if(await requireProOrReject(req, res)) return;
+
     const { regenerate } = req.body || {};
 
     const { data: session } = await supabase
@@ -5480,6 +5737,8 @@ app.get('/share/:token', async (req, res) => {
 // what to ask for, not that both should coexist.
 app.post('/confirm/:sessionId/revise', requireAuth, async (req, res) => {
   try {
+    if(await requireProOrReject(req, res)) return;
+
     const { feedback } = req.body;
     if(!feedback || !feedback.trim()){
       return res.status(400).json({ error: 'Feedback text is required.' });
