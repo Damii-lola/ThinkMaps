@@ -260,18 +260,18 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
-async function callMistral(messages){
-  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+
+const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
+
+async function mistralRequest(body){
+  const res = await fetch(MISTRAL_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
+      'Connection': 'keep-alive' // reuse TCP/TLS handshake across calls
     },
-    body: JSON.stringify({
-      model: 'mistral-small-2503',
-      messages,
-      response_format: { type: 'json_object' }
-    })
+    body: JSON.stringify(body)
   });
 
   if(!res.ok){
@@ -279,13 +279,21 @@ async function callMistral(messages){
     throw new Error(`Mistral API error (${res.status}): ${errText}`);
   }
 
-  const data = await res.json();
+  return res.json();
+}
+
+async function callMistral(messages, { maxTokens = 1200 } = {}){
+  const data = await mistralRequest({
+    model: 'mistral-small-latest',
+    messages,
+    response_format: { type: 'json_object' },
+    max_tokens: maxTokens,   // <-- caps generation length, cuts latency
+    temperature: 0.3         // <-- lower = faster convergence, more consistent JSON
+  });
+
   const content = data.choices?.[0]?.message?.content;
   if(!content) throw new Error('Mistral returned no content.');
 
-  // Defensive: models occasionally wrap "pure JSON" in ```json fences or add
-  // stray text around it even when told not to. Strip fences, then clip to
-  // the outermost {...} before parsing, instead of trusting it's clean.
   let cleaned = content.trim();
   if(cleaned.startsWith('```')){
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -303,27 +311,14 @@ async function callMistral(messages){
   }
 }
 
-// Same raw call as callMistral above, minus the JSON-mode forcing and
-// parsing — for the one spot (the final idea's fullDescription) that
-// needs real prose back, not a JSON object. Mirrors callMistral's own
-// fetch pattern exactly rather than introducing a different client/SDK
-// shape into the file.
-async function callMistralPlainText(messages){
-  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
-    },
-    body: JSON.stringify({ model: 'mistral-small-2503', messages })
+async function callMistralPlainText(messages, { maxTokens = 800 } = {}){
+  const data = await mistralRequest({
+    model: 'mistral-small-2503',
+    messages,
+    max_tokens: maxTokens,
+    temperature: 0.5
   });
 
-  if(!res.ok){
-    const errText = await res.text();
-    throw new Error(`Mistral API error (${res.status}): ${errText}`);
-  }
-
-  const data = await res.json();
   return (data.choices?.[0]?.message?.content || '').trim();
 }
 
