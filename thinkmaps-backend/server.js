@@ -236,29 +236,36 @@ app.get('/profile', requireAuth, async (req, res) => {
 });
 
 // =====================================================================
-// TEST-MODE ONLY — sets pro_status directly with NO real payment of any
-// kind. This exists purely so the Pro experience can be built and tested
-// end-to-end before a real payment provider (Selar, per the placeholder
-// link on the dashboard) is wired in. Any authenticated user can
-// currently make themselves Pro for free by hitting this endpoint —
-// that is fine for development, and would be a genuine, serious revenue
-// hole if this ever reached a real production deployment unguarded.
-// Before this app handles real money, this route needs to either be
-// deleted entirely or rebuilt to only set pro_status from a verified
-// payment-provider webhook, never from a direct client request.
+// TEST-MODE ONLY — TOGGLES pro_status directly with NO real payment of
+// any kind. Clicking "Go Pro" while already pro flips back to free, so
+// the same button/flow can be used to test both directions without a
+// separate downgrade path. This exists purely so the Pro experience can
+// be built and tested end-to-end before a real payment provider (Selar,
+// per the placeholder link on the dashboard) is wired in. Any
+// authenticated user can currently toggle themselves Pro for free by
+// hitting this endpoint — that is fine for development, and would be a
+// genuine, serious revenue hole if this ever reached a real production
+// deployment unguarded. Before this app handles real money, this route
+// needs to either be deleted entirely or rebuilt so pro_status only ever
+// turns on from a verified payment-provider webhook (and only ever turns
+// off from actual cancellation/non-renewal logic), never from a direct
+// toggle a client can call at will.
 // =====================================================================
 app.post('/profile/go-pro', requireAuth, async (req, res) => {
   try {
+    const pro = await isUserPro(req.user.id);
+    const next = !pro;
+
     const { error } = await supabase
       .from('profiles')
-      .update({ pro_status: true })
+      .update({ pro_status: next })
       .eq('id', req.user.id);
 
     if(error) throw error;
 
-    res.status(200).json({ pro_status: true });
+    res.status(200).json({ pro_status: next });
   } catch (err) {
-    res.status(500).json({ error: 'Could not upgrade to Pro.', detail: err.message });
+    res.status(500).json({ error: 'Could not update Pro status.', detail: err.message });
   }
 });
 
@@ -424,6 +431,171 @@ async function callMistralPlainText(messages){
 // pairs — this is the "path so far" context fed into every generation prompt.
 // Walks UP the tree from an OPTION to the root, via spawned_from_option_id —
 // this is the "path so far" context fed into every generation prompt.
+// Fetches an ENTIRE blueprint's groups/group_versions/options ONCE (3
+// necessarily-sequential queries — each needs the previous step's ids —
+// but each step is itself a single flat query, not one-per-tree-level),
+// with lookup Maps pre-built so every consumer below does pure O(1)
+// in-memory lookups afterward.
+//
+// This exists because activateOption — the function that runs on
+// literally every single node click — used to call THREE SEPARATE
+// ancestor-walking functions (buildPathContextFromOption,
+// getUsedBlockNamesAlongPath, findNicheRootOptionId), each independently
+// walking the SAME ancestor chain one tree level at a time, each level
+// costing 3-4 sequential Supabase round trips. At the 7-level depth cap,
+// that's potentially 60-70+ sequential network round trips for ONE
+// click, before the AI generation call even starts. Fetching the whole
+// blueprint flat ONCE and walking it in memory afterward turns all of
+// that into 3 round trips total, full stop, regardless of path depth —
+// this was already proven out for getAllExistingOptionLabelsInNiche
+// elsewhere in this file; this generalizes the same pattern so every
+// other ancestor-walking function in the hot path can share ONE fetch
+// instead of each quietly re-paying for its own.
+async function fetchBlueprintSnapshot(blueprintId){
+  const { data: groups } = await supabase
+    .from('groups')
+    .select('id, label, block_name, spawned_from_option_id, blueprint_id')
+    .eq('blueprint_id', blueprintId);
+
+  const groupIds = (groups || []).map(g => g.id);
+  const { data: groupVersions } = groupIds.length
+    ? await supabase.from('group_versions').select('id, group_id').in('group_id', groupIds)
+    : { data: [] };
+
+  const versionIds = (groupVersions || []).map(v => v.id);
+  const { data: options } = versionIds.length
+    ? await supabase.from('options').select('id, label, group_version_id').in('group_version_id', versionIds)
+    : { data: [] };
+
+  const optionsById = new Map((options || []).map(o => [o.id, o]));
+  const groupVersionsById = new Map((groupVersions || []).map(v => [v.id, v]));
+  const groupsById = new Map((groups || []).map(g => [g.id, g]));
+
+  const groupsBySpawnedFrom = new Map();
+  (groups || []).forEach(g => {
+    if(!g.spawned_from_option_id) return;
+    if(!groupsBySpawnedFrom.has(g.spawned_from_option_id)) groupsBySpawnedFrom.set(g.spawned_from_option_id, []);
+    groupsBySpawnedFrom.get(g.spawned_from_option_id).push(g);
+  });
+  const versionsByGroupId = new Map();
+  (groupVersions || []).forEach(v => {
+    if(!versionsByGroupId.has(v.group_id)) versionsByGroupId.set(v.group_id, []);
+    versionsByGroupId.get(v.group_id).push(v);
+  });
+  const optionsByVersionId = new Map();
+  (options || []).forEach(o => {
+    if(!optionsByVersionId.has(o.group_version_id)) optionsByVersionId.set(o.group_version_id, []);
+    optionsByVersionId.get(o.group_version_id).push(o);
+  });
+
+  return {
+    groups: groups || [], groupVersions: groupVersions || [], options: options || [],
+    optionsById, groupVersionsById, groupsById,
+    groupsBySpawnedFrom, versionsByGroupId, optionsByVersionId
+  };
+}
+
+// In-memory replacement for buildPathContextFromOption below — identical
+// output, walking the pre-fetched snapshot instead of issuing a fresh
+// 3-query round trip at every level of the ancestor chain.
+function walkPathContextFromSnapshot(optionId, snapshot){
+  const path = [];
+  let currentOptionId = optionId;
+
+  while(currentOptionId){
+    const option = snapshot.optionsById.get(currentOptionId);
+    if(!option) break;
+    const version = snapshot.groupVersionsById.get(option.group_version_id);
+    if(!version) break;
+    const group = snapshot.groupsById.get(version.group_id);
+    if(!group) break;
+
+    path.unshift({ groupLabel: group.label, optionLabel: option.label });
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  return path;
+}
+
+// In-memory replacement for getUsedBlockNamesAlongPath below.
+function walkUsedBlockNamesFromSnapshot(optionId, snapshot){
+  const usedBlocks = [];
+  let currentOptionId = optionId;
+
+  while(currentOptionId){
+    const option = snapshot.optionsById.get(currentOptionId);
+    if(!option) break;
+    const version = snapshot.groupVersionsById.get(option.group_version_id);
+    if(!version) break;
+    const group = snapshot.groupsById.get(version.group_id);
+    if(!group) break;
+
+    if(group.spawned_from_option_id){
+      const batchGroups = snapshot.groupsBySpawnedFrom.get(group.spawned_from_option_id) || [];
+      batchGroups.forEach(g => { if(g.block_name) usedBlocks.push(g.block_name); });
+    }
+
+    currentOptionId = group.spawned_from_option_id || null;
+  }
+
+  return usedBlocks;
+}
+
+// In-memory replacement for findNicheRootOptionId below.
+function walkNicheRootOptionIdFromSnapshot(optionId, snapshot){
+  let currentOptionId = optionId;
+
+  while(true){
+    const option = snapshot.optionsById.get(currentOptionId);
+    if(!option) return currentOptionId;
+    const version = snapshot.groupVersionsById.get(option.group_version_id);
+    if(!version) return currentOptionId;
+    const group = snapshot.groupsById.get(version.group_id);
+    if(!group) return currentOptionId;
+    if(!group.spawned_from_option_id) return currentOptionId;
+    currentOptionId = group.spawned_from_option_id;
+  }
+}
+
+// In-memory replacement for getOptionGroupLabelPair below.
+function lookupOptionGroupLabelPairFromSnapshot(optionId, snapshot){
+  const option = snapshot.optionsById.get(optionId);
+  if(!option) return null;
+  const version = snapshot.groupVersionsById.get(option.group_version_id);
+  if(!version) return null;
+  const group = snapshot.groupsById.get(version.group_id);
+  if(!group) return null;
+  return { groupLabel: group.label, optionLabel: option.label };
+}
+
+// In-memory replacement for the BFS in getAllExistingOptionLabelsInNiche
+// below — same traversal, same recency cap, against the shared snapshot
+// instead of a separately, redundantly fetched copy of the same data.
+function walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot){
+  const labels = [];
+  let frontierOptionIds = [nicheOptionId];
+
+  while(frontierOptionIds.length > 0){
+    const nextFrontier = [];
+    for(const optId of frontierOptionIds){
+      const childGroups = snapshot.groupsBySpawnedFrom.get(optId) || [];
+      for(const group of childGroups){
+        const childVersions = snapshot.versionsByGroupId.get(group.id) || [];
+        for(const version of childVersions){
+          const childOptions = snapshot.optionsByVersionId.get(version.id) || [];
+          for(const opt of childOptions){
+            if(opt.label) labels.push(opt.label);
+            nextFrontier.push(opt.id);
+          }
+        }
+      }
+    }
+    frontierOptionIds = nextFrontier;
+  }
+
+  return labels.slice(-60); // same cap as getAllExistingOptionLabelsInNiche below
+}
+
 async function buildPathContextFromOption(optionId){
   const path = [];
   let currentOptionId = optionId;
@@ -1283,18 +1455,29 @@ async function activateOption(optionId, combinedOptionIds = []){
 
   await supabase.from('options').update({ is_selected: true }).in('id', allCombinedIds);
 
-  let pathContext = await buildPathContextFromOption(optionId);
+  // Fetched ONCE, right here, and shared by everything below that used
+  // to be a separate ancestor-walking function each paying its own
+  // per-tree-level round trips — see fetchBlueprintSnapshot's own
+  // comment above for the full reasoning. blueprintId itself only needs
+  // one small lookup (group_id -> blueprint_id), genuinely unavoidable
+  // since that's the one piece of information this function doesn't
+  // have yet at this point.
+  const blueprintId = await getBlueprintIdForGroup(version.group_id);
+  const snapshot = await fetchBlueprintSnapshot(blueprintId);
+
+  let pathContext = walkPathContextFromSnapshot(optionId, snapshot);
 
   // Merge in the OTHER combined options' own {groupLabel, optionLabel}
-  // pairs by replacing the final entry (which buildPathContextFromOption
+  // pairs by replacing the final entry (which walkPathContextFromSnapshot
   // already built for the primary alone) with one that names every
   // combined choice together — so the model generating what comes next
   // sees the full combination, not just whichever one happened to be the
   // primary. Every combined option shares the primary's exact parent (the
   // validation layer in the route enforces this), so no separate ancestor
-  // walk is needed for them — just their own one-level label lookup.
+  // walk is needed for them — just their own one-level label lookup,
+  // now an in-memory Map read instead of its own round trip too.
   if(combinedOptionIds.length > 0 && pathContext.length > 0){
-    const extraPairs = await Promise.all(combinedOptionIds.map(getOptionGroupLabelPair));
+    const extraPairs = combinedOptionIds.map(id => lookupOptionGroupLabelPairFromSnapshot(id, snapshot));
     const allPairs = [pathContext[pathContext.length - 1], ...extraPairs.filter(Boolean)];
     const mergedOptionLabel = allPairs.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' — combined with — ');
     pathContext = [
@@ -1302,8 +1485,6 @@ async function activateOption(optionId, combinedOptionIds = []){
       { groupLabel: 'Combined choice', optionLabel: mergedOptionLabel }
     ];
   }
-
-  const blueprintId = await getBlueprintIdForGroup(version.group_id);
 
   let generated;
   if(pathContext.length >= PATH_DEPTH_CAP){
@@ -1320,7 +1501,7 @@ async function activateOption(optionId, combinedOptionIds = []){
       }]
     };
   } else {
-    const usedBlocks = await getUsedBlockNamesAlongPath(optionId);
+    const usedBlocks = walkUsedBlockNamesFromSnapshot(optionId, snapshot);
     const ideaCheckpointAlreadyShown = usedBlocks.includes(IDEA_CHECKPOINT_BLOCK_NAME);
     const remainingBeforeCheckpoint = BLOCKS_BEFORE_IDEA_CHECKPOINT.filter(b => !usedBlocks.includes(b));
 
@@ -1329,16 +1510,17 @@ async function activateOption(optionId, combinedOptionIds = []){
     // said elsewhere in THIS niche (any fork, not just this path), so
     // content stops converging on the same handful of phrasings every
     // time a narrow niche gets explored in more than one direction.
-    const nicheOptionId = await findNicheRootOptionId(optionId);
+    const nicheOptionId = walkNicheRootOptionIdFromSnapshot(optionId, snapshot);
 
-    // nicheTopics and existingLabels are completely independent of each
-    // other — both only depend on nicheOptionId — so they run in
-    // parallel instead of one waiting on the other. This and the
-    // getAllExistingOptionLabelsInNiche rewrite above are the two
-    // biggest single levers on per-activation latency in this file.
+    // nicheTopics still needs its own real fetch (DB read for the niche
+    // option's own label, then matchNicheToTemplate) — existingLabels is
+    // now a pure in-memory walk against the shared snapshot, no longer a
+    // separate redundant fetch of the same blueprint's data. Still run
+    // together via Promise.all since nicheTopics' own work is genuinely
+    // independent of it.
     const [nicheTopics, existingLabels] = await Promise.all([
       getNicheTopicsForGrounding(nicheOptionId),
-      getAllExistingOptionLabelsInNiche(nicheOptionId)
+      Promise.resolve(walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot))
     ]);
 
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
@@ -1522,8 +1704,8 @@ async function activateOption(optionId, combinedOptionIds = []){
     // specific block before giving up.
     if(sanitizedOptions.length === 0){
       try {
-        const nicheOptionId = await findNicheRootOptionId(optionId);
-        const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
+        const nicheOptionId = walkNicheRootOptionIdFromSnapshot(optionId, snapshot);
+        const existingLabels = walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot);
         const retryGenerated = await generateGroupOptions(pathContext, { blockName: spec.blockName, existingLabels });
         sanitizedOptions = sanitizeOptionLabels(retryGenerated.options);
       } catch (retryErr) {
