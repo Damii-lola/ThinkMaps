@@ -1,27 +1,23 @@
 // ---------- feedback.js ----------
 // Shared across every ThinkMaps page via one <script> tag — adds a small
-// "pop" on click, a soft synthesized click tick, and a very quiet
-// optional background ambiance, plus a floating mute toggle it injects
-// itself. Nothing here touches any existing click handler: everything is
-// event delegation on document, layered on top, never replacing what's
-// already wired per page.
+// "pop" on click and a soft synthesized click tick, plus a floating mute
+// toggle it injects itself. Nothing here touches any existing click
+// handler: everything is event delegation on document, layered on top,
+// never replacing what's already wired per page.
 //
-// Sounds are SYNTHESIZED with the Web Audio API, not audio files — there
-// was no real produced audio to ship here, and a few oscillators are
-// enough for a believable soft "tick" and a barely-there ambient pad.
-// If a real file ever gets added at ./bg-ambient.mp3, this automatically
-// prefers it over the synthesized pad — see startAmbiance() below.
+// Background ambiance was removed entirely (used to live here as an
+// optional quiet looping pad/track) — this file now only ever produces
+// the one transient click sound, never anything continuous or looping.
+//
+// The click sound is SYNTHESIZED with the Web Audio API, not an audio
+// file — there was no real produced audio to ship here, and a couple of
+// oscillators are enough for a believable, tactile "tick."
 
 (function(){
-  const SOUND_PREF_KEY = 'thinkmaps_sound_enabled_v2'; // bumped from _v1 — anyone who toggled
-                                                          // things while the old bug was live
-                                                          // gets a clean default instead of
-                                                          // inheriting whatever got left behind
+  const SOUND_PREF_KEY = 'thinkmaps_sound_enabled_v2';
   const CLICKABLE_SELECTOR = '.btn, .mini-btn, .canvas-option.root-clickable, .opt-dot, [data-action]';
 
   let audioCtx = null;
-  let ambianceNodes = null;       // { masterGain, oscillators: [...], lfo } once started
-  let ambianceAudioEl = null;     // set instead of ambianceNodes if a real file loads
   let soundEnabled = readSoundPref();
 
   function readSoundPref(){
@@ -44,9 +40,12 @@
   // though fast local testing doesn't naturally surface it), that meant
   // scheduling a sound against a context still reporting 'suspended' and
   // a clock stuck at 0 — which doesn't error, it just silently never
-  // produces audible sound. Every sound-producing function below goes
-  // through this instead, which actually waits for the resume promise to
-  // resolve before letting anything get scheduled.
+  // produces audible sound. playClickTick goes through this instead,
+  // which actually waits for the resume promise to resolve before
+  // letting anything get scheduled. Because every click is itself a
+  // genuine user gesture, this needs no separate "unlock ahead of time"
+  // step the way a background track would have needed — there's no
+  // longer one of those anywhere in this file.
   function getAudioContext(){
     if(!audioCtx){
       const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -66,15 +65,19 @@
     }
   }
 
-  // A short, soft downward "tick" — not a beep. Quick pitch drop plus a
-  // fast exponential fade is what keeps a synthesized click from sounding
-  // like an alarm; the same shape under a hundred different UI sound
-  // libraries, just generated here instead of shipped as a file.
+  // A short, tactile "tick" — not a beep. Two layered oscillators: a
+  // quick pitch-dropping sine for the body of the click (the original
+  // shape), plus a very brief, much quieter higher-pitched tick layered
+  // on top of just the first ~20ms for a sharper, more physical "press"
+  // character right at the onset — the difference between a soft blip
+  // and something that reads as an actual button click. Both fully
+  // decay well under a tenth of a second.
   function playClickTick(){
     if(!soundEnabled) return; // checked here too, not just by callers — this is the one function that actually makes sound, so it's the right place for the final guard
     ensureAudioContextRunning((ctx) => {
       const now = ctx.currentTime;
 
+      // Body: the original soft downward sweep.
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
@@ -89,87 +92,24 @@
 
       osc.start(now);
       osc.stop(now + 0.09);
+
+      // Onset layer: a brief, quiet higher tick right at the start —
+      // sharpens the attack into something more like a physical press
+      // without making the overall sound any louder or longer.
+      const tickOsc = ctx.createOscillator();
+      const tickGain = ctx.createGain();
+      tickOsc.connect(tickGain);
+      tickGain.connect(ctx.destination);
+
+      tickOsc.type = 'triangle';
+      tickOsc.frequency.setValueAtTime(1400, now);
+
+      tickGain.gain.setValueAtTime(0.05, now);
+      tickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.018);
+
+      tickOsc.start(now);
+      tickOsc.stop(now + 0.02);
     });
-  }
-
-  // Tries a real ambient track first (drop one at ./bg-ambient.mp3 to
-  // upgrade from the synthesized pad below with zero code changes), and
-  // only falls back to synthesis if that file doesn't exist or fails to
-  // load. Either way this only ever runs from inside the toggle button's
-  // own click handler, which is the user gesture that makes starting
-  // audio here permitted in the first place.
-  function startAmbiance(){
-    if(ambianceNodes || ambianceAudioEl) return; // already running, just needs unmuting — see setAmbianceMuted
-
-    const probe = new Audio('./bg-ambient.mp3');
-    let usedFallback = false;
-
-    const useFallback = () => {
-      if(usedFallback) return;
-      usedFallback = true;
-      startSynthesizedPad();
-    };
-
-    probe.addEventListener('error', useFallback, { once: true });
-    probe.addEventListener('canplaythrough', () => {
-      if(usedFallback) return; // fallback already kicked in while this was loading
-      probe.loop = true;
-      probe.volume = soundEnabled ? 0.18 : 0; // re-checked here, not assumed — soundEnabled may have changed while this file was still loading
-      probe.play().catch(useFallback);
-      ambianceAudioEl = probe;
-    }, { once: true });
-
-    // If the file just doesn't exist, most browsers fire 'error' quickly,
-    // but to be safe this doesn't wait forever before falling back.
-    setTimeout(() => { if(!ambianceAudioEl && !usedFallback) useFallback(); }, 1500);
-  }
-
-  // Two soft sine tones a fifth apart, very quiet, with a slow LFO
-  // breathing the volume up and down over roughly a 12-second cycle —
-  // deliberately closer to "barely-there room tone" than music, since
-  // anything busier than that gets tiring fast on a loop.
-  function startSynthesizedPad(){
-    ensureAudioContextRunning((ctx) => {
-      const masterGain = ctx.createGain();
-      masterGain.gain.value = soundEnabled ? 1 : 0;
-      masterGain.connect(ctx.destination);
-
-      const tone = (freq, gainValue) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = freq;
-        gain.gain.value = gainValue;
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start();
-        return osc;
-      };
-
-      const osc1 = tone(220, 0.025);  // A3
-      const osc2 = tone(329.63, 0.018); // E4, a fifth above
-
-      const lfo = ctx.createOscillator();
-      lfo.type = 'sine';
-      lfo.frequency.value = 1 / 12; // one breath roughly every 12 seconds
-      const lfoGain = ctx.createGain();
-      lfoGain.gain.value = 0.5;
-      lfo.connect(lfoGain);
-      lfoGain.connect(masterGain.gain);
-      lfo.start();
-
-      ambianceNodes = { masterGain, oscillators: [osc1, osc2, lfo] };
-    });
-  }
-
-  function setAmbianceMuted(muted){
-    if(ambianceAudioEl){
-      ambianceAudioEl.volume = muted ? 0 : 0.18;
-    }
-    if(ambianceNodes){
-      const ctx = getAudioContext();
-      if(ctx) ambianceNodes.masterGain.gain.setValueAtTime(muted ? 0 : 1, ctx.currentTime);
-    }
   }
 
   function triggerPopEffect(el){
@@ -193,7 +133,7 @@
     const btn = document.createElement('button');
     btn.className = 'sound-toggle-btn' + (soundEnabled ? ' sound-on' : '');
     btn.type = 'button';
-    btn.setAttribute('aria-label', soundEnabled ? 'Mute sound' : 'Unmute sound');
+    btn.setAttribute('aria-label', soundEnabled ? 'Mute click sound' : 'Unmute click sound');
     btn.textContent = soundEnabled ? '🔊' : '🔈';
 
     btn.addEventListener('click', () => {
@@ -201,19 +141,12 @@
       soundEnabled = !soundEnabled;
       writeSoundPref(soundEnabled);
       btn.classList.toggle('sound-on', soundEnabled);
-      btn.setAttribute('aria-label', soundEnabled ? 'Mute sound' : 'Unmute sound');
+      btn.setAttribute('aria-label', soundEnabled ? 'Mute click sound' : 'Unmute click sound');
       btn.textContent = soundEnabled ? '🔊' : '🔈';
 
-      // This click is itself the user gesture audio needs — safe to
-      // create the context and kick off ambiance right here.
-      getAudioContext();
-      if(soundEnabled){
-        playClickTick();
-        startAmbiance();
-        setAmbianceMuted(false);
-      } else {
-        setAmbianceMuted(true);
-      }
+      // This click is itself the user gesture audio needs — play a
+      // confirmation tick right away when turning sound back on.
+      if(soundEnabled) playClickTick();
     });
 
     document.body.appendChild(btn);
@@ -235,22 +168,6 @@
   function init(){
     document.addEventListener('click', handleDelegatedClick, true);
     buildToggleButton();
-
-    // Deliberately NOT scoped to CLICKABLE_SELECTOR — this just needs to
-    // catch the very first interaction with the page, whatever it is, to
-    // satisfy the user-gesture requirement audio needs as early as
-    // possible. Scoping it to specific elements only delays things if the
-    // person's first click happens to land somewhere outside that list.
-    function unlockOnFirstInteraction(){
-      if(!soundEnabled) return;
-      ensureAudioContextRunning(() => startAmbiance());
-      document.removeEventListener('click', unlockOnFirstInteraction, true);
-      document.removeEventListener('touchstart', unlockOnFirstInteraction, true);
-      document.removeEventListener('mousedown', unlockOnFirstInteraction, true);
-    }
-    document.addEventListener('click', unlockOnFirstInteraction, true);
-    document.addEventListener('touchstart', unlockOnFirstInteraction, true);
-    document.addEventListener('mousedown', unlockOnFirstInteraction, true);
   }
 
   if(document.readyState === 'loading'){
