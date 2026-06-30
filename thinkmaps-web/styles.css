@@ -702,6 +702,10 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 #deeperFixesSection > button,
 #buildBriefSection > button,
 #reviseIdeaSection > button,
+#deeperAnalysisSection > .pro-gate,
+#deeperFixesSection > .pro-gate,
+#buildBriefSection > .pro-gate,
+#reviseIdeaSection > .pro-gate,
 .confirm-result > a.btn-primary,
 .ideate-result > a.btn-primary{
   display:table;
@@ -709,6 +713,16 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 .confirm-result h2{ font-size:26px; margin:10px 0 8px; }
 .confirm-section-title{ font-size:16px; margin:28px 0 14px; padding-top:20px; border-top:1px solid var(--line); }
+
+/* ---------- Pro-gated action buttons (renderProGatedButton) ---------- */
+.pro-gate{ display:flex; align-items:center; gap:10px; }
+.pro-gate button:disabled{ opacity:.55; cursor:not-allowed; }
+.pro-gate-badge{
+  font-family:var(--font-mono); font-size:10px; font-weight:700; letter-spacing:.06em;
+  color:var(--accent-deep); background:var(--accent-soft); padding:3px 7px; border-radius:5px;
+}
+.pro-gate-link{ font-size:13px; color:var(--accent-deep); font-weight:500; white-space:nowrap; }
+.pro-gate-link:hover{ text-decoration:underline; }
 
 .competitors-list{ display:flex; flex-direction:column; gap:16px; margin-bottom:8px; }
 .competitor-block{ background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px 18px; }
@@ -904,3 +918,13 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 @media (max-width:640px){
   .sound-toggle-btn{ bottom:14px; left:14px; width:38px; height:38px; font-size:15px; }
 }
+
+/* ---------- App-wide toast (showToast in script.js) ---------- */
+.app-toast{
+  position:fixed; left:50%; bottom:32px; transform:translate(-50%, 12px);
+  background:var(--ink); color:var(--bg); font-size:13.5px; font-weight:500;
+  padding:11px 20px; border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,0.18);
+  opacity:0; transition:opacity .2s ease, transform .2s ease; z-index:1000;
+  max-width:80vw; text-align:center;
+}
+.app-toast.app-toast-visible{ opacity:1; transform:translate(-50%, 0); }
