@@ -473,16 +473,42 @@ function renderProBanner(bannerEl, profile){
   if(!bannerEl) return;
 
   if(profile.pro_status){
-    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no 24-hour lock.`;
+    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no edit lock, never deleted.`;
     bannerEl.classList.add('pro');
   } else {
-    // Selar checkout isn't wired in yet — placeholder link until that phase.
     bannerEl.innerHTML = `
       <span class="eyebrow">Free plan</span>
-      One blueprint, 24 hours, then read-only.
-      <a href="index.html#pricing" class="btn btn-ghost">Go Pro</a>
+      One blueprint, 30 minutes to edit, then read-only — deleted after 3 days.
+      <a href="index.html#pricing" class="btn btn-ghost">See Pro</a>
+      <button type="button" id="goProTestBtn" class="btn btn-primary">Go Pro</button>
     `;
     bannerEl.classList.remove('pro');
+
+    // TEST MODE — see the big comment on POST /profile/go-pro in
+    // server.js. This sets pro_status directly with no real payment, so
+    // the Pro experience can be built and tested end-to-end before a
+    // real provider is wired in. Must not ship to real users as-is.
+    const goProBtn = document.getElementById('goProTestBtn');
+    if(goProBtn){
+      goProBtn.addEventListener('click', async () => {
+        goProBtn.disabled = true;
+        goProBtn.textContent = 'Upgrading…';
+        try {
+          const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
+          if(res && res.ok){
+            await loadDashboard();
+          } else {
+            goProBtn.disabled = false;
+            goProBtn.textContent = 'Go Pro';
+            showToast('Could not upgrade — try again.');
+          }
+        } catch (err) {
+          goProBtn.disabled = false;
+          goProBtn.textContent = 'Go Pro';
+          showToast('Could not reach the server — try again.');
+        }
+      });
+    }
   }
 }
 
@@ -503,9 +529,16 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
 
   const cards = blueprints.map(bp => {
     const createdLabel = new Date(bp.created_at).toLocaleDateString();
-    const statusLabel = bp.isLocked
-      ? 'Locked — read-only'
-      : (bp.hoursRemaining != null ? `${bp.hoursRemaining} hour(s) left on free tier` : 'Active');
+    let statusLabel;
+    if(bp.isLocked){
+      statusLabel = bp.daysUntilDeletion != null
+        ? `Locked — read-only · deletes in ${bp.daysUntilDeletion} day(s)`
+        : 'Locked — read-only';
+    } else if(bp.minutesRemaining != null){
+      statusLabel = `${bp.minutesRemaining} minute(s) left to edit on free tier`;
+    } else {
+      statusLabel = 'Active';
+    }
 
     return `
       <div class="blueprint-card ${bp.isLocked ? 'locked' : ''}">
@@ -656,6 +689,10 @@ function getGroupOptionsArray(groupId){
 const canvasState = {
   blueprintId: null,
   isLocked: false,
+  // Whether the OWNER of this blueprint is pro — gates pro-only canvas
+  // features (currently: ctrl+click multi-select combining). Populated
+  // from the graph response (see initAppPage), not assumed.
+  isPro: false,
   groups: [],
   groupVersions: [],
   options: [],
@@ -698,6 +735,53 @@ function escapeHtml(str){
   const div = document.createElement('div');
   div.textContent = str || '';
   return div.innerHTML;
+}
+
+// Minimal, reusable toast for brief feedback moments — currently used
+// for the pro-wall message when a free user tries to combine, but
+// written generically enough for any future "this didn't happen, here's
+// why" moment. Auto-removes itself; only one shown at a time (a second
+// call replaces whatever's currently showing rather than stacking).
+function showToast(message){
+  let el = document.getElementById('appToast');
+  if(el) el.remove();
+
+  el = document.createElement('div');
+  el.id = 'appToast';
+  el.className = 'app-toast';
+  el.textContent = message;
+  document.body.appendChild(el);
+
+  requestAnimationFrame(() => el.classList.add('app-toast-visible'));
+  setTimeout(() => {
+    el.classList.remove('app-toast-visible');
+    setTimeout(() => el.remove(), 250);
+  }, 2600);
+}
+
+// One shared renderer for every pro-gated action button on the confirm
+// result page (deeper analysis, fixes, build brief, suggest changes) —
+// active and clickable for pro users, a clearly-labeled locked state
+// with an upgrade link for everyone else. Written once here rather than
+// four times slightly differently, so the visual treatment of "this is
+// a Pro feature" stays consistent everywhere it appears.
+function renderProGatedButton(container, label, onActivate){
+  if(!container) return;
+
+  if(confirmState.isPro){
+    container.innerHTML = `<button class="btn btn-secondary" id="proGateBtn" type="button">${escapeHtml(label)}</button>`;
+    const btn = document.getElementById('proGateBtn');
+    if(btn) btn.addEventListener('click', onActivate);
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="pro-gate">
+      <button class="btn btn-secondary" type="button" disabled>${escapeHtml(label)}</button>
+      <span class="pro-gate-badge">PRO</span>
+      <a href="index.html#pricing" class="pro-gate-link">Upgrade to unlock</a>
+    </div>
+  `;
 }
 
 // Every canvas interaction (pan, group drag, line drag) needs a single
@@ -754,6 +838,7 @@ async function loadGraph(){
 
     const data = await res.json();
     canvasState.isLocked = data.blueprint.isLocked;
+    canvasState.isPro = !!data.blueprint.isPro;
     canvasState.groups = data.groups;
     canvasState.groupVersions = data.groupVersions;
     canvasState.options = data.options;
@@ -1346,6 +1431,11 @@ function renderGroups(visible, infoByGroupId){
 // enforced here too, not just server-side, so a doomed combination never
 // even gets as far as a drag attempt.
 function toggleMultiSelectStage(optionId, groupId){
+  if(!canvasState.isPro){
+    showToast('Combining multiple selections is a Pro feature.');
+    return;
+  }
+
   const group = canvasState.groups.find(g => g.id === groupId);
   if(!group || !group.spawned_from_option_id) return;
 
@@ -2461,6 +2551,7 @@ const confirmState = {
   blueprintId: null,
   sourceOptionId: null,
   sessionId: null,
+  isPro: false,
   ideaDraft: null,
   deeperAnalysis: null,
   deeperAnalysisRendered: false,
@@ -2490,6 +2581,19 @@ async function initConfirmPage(){
   }
   confirmState.blueprintId = blueprintId;
   confirmState.sourceOptionId = sourceOptionId;
+
+  // Fetched in parallel with confirm/start below, not before it — these
+  // two requests are independent of each other, so there's no reason to
+  // pay for them sequentially. Stored on confirmState itself (not a
+  // local variable) so renderConfirmResult — which can fire from this
+  // function OR from submitConfirmAnswer much later in the flow — can
+  // reliably await it regardless of which call site reaches it first. A
+  // failure here just leaves isPro at its false default rather than
+  // blocking the actual confirmation flow.
+  confirmState._profilePromise = authedFetch('/profile')
+    .then(res => res && res.ok ? res.json() : null)
+    .then(body => { confirmState.isPro = !!body?.pro_status; })
+    .catch(() => {});
 
   try {
     const res = await authedFetch(`/blueprints/${blueprintId}/confirm/start`, {
@@ -2706,7 +2810,13 @@ async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQ
   }
 }
 
-function renderConfirmResult(result){
+async function renderConfirmResult(result){
+  // Guarantees isPro is genuinely known before anything below decides
+  // whether to render a tool as active or pro-gated — regardless of
+  // which of the two call sites (initConfirmPage's main flow, or
+  // submitConfirmAnswer much later in the question flow) got here first.
+  await (confirmState._profilePromise || Promise.resolve());
+
   const cardEl = document.getElementById('confirmCard');
   const researchingEl = document.getElementById('confirmResearching');
   const fillEl = document.getElementById('confirmProgressFill');
@@ -2776,11 +2886,7 @@ function renderConfirmResult(result){
     if(confirmState.deeperAnalysis){
       renderDeeperAnalysis(confirmState.deeperAnalysis);
     } else {
-      deeperEl.innerHTML = `
-        <button class="btn btn-secondary" id="runDeeperAnalysisBtn" type="button">Run Market Intel &amp; Risk Analysis</button>
-      `;
-      const btn = document.getElementById('runDeeperAnalysisBtn');
-      if(btn) btn.addEventListener('click', runDeeperAnalysis);
+      renderProGatedButton(deeperEl, 'Run Market Intel & Risk Analysis', runDeeperAnalysis);
     }
   }
 
@@ -2939,9 +3045,7 @@ function renderDeeperFixesSection(){
     return;
   }
 
-  el.innerHTML = `<button class="btn btn-secondary" id="runDeeperFixesBtn" type="button">Find Fixes for These Risks</button>`;
-  const btn = document.getElementById('runDeeperFixesBtn');
-  if(btn) btn.addEventListener('click', runDeeperFixes);
+  renderProGatedButton(el, 'Find Fixes for These Risks', runDeeperFixes);
 }
 
 async function runDeeperFixes(){
@@ -3011,9 +3115,7 @@ function renderReviseSection(){
     return;
   }
 
-  el.innerHTML = `<button class="btn btn-ghost" id="openReviseFormBtn" type="button">Suggest Changes</button>`;
-  const btn = document.getElementById('openReviseFormBtn');
-  if(btn) btn.addEventListener('click', renderReviseForm);
+  renderProGatedButton(el, 'Suggest Changes', renderReviseForm);
 }
 
 function renderReviseForm(){
@@ -3179,9 +3281,7 @@ function renderBuildBriefSection(){
     return;
   }
 
-  el.innerHTML = `<button class="btn btn-secondary" id="runBuildBriefBtn" type="button">Generate Build Brief</button>`;
-  const btn = document.getElementById('runBuildBriefBtn');
-  if(btn) btn.addEventListener('click', () => runBuildBrief(false));
+  renderProGatedButton(el, 'Generate Build Brief', () => runBuildBrief(false));
 }
 
 async function runBuildBrief(regenerate = false){
