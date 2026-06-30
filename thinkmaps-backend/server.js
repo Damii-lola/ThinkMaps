@@ -260,28 +260,17 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
-
-const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
-
-// ----------------------------------------------------------
-// JSON-mode call (used for structured node/group generation)
-// Not streamed — partial JSON can't be safely parsed or shown,
-// so we just tighten max_tokens/temperature instead.
-// ----------------------------------------------------------
-async function callMistral(messages, { maxTokens = 600 } = {}){
-  const res = await fetch(MISTRAL_ENDPOINT, {
+async function callMistral(messages){
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
-      'Connection': 'keep-alive'
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
       model: 'mistral-small-latest',
       messages,
-      response_format: { type: 'json_object' },
-      max_tokens: maxTokens,
-      temperature: 0.3
+      response_format: { type: 'json_object' }
     })
   });
 
@@ -294,6 +283,9 @@ async function callMistral(messages, { maxTokens = 600 } = {}){
   const content = data.choices?.[0]?.message?.content;
   if(!content) throw new Error('Mistral returned no content.');
 
+  // Defensive: models occasionally wrap "pure JSON" in ```json fences or add
+  // stray text around it even when told not to. Strip fences, then clip to
+  // the outermost {...} before parsing, instead of trusting it's clean.
   let cleaned = content.trim();
   if(cleaned.startsWith('```')){
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -311,26 +303,19 @@ async function callMistral(messages, { maxTokens = 600 } = {}){
   }
 }
 
-// ----------------------------------------------------------
-// Plain-text call (used for fullDescription prose).
-// Streamed — caller passes an onChunk callback to render text
-// as it arrives instead of waiting for the full response.
-// ----------------------------------------------------------
-async function callMistralPlainText(messages, { maxTokens = 300, onChunk } = {}){
-  const res = await fetch(MISTRAL_ENDPOINT, {
+// Same raw call as callMistral above, minus the JSON-mode forcing and
+// parsing — for the one spot (the final idea's fullDescription) that
+// needs real prose back, not a JSON object. Mirrors callMistral's own
+// fetch pattern exactly rather than introducing a different client/SDK
+// shape into the file.
+async function callMistralPlainText(messages){
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,
-      'Connection': 'keep-alive'
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
-    body: JSON.stringify({
-      model: 'mistral-small-2503',
-      messages,
-      max_tokens: maxTokens,
-      temperature: 0.5,
-      stream: true
-    })
+    body: JSON.stringify({ model: 'mistral-small-latest', messages })
   });
 
   if(!res.ok){
@@ -338,51 +323,10 @@ async function callMistralPlainText(messages, { maxTokens = 300, onChunk } = {})
     throw new Error(`Mistral API error (${res.status}): ${errText}`);
   }
 
-  // No streaming support (e.g. older runtime) — fall back to one-shot read.
-  if(!res.body || !res.body.getReader){
-    const data = await res.json();
-    const full = (data.choices?.[0]?.message?.content || '').trim();
-    if(onChunk) onChunk(full);
-    return full;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let full = '';
-  let buffer = '';
-
-  while(true){
-    const { done, value } = await reader.read();
-    if(done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop(); // keep incomplete line for next chunk
-
-    for(const line of lines){
-      const trimmed = line.trim();
-      if(!trimmed.startsWith('data:')) continue;
-
-      const payload = trimmed.slice(5).trim();
-      if(payload === '[DONE]') continue;
-
-      try {
-        const json = JSON.parse(payload);
-        const delta = json.choices?.[0]?.delta?.content;
-        if(delta){
-          full += delta;
-          if(onChunk) onChunk(delta, full); // emit each chunk + running total
-        }
-      } catch {
-        // ignore malformed SSE fragments (rare, mid-chunk splits)
-      }
-    }
-  }
-
-  return full.trim();
+  const data = await res.json();
+  return (data.choices?.[0]?.message?.content || '').trim();
 }
 
-module.exports = { callMistral, callMistralPlainText };
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
 // pairs — this is the "path so far" context fed into every generation prompt.
 // Walks UP the tree from an OPTION to the root, via spawned_from_option_id —
@@ -4587,6 +4531,45 @@ async function generateConfirmationQuestion(ideaDraft, pathSummary, answersSoFar
   ]);
 }
 
+// Used by the "Let AI Answer" button — the person decided this once,
+// specific question isn't worth their own time, and wants a genuine pick
+// made on their behalf rather than a generic non-answer. Picks from the
+// SAME options already offered rather than inventing a new one, since
+// those options were already crafted to be genuinely distinct, sensible
+// directions for this exact question.
+async function pickBestConfirmationAnswer(question, ideaDraft, pathSummary){
+  const options = question?.options || [];
+
+  const systemPrompt = `You are answering a confirmation question on behalf of the person building this idea — they've specifically asked you to decide this one for them instead of choosing themselves. Pick whichever option is the most sensible, defensible choice for this exact idea and path — make a genuine pick, not a safe non-answer (though if "this all sounds right, don't change anything" really is the most defensible choice given everything below, that's a legitimate pick too, not just a default).
+
+Idea so far: ${JSON.stringify(ideaDraft)}
+Path that led here: ${pathSummary}
+
+Question: ${question.question}
+Options:
+${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}
+
+Respond ONLY with valid JSON: {"selected": string} — the string copied EXACTLY, character for character, from one of the options listed above.`;
+
+  let result;
+  try {
+    result = await callMistral([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Pick the best option now.' }
+    ]);
+  } catch (err) {
+    return options[0] || '';
+  }
+
+  // Defensive: if the model paraphrased instead of copying verbatim,
+  // match case-insensitively before falling all the way back — passing
+  // through unmatched text would mean the frontend has nothing to
+  // visually highlight as "the one that got picked."
+  if(options.includes(result.selected)) return result.selected;
+  const looseMatch = options.find(o => o.toLowerCase() === (result.selected || '').toLowerCase());
+  return looseMatch || options[0] || '';
+}
+
 // Real, live web search via Serper.dev — entirely optional, and free to
 // actually turn on: 2,500 free queries, no credit card. (This used to call
 // Brave's Search API, which had a real free tier when this was first
@@ -4843,17 +4826,13 @@ Path that led here: ${pathSummary}${riskContext}
 
 Produce:
 1. overview — 2-3 sentences, plainly stating what's being built and for whom, written for a developer's first read, not a pitch.
-2. mvpScope — 4 to 8 specific features that make up a genuinely shippable v1, ordered roughly by build order. Concrete and scoped (e.g. "User can log a workout with sets/reps/weight" not "tracking functionality").
+2. mvpScope — 4 to 8 specific components that make up a genuinely shippable v1, ordered roughly by build order. This is the section that matters most — it needs to read as a genuine, detailed guide someone could start building directly from, not a checklist. For EACH component, give {title: a short name for this piece, description: a real paragraph, 4-8 sentences, covering exactly what this piece does, the specific user interaction or flow involved (what the person taps, sees, and what happens next), what the UI concretely needs to show, and any implementation decisions worth calling out now — validation rules, specific edge cases, what happens on empty states or errors, what data gets shown where}. Concrete and scoped throughout (e.g. "User can log a workout with sets/reps/weight, editing any entry inline, with the most recent 7 days shown by default" not "tracking functionality") — detailed enough that someone could start building this exact piece without needing to ask a clarifying question first.
 3. laterFeatures — 3 to 6 real features deliberately deferred past v1, the kind that are tempting to build first but aren't load-bearing for proving the idea.
 4. suggestedTechStack — a reasonable, boring, well-supported stack for a solo or small-team build: {frontend, backend, database, aiServices (only if genuinely relevant to this idea, else empty string)}. Favor widely-documented, low-operational-overhead choices over anything exotic.
-5. dataModel — the core entities this app needs, each with its main fields. 3 to 7 entities, each {entity: string, fields: [string, ...]} — fields as short descriptive names, not full schema syntax. Before finalizing, check the WHOLE set together against these three things, all of which are real failure modes that have slipped through before:
-   (a) No orphaned entities. Every entity should be connected to at least one other entity through a clear reference field (a user_id, device_id, etc). If an entity exists that nothing else points to and that doesn't itself reference anything beyond its owner, that's usually a sign a connecting piece is missing, not a sign the model is appropriately simple — add the missing reference or the missing entity it should connect through.
-   (b) No aggregate without its source. If any entity represents a derived summary — a "pattern," "average," "streak," "score," anything computed FROM other activity rather than entered directly — the raw underlying events it would actually be computed from need their own entity too. Modeling the summary table without the log table it's aggregated from means the summary has no real data to ever be computed from.
-   (c) No silent contradiction of the idea's own claims. Cross-check the model against what the idea itself specifically promises, especially anything about privacy, local-only storage, or no cloud sync. If the idea claims certain data stays on-device or never syncs, the model needs to actually reflect that distinction (a storage-location or sync-status field, or a clear on-device-only entity called out as such) rather than modeling everything as one undifferentiated set of centralized tables that quietly contradicts the pitch.
-6. keyFlows — 3 to 5 specific user flows worth building and testing first (e.g. "New user signs up, completes onboarding, logs their first entry"), the backbone flows everything else hangs off of.
-7. openQuestions — 2 to 5 real, specific decisions still genuinely unresolved at this point (a pricing detail, a platform choice, a scope boundary) — not generic disclaimers, actual open forks a builder would need to resolve.
+5. keyFlows — 3 to 5 specific user flows worth building and testing first (e.g. "New user signs up, completes onboarding, logs their first entry"), the backbone flows everything else hangs off of.
+6. openQuestions — 2 to 5 real, specific decisions still genuinely unresolved at this point (a pricing detail, a platform choice, a scope boundary) — not generic disclaimers, actual open forks a builder would need to resolve.
 
-Be specific to THIS idea throughout — every section should clearly be about this exact app, not generic startup advice that could apply to anything. Respond ONLY with valid JSON: {"overview": string, "mvpScope": [string, ...], "laterFeatures": [string, ...], "suggestedTechStack": {"frontend": string, "backend": string, "database": string, "aiServices": string}, "dataModel": [{"entity": string, "fields": [string, ...]}, ...], "keyFlows": [string, ...], "openQuestions": [string, ...]}`;
+Be specific to THIS idea throughout — every section should clearly be about this exact app, not generic startup advice that could apply to anything. Respond ONLY with valid JSON: {"overview": string, "mvpScope": [{"title": string, "description": string}, ...], "laterFeatures": [string, ...], "suggestedTechStack": {"frontend": string, "backend": string, "database": string, "aiServices": string}, "keyFlows": [string, ...], "openQuestions": [string, ...]}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
@@ -5219,6 +5198,37 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not submit that confirmation answer.', detail: err.message });
+  }
+});
+
+// Backs the "Let AI Answer" button — picks an answer on the person's
+// behalf, but does NOT submit it. The frontend gets the picked text back
+// and then calls the normal /answer route with it, exactly as if a
+// person had clicked that option themselves — this route only ever does
+// the picking, so the actual recording/progression logic never needs
+// duplicating between a human path and an AI-decided path.
+app.post('/confirm/:sessionId/answer-for-me', requireAuth, async (req, res) => {
+  try {
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.pending_question){
+      return res.status(400).json({ error: 'No question is currently pending on this session.' });
+    }
+
+    const selected = await pickBestConfirmationAnswer(session.pending_question, session.idea_draft, session.path_summary);
+
+    res.status(200).json({ selected });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not pick an answer.', detail: err.message });
   }
 });
 
