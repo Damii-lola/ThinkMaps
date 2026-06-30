@@ -268,7 +268,7 @@ async function callMistral(messages){
       'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-latest',
+      model: 'mistral-small-2503',
       messages,
       response_format: { type: 'json_object' }
     })
