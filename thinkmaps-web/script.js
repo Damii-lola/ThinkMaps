@@ -1242,13 +1242,22 @@ function renderGroups(visible, infoByGroupId){
 
     // A custom-idea group is a blank slate: whatever's already been typed
     // in renders as a normal, clickable options list (same three states as
-    // above), but instead of Retry/Random/+Custom it always shows the
-    // input that adds MORE typed options to itself — capped at 6, same as
-    // every other group's option limit. It still follows the same
-    // never-shows-a-footer rule as any other spawned child, since this
-    // box is itself one of the (up to 3-or-4) things that spawned from a
-    // selection, not something that's had a selection made on it.
-    if(isCustomIdeaNode){
+    // above). WHILE NOTHING in it has been selected yet, it shows the
+    // persistent input for adding more typed options instead of a
+    // footer — same reasoning as before: at that point this box is
+    // itself one of the things that spawned from a parent selection, not
+    // something that's had a selection made ON it yet.
+    //
+    // But the moment one of ITS OWN options gets selected, that's no
+    // longer true — this group now has a live selection just like any
+    // other, and needs the same Retry/Random/+Custom footer (scoped to
+    // whatever spawned from that selection) as every other group gets.
+    // The old version of this branch returned unconditionally before
+    // ever reaching that footer logic below, which meant those three
+    // buttons could never appear after picking a custom idea, no matter
+    // what — capped at 6 typed options, same as every other group's
+    // option limit, applies only to the no-selection-yet input row.
+    if(isCustomIdeaNode && !findLiveSelectedOption(options)){
       const inputRowHtml = options.length < 6 ? `
         <div class="canvas-custom-row canvas-custom-row-persistent">
           <textarea rows="1" placeholder="Write your own idea…" data-custom-input></textarea>
@@ -2575,6 +2584,76 @@ function renderConfirmQuestion(data){
       optionsEl.appendChild(btn);
     });
   }
+
+  const cardEl = document.getElementById('confirmCard');
+  let aiAnswerBtn = document.getElementById('aiAnswerBtn');
+  if(!aiAnswerBtn && cardEl){
+    aiAnswerBtn = document.createElement('button');
+    aiAnswerBtn.id = 'aiAnswerBtn';
+    aiAnswerBtn.type = 'button';
+    aiAnswerBtn.className = 'btn btn-ghost ai-answer-btn';
+    aiAnswerBtn.textContent = 'Let AI Answer';
+    cardEl.appendChild(aiAnswerBtn);
+  }
+  if(aiAnswerBtn){
+    aiAnswerBtn.disabled = false;
+    aiAnswerBtn.textContent = 'Let AI Answer';
+    aiAnswerBtn.onclick = () => runAiAnswer(data.progress.current, data.progress.total);
+  }
+}
+
+// Picks an answer on the person's behalf, then submits it through the
+// exact same submitConfirmAnswer path a real click would take — this
+// never duplicates the recording/progression logic, it just supplies a
+// different source for which option text gets submitted.
+async function runAiAnswer(currentQuestionNumber, totalQuestions){
+  const optionsEl = document.getElementById('confirmOptions');
+  const aiAnswerBtn = document.getElementById('aiAnswerBtn');
+
+  if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
+  if(aiAnswerBtn){
+    aiAnswerBtn.disabled = true;
+    aiAnswerBtn.textContent = 'Thinking…';
+  }
+
+  let res;
+  try {
+    res = await authedFetch(`/confirm/${confirmState.sessionId}/answer-for-me`, { method: 'POST', body: JSON.stringify({}) });
+  } catch (err) {
+    if(aiAnswerBtn) aiAnswerBtn.textContent = 'Could not reach the server — try again';
+    if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+    if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+    return;
+  }
+  if(!res) return;
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    if(aiAnswerBtn) aiAnswerBtn.textContent = `Server responded unexpectedly (status ${res.status}) — try again`;
+    if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+    if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+    return;
+  }
+
+  if(!res.ok || !body.selected){
+    if(aiAnswerBtn) aiAnswerBtn.textContent = body.error || 'Could not pick an answer — try again';
+    if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+    if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+    return;
+  }
+
+  // Visually highlight whichever option the AI picked, briefly, before
+  // the normal submit flow takes over — so it reads as "the AI chose
+  // this one" rather than jumping straight to the next question with no
+  // visible link between the button press and what got picked.
+  if(optionsEl){
+    const matchingBtn = [...optionsEl.querySelectorAll('.ideate-option')].find(b => b.textContent === body.selected);
+    if(matchingBtn) matchingBtn.classList.add('ai-picked');
+  }
+
+  setTimeout(() => submitConfirmAnswer(body.selected, currentQuestionNumber, totalQuestions), 500);
 }
 
 async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQuestions){
@@ -2582,8 +2661,10 @@ async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQ
   const questionEl = document.getElementById('confirmQuestion');
   const cardEl = document.getElementById('confirmCard');
   const researchingEl = document.getElementById('confirmResearching');
+  const aiAnswerBtn = document.getElementById('aiAnswerBtn');
 
   if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
+  if(aiAnswerBtn) aiAnswerBtn.disabled = true;
 
   // The 3rd answer kicks off the actual deep-research pipeline on the
   // backend — genuinely slower than a normal question turnaround, so it
@@ -3145,10 +3226,14 @@ function renderBuildBrief(buildBrief){
     ['AI services', stack.aiServices]
   ].filter(([, v]) => v);
 
-  const dataModelHtml = (buildBrief.dataModel || []).map(entity => `
-    <div class="data-model-entity">
-      <div class="data-model-entity-name">${escapeHtml(entity.entity)}</div>
-      <ul>${(entity.fields || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
+  // Each MVP component is now a real {title, description} pair, not a
+  // one-line bullet — rendered as its own block with a numbered title
+  // and a full paragraph, since the description is meant to be detailed
+  // enough to actually start building from directly.
+  const mvpHtml = (buildBrief.mvpScope || []).map((item, i) => `
+    <div class="mvp-item">
+      <div class="mvp-item-title">${i + 1}. ${escapeHtml(item.title)}</div>
+      <p class="mvp-item-description">${escapeHtml(item.description)}</p>
     </div>
   `).join('');
 
@@ -3156,12 +3241,10 @@ function renderBuildBrief(buildBrief){
     <h3 class="confirm-section-title">Build brief</h3>
     <p class="idea-block-p">${escapeHtml(buildBrief.overview)}</p>
 
-    <div class="idea-block"><div class="lbl">MVP scope</div>${listHtml(buildBrief.mvpScope)}</div>
+    <div class="idea-block"><div class="lbl">MVP scope</div><div class="mvp-list">${mvpHtml}</div></div>
     <div class="idea-block"><div class="lbl">Later (not in v1)</div>${listHtml(buildBrief.laterFeatures)}</div>
 
     ${stackRows.length ? `<div class="idea-block"><div class="lbl">Suggested stack</div><ul>${stackRows.map(([k, v]) => `<li><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</li>`).join('')}</ul></div>` : ''}
-
-    ${dataModelHtml ? `<div class="idea-block"><div class="lbl">Rough data model</div><div class="data-model-list">${dataModelHtml}</div></div>` : ''}
 
     <div class="idea-block"><div class="lbl">Key flows to build first</div>${listHtml(buildBrief.keyFlows)}</div>
     <div class="idea-block"><div class="lbl">Still open</div>${listHtml(buildBrief.openQuestions)}</div>
@@ -3192,8 +3275,8 @@ function buildBriefToMarkdown(buildBrief){
     stack.aiServices ? `- **AI services:** ${stack.aiServices}` : ''
   ].filter(Boolean).join('\n');
 
-  const dataModelLines = (buildBrief.dataModel || [])
-    .map(e => `### ${e.entity}\n${list(e.fields)}`)
+  const mvpLines = (buildBrief.mvpScope || [])
+    .map((item, i) => `### ${i + 1}. ${item.title}\n${item.description}`)
     .join('\n\n');
 
   return `# Build Brief
@@ -3201,16 +3284,13 @@ function buildBriefToMarkdown(buildBrief){
 ${buildBrief.overview}
 
 ## MVP Scope
-${list(buildBrief.mvpScope)}
+${mvpLines}
 
 ## Later (not in v1)
 ${list(buildBrief.laterFeatures)}
 
 ## Suggested Stack
 ${stackLines}
-
-## Data Model
-${dataModelLines}
 
 ## Key Flows to Build First
 ${list(buildBrief.keyFlows)}
@@ -3257,21 +3337,30 @@ async function runShareLink(){
 
   el.innerHTML = `<button class="btn btn-secondary" type="button" disabled>Creating link…</button>`;
 
+  let res;
   try {
-    const res = await authedFetch(`/confirm/${confirmState.sessionId}/share`, { method: 'POST', body: JSON.stringify({}) });
-    if(!res) return;
-
-    const body = await res.json();
-    if(!res.ok){
-      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not create a shareable link.')}</p>`;
-      return;
-    }
-
-    confirmState.shareToken = body.shareToken;
-    renderShareLink(body.shareToken);
+    res = await authedFetch(`/confirm/${confirmState.sessionId}/share`, { method: 'POST', body: JSON.stringify({}) });
   } catch (err) {
-    el.innerHTML = `<p class="confirm-error">Something went wrong creating the link.</p>`;
+    el.innerHTML = `<p class="confirm-error">Could not reach the server to create a link. Check your connection and try again.</p>`;
+    return;
   }
+  if(!res) return;
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">The server responded unexpectedly (status ${res.status}) instead of with a link. If this was just deployed, the backend may not have this route yet.</p>`;
+    return;
+  }
+
+  if(!res.ok){
+    el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not create a shareable link.')}</p>`;
+    return;
+  }
+
+  confirmState.shareToken = body.shareToken;
+  renderShareLink(body.shareToken);
 }
 
 function buildShareUrl(token){
