@@ -190,6 +190,11 @@ nav.bar{
 /* ---------- PRICING ---------- */
 .pricing-grid{ display:grid; grid-template-columns:1fr 1fr; gap:24px; }
 @media (max-width:700px){ .pricing-grid{ grid-template-columns:1fr; } }
+/* Applied when a signed-in user is already pro (see applyPricingProState
+   in script.js) — the free card is hidden via inline display:none, and
+   this switches the grid to a single centered column instead of leaving
+   an empty column where the free card used to be. */
+.pricing-grid.pro-only{ grid-template-columns:1fr; max-width:420px; margin:0 auto; }
 .plan{ border:1px solid var(--line); border-radius:16px; padding:30px; background:var(--surface); }
 .plan.pro{ border-color:var(--accent); position:relative; }
 .plan .ptag{ font-family:var(--font-mono); font-size:11px; color:var(--ink-muted); text-transform:uppercase; letter-spacing:.08em; }
@@ -288,6 +293,17 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 }
 .modal-card input:focus{ border-color:var(--accent); }
 .modal-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+
+/* ---------- Pro plan modal (showProPlanModal in script.js) ---------- */
+/* .plan already has its own border/padding/background (see the pricing
+   section rules below) — nested directly inside .modal-card, which has
+   the exact same properties, that would double up into a visible
+   border-within-a-border. This strips .plan's own box styling only
+   inside this specific context, letting .modal-card be the one visual
+   container instead of stacking two. */
+.modal-plan-card{ border:none; padding:0; background:transparent; }
+.modal-plan-card .btn{ width:100%; display:block; text-align:center; }
+.modal-close-btn{ width:100%; margin-top:10px; }
 
 /* ---------- DASHBOARD ---------- */
 .dashboard-main{ padding:60px 0 100px; }
