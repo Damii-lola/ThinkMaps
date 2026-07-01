@@ -5071,7 +5071,7 @@ async function synthesizeIdeaDraftFromPath(pathSummary){
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path: ${pathSummary}` }
-  ]);
+  ], 300);
 }
 
 // Writes ONE confirmation question — not "gather more info about the
@@ -5096,7 +5096,7 @@ async function generateConfirmationQuestion(ideaDraft, pathSummary, answersSoFar
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path that led here: ${pathSummary}\n\nConfirmations so far:\n${answeredContext}` }
-  ]);
+  ], 400);
 }
 
 // Used by the "Let AI Answer" button — the person decided this once,
@@ -5190,7 +5190,7 @@ async function researchCompetitiveLandscape(ideaDraft, pathSummary, confirmation
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path: ${pathSummary}\n\nConfirmations:\n${confirmationContext}` }
-  ]);
+  ], 700);
 }
 
 // For every weakness identified above, proposes a specific, concrete way
@@ -5204,7 +5204,7 @@ async function synthesizeSolutionsFromCons(competitiveLandscape){
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Complaints to solve:\n${cons.join('\n')}` }
-  ]);
+  ], 700);
 }
 
 // Pulls everything together — the original draft, what got confirmed
@@ -5248,7 +5248,7 @@ ${solutionLines}`;
   const core = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userContent }
-  ]);
+  ], 1200);
 
   return {
     ...core,
@@ -5434,7 +5434,7 @@ fullDescription is the final polished pitch description for this REVISED idea �
   const core = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Revise the idea now, incorporating the feedback above.' }
-  ]);
+  ], 1200);
 
   return {
     ...core,
