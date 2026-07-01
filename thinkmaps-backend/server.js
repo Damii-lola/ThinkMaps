@@ -5,7 +5,6 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { NICHE_PATHWAYS } = require('./niche_pathways');
 
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -41,12 +40,30 @@ const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 // this over creating a fresh transporter per email; it keeps a pooled
 // connection to Gmail's SMTP servers instead of renegotiating TLS
 // every single time.
+//
+// Explicit host/port/secure + short timeouts on purpose, rather than
+// the shorthand `service: 'gmail'` config — some hosts (Render's free
+// tier included) throttle or silently drop outbound SMTP connections
+// on ports 465/587, and nodemailer's DEFAULT connection timeout is
+// ~2 minutes. Without a short timeout here, a blocked port doesn't
+// fail loudly — it just hangs every route that calls sendOtpEmail
+// (signup-start AND login-start both do) until that default timeout
+// finally gives up, which is exactly the "any button takes ~1 min"
+// symptom. Cutting these down means a blocked port now fails in ~8s
+// with a real error in the response body, instead of silently eating
+// a full minute on every click.
 const mailTransporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
   auth: {
     user: GMAIL_USER,
     pass: GMAIL_APP_PASSWORD
-  }
+  },
+  pool: true,
+  connectionTimeout: 8000,
+  greetingTimeout: 8000,
+  socketTimeout: 8000
 });
 
 // In-memory pending state — fine for a single Render instance.
@@ -93,12 +110,19 @@ async function sendOtpEmail(email){
 
   const { code, codeHash } = generateOtpCode();
 
-  await mailTransporter.sendMail({
-    from: `ThinkMaps <${GMAIL_USER}>`,
-    to: email,
-    subject: `${code} is your ThinkMaps code`,
-    text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`
-  });
+  const startedAt = Date.now();
+  try {
+    await mailTransporter.sendMail({
+      from: `ThinkMaps <${GMAIL_USER}>`,
+      to: email,
+      subject: `${code} is your ThinkMaps code`,
+      text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`
+    });
+    console.log(`[ThinkMaps] OTP email sent in ${Date.now() - startedAt}ms`);
+  } catch (err) {
+    console.error(`[ThinkMaps] OTP email FAILED after ${Date.now() - startedAt}ms:`, err.message);
+    throw err;
+  }
 
   return codeHash;
 }
