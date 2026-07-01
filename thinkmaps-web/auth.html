@@ -4,101 +4,98 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sign in — ThinkMaps</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+
 <header class="site">
   <nav class="bar">
-    <a href="index.html" class="logo">
-      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-        <circle cx="9" cy="3" r="2" fill="#D97757"/>
-        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
-        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
-        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
-      </svg>
-      ThinkMaps
-    </a>
+    <a href="index.html" class="logo">ThinkMaps</a>
   </nav>
 </header>
 
 <main class="auth-main">
   <div class="auth-card">
 
-    <!-- Tab row -->
+    <!-- Shown once, right after an OTP-verified signup completes and
+         the user lands back on the sign-in tab to log in for real. -->
+    <div id="emailConfirmedBanner" class="auth-banner" style="display:none;">
+      Your email is verified — sign in below to continue.
+    </div>
+
     <div class="auth-tabs">
-      <button class="auth-tab active" data-tab="signin" type="button">Sign in</button>
-      <button class="auth-tab" data-tab="signup" type="button">Create account</button>
+      <button type="button" class="auth-tab active" data-tab="signin">Sign in</button>
+      <button type="button" class="auth-tab" data-tab="signup">Create account</button>
     </div>
 
-    <!-- ── SIGN IN ─────────────────────────────────────── -->
-    <!-- Step 1: email + password -->
-    <div class="auth-step active" id="signinStep1">
-      <label>
-        Email or username
-        <input type="text" id="signinIdentifier" autocomplete="username" />
-      </label>
-      <label>
-        Password
-        <input type="password" id="signinPassword" autocomplete="current-password" />
-      </label>
+    <!-- ---------- SIGN IN ---------- -->
+    <form id="signinForm" class="auth-form active">
+      <h1>Welcome back</h1>
+      <p class="muted">Sign in with your email or username. We'll text — er, email — you a code to confirm it's you.</p>
+
+      <label for="signinIdentifier">Email or username</label>
+      <input type="text" id="signinIdentifier" autocomplete="username" required />
+
+      <label for="signinPassword">Password</label>
+      <input type="password" id="signinPassword" autocomplete="current-password" required />
+
       <p class="auth-error" id="signinError"></p>
-      <button class="btn btn-primary" id="signinSendOtpBtn" type="button">Continue</button>
-    </div>
 
-    <!-- Step 2: OTP entry -->
-    <div class="auth-step" id="signinStep2">
-      <p class="auth-hint">We sent a 6-digit code to <strong id="signinOtpEmail"></strong>. Enter it below to sign in.</p>
-      <label>
-        Verification code
-        <input type="text" id="signinOtpCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
-      </label>
-      <p class="auth-error" id="signinOtpError"></p>
-      <button class="btn btn-primary" id="signinVerifyBtn" type="button">Sign in</button>
-      <button class="btn btn-ghost auth-resend-btn" id="signinResendBtn" type="button">Resend code</button>
-    </div>
+      <button type="submit" class="btn btn-primary">Continue</button>
+    </form>
 
-    <!-- ── SIGN UP ─────────────────────────────────────── -->
-    <!-- Step 1: details -->
-    <div class="auth-step" id="signupStep1">
-      <label>
-        Email
-        <input type="email" id="signupEmail" autocomplete="email" />
-      </label>
-      <label>
-        Username
-        <input type="text" id="signupUsername" autocomplete="username" />
-      </label>
-      <label>
-        Password
-        <input type="password" id="signupPassword" autocomplete="new-password" />
-      </label>
-      <label>
-        Confirm password
-        <input type="password" id="signupPasswordConfirm" autocomplete="new-password" />
-      </label>
+    <!-- ---------- CREATE ACCOUNT ---------- -->
+    <form id="signupForm" class="auth-form">
+      <h1>Create your account</h1>
+      <p class="muted">We'll email you a one-time code before your account is actually created — no confirmation link, just a code.</p>
+
+      <label for="signupEmail">Email</label>
+      <input type="email" id="signupEmail" autocomplete="email" required />
+
+      <label for="signupUsername">Username</label>
+      <input type="text" id="signupUsername" autocomplete="username" required />
+
+      <label for="signupPassword">Password</label>
+      <input type="password" id="signupPassword" autocomplete="new-password" required minlength="8" />
+
+      <label for="signupPasswordConfirm">Confirm password</label>
+      <input type="password" id="signupPasswordConfirm" autocomplete="new-password" required minlength="8" />
+
       <p class="auth-error" id="signupError"></p>
-      <button class="btn btn-primary" id="signupSendOtpBtn" type="button">Continue</button>
-    </div>
 
-    <!-- Step 2: OTP entry -->
-    <div class="auth-step" id="signupStep2">
-      <p class="auth-hint">We sent a 6-digit code to <strong id="signupOtpEmail"></strong>. Enter it to confirm your email and create your account.</p>
-      <label>
-        Verification code
-        <input type="text" id="signupOtpCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" />
-      </label>
-      <p class="auth-error" id="signupOtpError"></p>
-      <button class="btn btn-primary" id="signupVerifyBtn" type="button">Create account</button>
-      <button class="btn btn-ghost auth-resend-btn" id="signupResendBtn" type="button">Resend code</button>
-    </div>
+      <button type="submit" class="btn btn-primary">Send me a code</button>
+    </form>
+
+    <!-- ---------- OTP VERIFICATION ----------
+         One shared step for both signup and login — script.js's
+         otpState.mode decides which server route the code gets
+         checked against when this form submits. -->
+    <form id="otpForm" class="auth-form">
+      <h1>Check your email</h1>
+      <p class="muted">We sent a 6-digit code to <strong id="otpEmailLabel"></strong>. Enter it below — it expires in 10 minutes.</p>
+
+      <label for="otpCodeInput">Verification code</label>
+      <input
+        type="text"
+        id="otpCodeInput"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        autocomplete="one-time-code"
+        maxlength="6"
+        placeholder="000000"
+        required
+      />
+
+      <p class="auth-error" id="otpError"></p>
+
+      <button type="submit" class="btn btn-primary">Verify</button>
+      <button type="button" class="otp-resend" id="otpResendBtn">Resend code</button>
+    </form>
 
   </div>
 </main>
 
-<script src="script.js?v=2"></script>
-<script src="feedback.js?v=4"></script>
+<script src="script.js?v=4"></script>
 </body>
 </html>
