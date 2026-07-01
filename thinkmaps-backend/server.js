@@ -5190,7 +5190,7 @@ async function researchCompetitiveLandscape(ideaDraft, pathSummary, confirmation
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path: ${pathSummary}\n\nConfirmations:\n${confirmationContext}` }
-  ], 700);
+  ], 1000);
 }
 
 // For every weakness identified above, proposes a specific, concrete way
@@ -5204,7 +5204,7 @@ async function synthesizeSolutionsFromCons(competitiveLandscape){
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Complaints to solve:\n${cons.join('\n')}` }
-  ], 700);
+  ], 1500);
 }
 
 // Pulls everything together — the original draft, what got confirmed
