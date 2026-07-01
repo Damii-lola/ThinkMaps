@@ -2326,7 +2326,24 @@ async function handleOptionActivate(optionId){
     }
     canvasState.lastActivatedOptionId = optionId;
     canvasState.multiSelectStagedIds.clear();
-    await loadGraph(); // simplest correct way to pick up frozen-sibling changes too
+
+    const body = await res.json();
+    if(body.fullGraph){
+      // Full graph came back in the same response — apply it directly and
+      // re-render without a second network round trip. This is the normal
+      // path; loadGraph() below is a safety fallback only.
+      canvasState.groups = body.fullGraph.groups;
+      canvasState.groupVersions = body.fullGraph.groupVersions;
+      canvasState.options = body.fullGraph.options;
+      renderPathProgress();
+      renderCanvas();
+      maybeAutoFrameCompletedPath();
+    } else {
+      // fullGraph was null (non-fatal server error during graph fetch) —
+      // fall back to the old separate round trip so the canvas always
+      // reflects the correct state.
+      await loadGraph();
+    }
   } catch (err){
     alert('Something went wrong activating that option.');
   } finally {
