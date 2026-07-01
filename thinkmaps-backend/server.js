@@ -346,7 +346,7 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
-async function callMistral(messages, maxTokens = 1400){
+async function callMistral(messages, maxTokens = 350){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -357,15 +357,16 @@ async function callMistral(messages, maxTokens = 1400){
       model: 'mistral-small-2503',
       messages,
       response_format: { type: 'json_object' },
-      // Every structured call this function backs (option batches,
-      // checkpoints, idea synthesis, build briefs) produces a bounded,
-      // predictable amount of JSON — never anywhere near unlimited
-      // output. Leaving max_tokens unset means the model has no signal
-      // for how long a response should be, which costs real time on
-      // every single call. Defaults to 1400, comfortable for most call
-      // sites here; the build brief passes a higher override since its
-      // MVP descriptions (up to 8 items, each a real paragraph) are
-      // genuinely larger than every other shape produced in this file.
+      // Hard cap on output tokens — every canvas generation call produces
+      // a bounded, predictable amount of JSON. The old default of 1400
+      // was drastically over-provisioned: 3 blocks × 6 options × 7 words
+      // = ~130 words, ~180 tokens needed. 350 is comfortable headroom.
+      // The model incurs latency proportional to actual tokens generated,
+      // so eliminating ~1050 unused reserved tokens cuts generation time
+      // significantly on every single canvas click. Call sites that
+      // genuinely need more (build brief with 8 detailed MVP paragraphs,
+      // final idea synthesis, confirmation questions) pass their own
+      // higher override — this default only needs to fit canvas options.
       max_tokens: maxTokens
     })
   });
@@ -425,6 +426,80 @@ async function callMistralPlainText(messages){
 
   const data = await res.json();
   return (data.choices?.[0]?.message?.content || '').trim();
+}
+
+// Calls Mistral in streaming mode and accumulates all the SSE delta
+// chunks into a single string, which it returns to the caller exactly
+// like callMistral does (same JSON parsing/cleanup). The response_format
+// json_object constraint still applies — streaming just delivers the
+// same JSON one token at a time instead of all at once. This is used
+// by the activate route specifically so it can forward partial text to
+// the client via SSE (see callMistralStreamingToClient below) while
+// still needing the fully assembled result for DB writes.
+async function callMistralStreaming(messages, maxTokens = 350){
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-2503',
+      messages,
+      response_format: { type: 'json_object' },
+      max_tokens: maxTokens,
+      stream: true
+    })
+  });
+
+  if(!res.ok){
+    const errText = await res.text();
+    throw new Error(`Mistral API error (${res.status}): ${errText}`);
+  }
+
+  // Accumulate the streamed SSE deltas into one string
+  let accumulated = '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  while(true){
+    const { done, value } = await reader.read();
+    if(done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    const lines = chunk.split('\n');
+
+    for(const line of lines){
+      if(!line.startsWith('data: ')) continue;
+      const data = line.slice(6).trim();
+      if(data === '[DONE]') break;
+
+      try {
+        const parsed = JSON.parse(data);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if(delta) accumulated += delta;
+      } catch (e) {
+        // malformed SSE chunk — skip it
+      }
+    }
+  }
+
+  // Same cleanup/parse as callMistral
+  let cleaned = accumulated.trim();
+  if(cleaned.startsWith('```')){
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if(firstBrace !== -1 && lastBrace > firstBrace){
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseErr) {
+    throw new Error(`Mistral streaming returned invalid JSON (${parseErr.message}). Raw: ${accumulated.slice(0, 200)}`);
+  }
 }
 
 // Walks UP the tree from a group to the root, collecting {groupLabel, optionLabel}
@@ -1011,19 +1086,6 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
-  // "Personal Read on the Pain" and "Honest Awareness of What Exists" are
-  // the two blocks that are explicitly about external, verifiable
-  // reality — genuine problems people have, and what actually already
-  // exists — not personal preference or instinct like every other block.
-  // That makes them exactly where an LLM's tendency to generate
-  // plausible-sounding-but-invented content does the most damage: a
-  // fabricated "pain point" that's really a product feature in disguise
-  // (e.g. "micro-workouts in calendar gaps" — a real example that slipped
-  // through here) feels like real grounded research right up until
-  // someone who actually knows the space reads it and immediately spots
-  // that no real person has ever said anything like that. Run live
-  // search for these two specifically, in parallel, only when they're
-  // actually in this batch.
   const needsPainSearch = blockNames.includes('Personal Read on the Pain');
   const needsExistingSearch = blockNames.includes('Honest Awareness of What Exists');
   const [painSearchResults, existingSearchResults] = await Promise.all([
@@ -1033,60 +1095,37 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 
   const painGroundingNote = needsPainSearch
     ? (painSearchResults
-        ? `\n\nFor the "Personal Read on the Pain" block specifically: here are REAL, live search results showing what people actually say about this space — ${JSON.stringify(painSearchResults)}. Ground that block's options in what's ACTUALLY being expressed in these results, not invented-sounding "innovations." Every option for this block should read like something a real, ordinary person would genuinely say or feel — a plain frustration, not a clever feature pitch wearing a "problem" costume.`
-        : `\n\nFor the "Personal Read on the Pain" block specifically: no live search was available this time, so draw on your own broad knowledge of what real people ACTUALLY and commonly complain about in this exact space — the kind of plain, ordinary frustration you'd genuinely see in a real forum thread or review. Avoid anything that reads like a clever product feature dressed up as a problem — for example "micro-workouts in calendar gaps" is a FEATURE pitch, not a real complaint anyone has; "I never have time for a real workout" is. If you can't think of a genuinely real, commonly-expressed frustration for this exact angle, write a more obvious, ordinary one rather than inventing something novel-sounding.`)
+        ? `\n\nPain block: ground options in these real search results — ${JSON.stringify(painSearchResults)}. Every option must be a plain frustration a real person would say, never a feature pitch.`
+        : `\n\nPain block: draw on real, commonly-expressed frustrations you're confident exist in this space. Never dress up a feature as a problem.`)
     : '';
 
   const existingGroundingNote = needsExistingSearch
     ? (existingSearchResults
-        ? `\n\nFor the "Honest Awareness of What Exists" block specifically: here are REAL, live search results about what actually already exists in this space — ${JSON.stringify(existingSearchResults)}. Ground that block's options in genuinely real products, gaps, or limitations these results support — never invent a fake product or a gap that doesn't actually exist.`
-        : `\n\nFor the "Honest Awareness of What Exists" block specifically: no live search was available this time, so draw only on real, well-known existing apps or approaches you're genuinely confident actually exist in this space. Never invent a fake competitor or describe a market gap you're not actually confident is real.`)
+        ? `\n\nExisting block: ground options in these real search results — ${JSON.stringify(existingSearchResults)}.`
+        : `\n\nExisting block: only reference real, well-known products you're confident actually exist.`)
     : '';
 
-  // Covers repetition against everything ALREADY SAVED, anywhere in this
-  // niche — but that's a different failure mode from the one below.
-  // Reasons at the THEME level, not just exact phrasing: two differently
-  // worded options can still be the same underlying idea (e.g. "chores as
-  // hidden exercise" and "build around chores" are the same angle wearing
-  // different words), and a phrase-only check misses that entirely.
-  const diversityNote = existingLabels.length > 0
-    ? `\nThis niche has already gone deep in several directions — the following specific angles have ALREADY been used SOMEWHERE in it (across various blocks — that still counts, the goal is genuinely fresh ground, not just a fresh block label): ${JSON.stringify(existingLabels)}. Read these for their UNDERLYING THEME, not just their exact wording — if several of them share a theme (e.g. several are versions of "guilt about skipping" or "chores as hidden exercise"), treat that whole theme as already covered, not just those specific sentences. If the obvious answer for any of these ${blockNames.length} blocks would just be a reword of an already-covered theme, actively look for a genuinely different underlying angle instead — a different mechanism, trigger, setting, or emotional hook entirely.`
+  // Cap at 15 most recent — still catches theme repetition while saving
+  // ~800 tokens vs the old 60-label cap.
+  const recentLabels = existingLabels.slice(-15);
+  const diversityNote = recentLabels.length > 0
+    ? `\nAvoid these ALREADY-USED themes: ${JSON.stringify(recentLabels)}.`
     : '';
 
-  // This is the OTHER failure mode, and it's the more severe one: options
-  // for DIFFERENT blocks within THIS SAME response converging on the same
-  // underlying idea, since nothing here previously told the model the
-  // blocks below need to be distinct from EACH OTHER too, only that they
-  // need to avoid history. Two blocks asking genuinely different
-  // questions (e.g. "who this is for" vs "what's painful about it")
-  // should basically never land on near-identical answers — if they do,
-  // at least one side wasn't actually engaging with its own block's
-  // specific question. The concrete example below is a REAL failure that
-  // slipped through with only the abstract instruction in place — naming
-  // the actual failure mode explicitly works better than describing it
-  // generically.
   const crossBlockNote = blockNames.length > 1
-    ? `\nCRITICAL — these ${blockNames.length} blocks are being generated together in this one response, and they must be distinct from EACH OTHER, not just from history. Before finalizing, privately list out every option across all ${blockNames.length} blocks together in one place, then check each one against every OTHER block's options: if an option in one block is just a reworded version of an option already written for a different block here (same underlying mechanism, trigger, or idea, different words), rewrite it to genuinely engage with its OWN block's specific question instead. This applies across every pair of blocks listed below, not just adjacent ones. A real example of the failure this is guarding against: "Cross-Pollination & Creative Inspiration" generating "workout snippets in calendar apps" while "Your Vision for the Experience" independently generates "micro-workouts in calendar gaps" — these are the same idea wearing two different sentences, and both blocks should never converge on it like that.`
+    ? `\nThese ${blockNames.length} blocks MUST be distinct from each other — check each option against every other block's options before finalizing. No two blocks should converge on the same underlying idea.`
     : '';
 
-  // Background grounding ONLY — see getNicheTopicsForGrounding in
-  // activateOption. The person using this app typically doesn't know yet
-  // which specific angle they want, which is exactly why they're being
-  // asked guided questions instead of handed a raw list to pick from —
-  // but the model answering those questions can lean on this concrete
-  // vocabulary to ground its own phrasing in something specific instead
-  // of staying generic, as long as it never just echoes one back verbatim
-  // as if restating it were an answer, and never lets on that this list
-  // exists at all.
-  const groundingNote = nicheTopics.length > 0
-    ? `\nFor your own background grounding only (the person has never seen this and it must never be mentioned to them, directly or by implication): here is a broad set of specific sub-topics, activities, and angles that exist within this niche — ${JSON.stringify(nicheTopics)}. Let this concrete vocabulary sharpen and ground your own phrasing where genuinely relevant to THIS specific path, instead of staying abstract — but every option must still directly answer its OWN block's specific question and build on the path so far. Never just restate one of these topics verbatim as if doing so were itself the answer.`
-    : '';
+  // The 150-topic niche grounding was removed — it added ~1800 input
+  // tokens (>1000ms latency) to every single canvas click for a quality
+  // gain that is outweighed by the speed cost. The path context itself
+  // already provides the specificity the model needs.
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Every option you generate must read as a personalized continuation of THAT path: reference or clearly build on what they've already chosen, never generic options that could apply to any blueprint. Based on the path so far, generate up to 6 specific, concrete options for EACH of these ${blockNames.length} blocks, in this exact order:\n${blockList}\nEvery option must fit squarely within its block's territory and must be something the person could answer from their own knowledge, instinct, or preference — never something requiring market research they don't have. While generating, privately consider how the choices accumulating in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction subtly shape your phrasing, even though you are not asked to state the idea itself yet.${crossBlockNote}${diversityNote}${groundingNote}${painGroundingNote}${existingGroundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON, nothing else, in this exact shape: {"groups": [{"options": [{"label": string}, ...]}]} with exactly ${blockNames.length} entries in "groups", in the same order as the blocks listed above.`;
+  const systemPrompt = `You are the node-generation engine for ThinkMaps. Generate up to 5 specific options for EACH of these ${blockNames.length} blocks:\n${blockList}\nPath so far: ${pathDescription}\nEvery option must build on this exact path, fit its block's territory, and be answerable from the person's own knowledge/instinct.${crossBlockNote}${diversityNote}${painGroundingNote}${existingGroundingNote}${SHORT_OPTION_RULE} JSON only: {"groups": [{"options": [{"label": string}]}]} with exactly ${blockNames.length} groups.`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
+    { role: 'user', content: 'Generate now.' }
   ]);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
@@ -1131,28 +1170,17 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = [], nicheTopics = []){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
 
-  const diversityNote = existingLabels.length > 0
-    ? `\n\nThis niche has already gone deep in several directions elsewhere — the following specific angles have ALREADY been used: ${JSON.stringify(existingLabels)}. Read these for their underlying theme, not just exact wording. The emerging idea and fork question you write below should reflect what's actually distinct about THIS specific path, not converge on a theme already covered by another branch of this same niche.`
+  const recentLabels = existingLabels.slice(-15);
+  const diversityNote = recentLabels.length > 0
+    ? `\n\nAvoid these already-used themes: ${JSON.stringify(recentLabels)}.`
     : '';
 
-  // Same background-grounding-only purpose as generateCandidateBatch —
-  // never shown to the person, never to be echoed back verbatim.
-  const groundingNote = nicheTopics.length > 0
-    ? `\n\nFor your own background grounding only (the person has never seen this and it must never be mentioned to them): here is a broad set of specific sub-topics and angles that exist within this niche — ${JSON.stringify(nicheTopics)}. Let this concrete vocabulary sharpen the emerging idea and fork question below where genuinely relevant, instead of staying abstract — but the idea must still be a real synthesis of THIS path's actual choices, not a restatement of one of these topics.`
-    : '';
-
-  const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. The person has just finished a deep round of personal exploration: their pull toward this space, who they're building for, the pain they've identified, what's already out there, where their creative instincts point, and their vision for the actual experience. Before this turns back to questions about THEM, pause and actually do the work of synthesizing what's emerged.
-
-Path so far (their actual choices, in order): ${pathDescription}
-
-Privately work out: what is the SPECIFIC, nameable app concept crystallizing out of this exact path? Not a vague theme or restatement of the niche — a real, concrete idea with a clear angle, the kind you could describe in one sharp sentence.
-
-Then generate EXACTLY 2 options — not up to 6, exactly 2 — for ONE decision point that's specific to THAT EMERGING IDEA ITSELF — not a generic question about the person's preferences, skills, or background, but a real fork in how this specific concept could take shape. Think like a sharp co-founder who's been listening the whole time and now has one pointed, idea-specific follow-up: "should the core mechanic be X or Y," "should this lean toward A as the primary hook or B," something that meaningfully changes what gets built next — grounded in the concrete idea that's actually emerged from this path, not a rehash of the questions already asked. The two options should read as genuinely opposed directions, not two flavors of the same thing — this is the one deliberately stark, forced-choice moment in the whole path.${diversityNote}${groundingNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"options": [{"label": string}, {"label": string}]}`;
+  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. The person has finished the first round of exploration. Privately work out the SPECIFIC app concept crystallizing from their path — a concrete, nameable idea you could describe in one sharp sentence. Then produce EXACTLY 2 opposing options for ONE key fork specific to that emerging idea (not a generic preference question — a real direction choice for THIS concept). The two options must be genuinely opposed directions.${diversityNote}${SHORT_OPTION_RULE} JSON only: {"options": [{"label": string}, {"label": string}]}`;
 
   const result = await callMistral([
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
-  ]);
+    { role: 'user', content: `Path: ${pathDescription}` }
+  ], 120);
 
   return {
     groups: [{
@@ -1337,7 +1365,10 @@ async function verifyOptionOwnershipAndLock(optionId, userId){
     return { error: 'This blueprint is read-only on the free tier.', status: 403 };
   }
 
-  return { ok: true };
+  // blueprintId returned so callers can use it without re-fetching the same
+  // chain — the activate route uses this to include the full graph in its
+  // response, saving the client a second round trip.
+  return { ok: true, blueprintId: group.blueprint_id };
 }
 
 async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = false } = {}){
@@ -1511,39 +1542,17 @@ async function activateOption(optionId, combinedOptionIds = []){
     // content stops converging on the same handful of phrasings every
     // time a narrow niche gets explored in more than one direction.
     const nicheOptionId = walkNicheRootOptionIdFromSnapshot(optionId, snapshot);
-
-    // nicheTopics still needs its own real fetch (DB read for the niche
-    // option's own label, then matchNicheToTemplate) — existingLabels is
-    // now a pure in-memory walk against the shared snapshot, no longer a
-    // separate redundant fetch of the same blueprint's data. Still run
-    // together via Promise.all since nicheTopics' own work is genuinely
-    // independent of it.
-    const [nicheTopics, existingLabels] = await Promise.all([
-      getNicheTopicsForGrounding(nicheOptionId),
-      Promise.resolve(walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot))
-    ]);
+    const existingLabels = walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot);
 
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
-      // All 6 of A–F are used along THIS path and the checkpoint hasn't
-      // fired yet on it — this is the moment.
-      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels, nicheTopics);
+      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels);
     } else if(!ideaCheckpointAlreadyShown){
-      // Still working through A–F. Capped at however many of THOSE 6 are
-      // actually left — never padded out to 3 by reaching into G/H/I, which
-      // is exactly how block G could leak into a batch alongside the tail
-      // of A–F before the checkpoint ever got evaluated. A batch near the
-      // end of this phase might be 1 or 2 groups instead of 3; that's a far
-      // smaller tradeoff than the checkpoint never cleanly happening.
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
     } else {
-      // Checkpoint already shown along this path — proceed normally
-      // through G, H, I (and wrap around the full 9 if this single path
-      // goes deep enough to exhaust those too, though the 7-node cap
-      // above means that's now a much rarer case than it used to be).
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, nicheTopics);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
     }
   }
 
@@ -1804,15 +1813,56 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
   }
 });
 
+// Returns the full {groups, groupVersions, options} triple for a blueprint
+// in one 3-query flat fetch (same shape the GET /graph route already
+// returns, minus the auto-generation logic which only applies on the very
+// first load of an empty blueprint). Extracted here so the activate route
+// can return the COMPLETE updated state in a single response rather than
+// making the client do a second GET /graph round trip after the AI finishes —
+// that second trip was typically another 200-400ms on top of an already-slow
+// generation call.
+async function fetchFullBlueprintGraph(blueprintId){
+  const { data: groups } = await supabase.from('groups').select('*').eq('blueprint_id', blueprintId);
+  const groupIds = (groups || []).map(g => g.id);
+
+  const { data: groupVersions } = groupIds.length
+    ? await supabase.from('group_versions').select('*').in('group_id', groupIds)
+    : { data: [] };
+
+  const versionIds = (groupVersions || []).map(v => v.id);
+  const { data: allOptions } = versionIds.length
+    ? await supabase.from('options').select('*').in('group_version_id', versionIds).order('position', { ascending: true })
+    : { data: [] };
+
+  return { groups: groups || [], groupVersions: groupVersions || [], options: allOptions || [] };
+}
+
 // Activates an option — works identically whether it's a root click or a
 // completed drag from script.js; the frontend decides which is allowed where.
+// Returns the FULL updated graph state alongside the activation result so the
+// client doesn't need a second GET /graph round trip after the AI finishes.
 app.post('/options/:id/activate', requireAuth, async (req, res) => {
   try {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
     const result = await activateOption(req.params.id);
-    res.status(200).json(result);
+
+    // Fetch the full updated graph and include it in the same response.
+    // The client used to need a separate GET /graph call after activation to
+    // pick up frozen-sibling changes, but now it gets everything in one round
+    // trip. check.blueprintId comes from verifyOptionOwnershipAndLock above,
+    // which already fetched it — no extra queries needed here.
+    let fullGraph = null;
+    try {
+      fullGraph = await fetchFullBlueprintGraph(check.blueprintId);
+    } catch (graphErr) {
+      console.error('[ThinkMaps] full graph fetch after activate failed:', graphErr.message);
+      // Non-fatal — the activation itself succeeded; client falls back to a
+      // separate loadGraph() call when fullGraph is null in the response.
+    }
+
+    res.status(200).json({ ...result, fullGraph });
   } catch (err) {
     res.status(500).json({ error: 'Could not activate that option.', detail: err.message });
   }
