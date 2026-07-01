@@ -2311,6 +2311,61 @@ function endLineDrag(e){
   handleOptionActivate(targetOptionId);
 }
 
+// Extracts complete and in-progress option labels from partial streaming
+// JSON. The structure is {"groups":[{"options":[{"label":"..."},...]}]}.
+// Returns { complete: string[], inProgress: string|null } where
+// inProgress is the label text currently being written character by
+// character (no closing quote yet), or null if we're between labels.
+function extractStreamingLabels(text){
+  const complete = [];
+  // Match completed "label":"..." strings (greedy, but the first [^"]* 
+  // won't cross the closing quote due to the character class exclusion)
+  const completeRegex = /"label":"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+  let match;
+  while((match = completeRegex.exec(text)) !== null){
+    complete.push(match[1]);
+  }
+
+  // Look for an in-progress label: "label":" followed by text that
+  // hasn't hit its closing quote yet (i.e. appears at the end of the
+  // accumulated stream). The (?!.*") lookahead ensures this only matches
+  // if the captured group isn't followed by another quote in the text —
+  // i.e. it truly isn't closed yet.
+  let inProgress = null;
+  const lastQuoteIdx = text.lastIndexOf('"label":"');
+  if(lastQuoteIdx !== -1){
+    const afterKey = text.slice(lastQuoteIdx + 9); // skip past "label":"
+    if(!afterKey.includes('"')){
+      // Still being typed — show whatever characters have arrived
+      inProgress = afterKey || null;
+    }
+  }
+
+  return { complete, inProgress };
+}
+
+// Updates the canvas busy indicator with the live label stream —
+// shows all complete labels, and the currently-typing one with a cursor.
+// The first time it's called (tokenCount === 1), it switches the layout
+// from the ack message to the streaming list.
+function updateStreamingPreview(labels, tokenCount){
+  const indicator = document.getElementById('canvasBusyIndicator');
+  if(!indicator) return;
+
+  const allItems = [
+    ...labels.complete.map(l => `<span class="stream-label stream-label-done">${escapeHtml(l)}</span>`),
+    ...(labels.inProgress !== null
+      ? [`<span class="stream-label stream-label-typing">${escapeHtml(labels.inProgress)}<span class="stream-cursor">|</span></span>`]
+      : [])
+  ];
+
+  if(allItems.length === 0){
+    indicator.innerHTML = '<span class="stream-label-placeholder">Generating…</span>';
+  } else {
+    indicator.innerHTML = `<div class="stream-label-list">${allItems.join('')}</div>`;
+  }
+}
+
 async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
   const option = canvasState.options.find(o => o.id === optionId);
@@ -2343,6 +2398,8 @@ async function handleOptionActivate(optionId){
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let streamAccumulated = '';
+    let lastParsedLabels = [];
 
     while(true){
       const { done, value } = await reader.read();
@@ -2359,10 +2416,23 @@ async function handleOptionActivate(optionId){
 
         if(event.type === 'token'){
           tokenCount++;
-          // Update the busy message once the first token arrives — this
-          // is ~1-2 seconds in, which is when the user would otherwise
-          // still be staring at the initial ack message with no feedback.
-          if(tokenCount === 1) setCanvasBusy(true, 'Generating options…');
+          streamAccumulated += event.text;
+
+          // On the very first token, switch from the ack message to the
+          // live preview so the user sees actual content appearing.
+          if(tokenCount === 1) setCanvasBusy(true, '');
+
+          // Parse complete labels from the accumulated JSON stream and
+          // show them progressively — each new complete label appears
+          // in the busy indicator as soon as its closing quote arrives,
+          // not waiting for the full response. The in-progress label
+          // (currently being typed character by character by the model)
+          // is shown with a blinking cursor so it reads as live typing.
+          const labels = extractStreamingLabels(streamAccumulated);
+          if(labels.complete.length !== lastParsedLabels.length || labels.inProgress !== null){
+            updateStreamingPreview(labels, tokenCount);
+            lastParsedLabels = labels.complete;
+          }
         } else if(event.type === 'done'){
           canvasState.lastActivatedOptionId = optionId;
           canvasState.multiSelectStagedIds.clear();
