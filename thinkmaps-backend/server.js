@@ -1188,7 +1188,7 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   const result = await callMistralWithStreaming([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate now.' }
-  ], 350, onToken);
+  ], 800, onToken);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
   // happens to contain — this guarantees exactly blockNames.length groups
