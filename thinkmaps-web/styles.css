@@ -246,11 +246,18 @@ footer{ border-top:1px solid var(--line); padding:36px 0; }
 
 .auth-form{ display:none; flex-direction:column; gap:16px; }
 .auth-form.active{ display:flex; }
-.auth-form label{
+/* auth-step is the new name for auth-form in the OTP flow — same visual
+   treatment, just a more accurate name for multi-step auth screens. */
+.auth-step{ display:none; flex-direction:column; gap:16px; }
+.auth-step.active{ display:flex; }
+.auth-hint{ font-size:13.5px; color:var(--ink-muted); line-height:1.5; margin:0; }
+.auth-hint strong{ color:var(--ink); }
+.auth-resend-btn{ margin-top:-4px; font-size:13px; }
+.auth-form label, .auth-step label{
   display:flex; flex-direction:column; gap:6px;
   font-family:var(--font-mono); font-size:11px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-muted);
 }
-.auth-form input{
+.auth-form input, .auth-step input{
   font-family:var(--font-body); font-size:15px; color:var(--ink);
   background:var(--bg); border:1px solid var(--line); border-radius:8px;
   padding:11px 13px; outline:none;
