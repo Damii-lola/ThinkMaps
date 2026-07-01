@@ -2491,6 +2491,10 @@ async function handleRandom(groupId){
       alert(body.error || 'Could not auto-branch.');
       return;
     }
+    const body = await res.json();
+    if(body.chosenOption?.id){
+      canvasState.lastActivatedOptionId = body.chosenOption.id;
+    }
     await loadGraph();
   } catch (err){
     alert('Something went wrong with Random.');
@@ -2538,6 +2542,7 @@ async function handleRetrySpawned(optionId){
       alert(body.error || 'Could not retry the spawned groups.');
       return;
     }
+    canvasState.lastActivatedOptionId = optionId;
     await loadGraph();
   } catch (err){
     alert('Something went wrong retrying the spawned groups.');
@@ -2556,6 +2561,13 @@ async function handleRandomSpawned(optionId){
       const body = await res.json().catch(() => ({}));
       alert(body.error || 'Could not auto-branch.');
       return;
+    }
+    const body = await res.json();
+    // chosenOption.id is the specific option the server actually activated —
+    // this is what the path counter needs to trace from, not the parent
+    // optionId that spawned the groups.
+    if(body.chosenOption?.id){
+      canvasState.lastActivatedOptionId = body.chosenOption.id;
     }
     await loadGraph();
   } catch (err){
