@@ -400,15 +400,75 @@ async function callMistral(messages, maxTokens = 350){
   }
 }
 
-// Same raw call as callMistral above, minus the JSON-mode forcing and
-// parsing — for plain prose back instead of a JSON object. Currently
-// unused: the two spots that used to need this (synthesizeFinalIdea and
-// reviseIdeaWithFeedback's fullDescription) were merged into their main
-// JSON call instead, removing a full sequential network round trip from
-// each for speed. Left defined as a ready utility for any future spot
-// that genuinely needs a standalone prose response — mirrors
-// callMistral's own fetch pattern exactly rather than introducing a
-// different client/SDK shape into the file.
+// The streaming variant — calls Mistral with stream:true and fires
+// onToken(text) for every delta so the SSE route can forward tokens to
+// the browser as they arrive, making the first content visible at
+// ~1-2 seconds instead of ~10-15 seconds. Returns the same fully-parsed
+// JSON object callMistral does, so all downstream code stays identical.
+// When onToken is null, falls back to the non-streaming callMistral.
+async function callMistralWithStreaming(messages, maxTokens = 350, onToken = null){
+  if(!onToken) return callMistral(messages, maxTokens);
+
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'mistral-small-2503',
+      messages,
+      response_format: { type: 'json_object' },
+      max_tokens: maxTokens,
+      stream: true
+    })
+  });
+
+  if(!res.ok){
+    const errText = await res.text();
+    throw new Error(`Mistral API error (${res.status}): ${errText}`);
+  }
+
+  let accumulated = '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+
+  while(true){
+    const { done, value } = await reader.read();
+    if(done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    for(const line of chunk.split('\n')){
+      if(!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+      if(raw === '[DONE]') break;
+      try {
+        const parsed = JSON.parse(raw);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if(delta){
+          accumulated += delta;
+          try { onToken(delta); } catch(e){ /* don't let a broken SSE write kill the whole call */ }
+        }
+      } catch (e){ /* malformed chunk — skip */ }
+    }
+  }
+
+  // Same cleanup / parse the non-streaming path does
+  let cleaned = accumulated.trim();
+  if(cleaned.startsWith('```')){
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  }
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if(firstBrace !== -1 && lastBrace > firstBrace) cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseErr) {
+    throw new Error(`Mistral streaming returned invalid JSON (${parseErr.message}). Raw: ${accumulated.slice(0, 200)}`);
+  }
+}
+
 async function callMistralPlainText(messages){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
@@ -1082,15 +1142,17 @@ async function searchRealExistingSolutions(pathContext){
   return await webSearchForSimilarProducts(`${baseQuery} existing apps solutions reviews`);
 }
 
-async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], nicheTopics = []){
+async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], onToken = null){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
   const needsPainSearch = blockNames.includes('Personal Read on the Pain');
   const needsExistingSearch = blockNames.includes('Honest Awareness of What Exists');
+  // 2-second hard cap — Serper can be slow and was previously blocking
+  // Mistral from starting for up to 3-5 seconds with no timeout.
   const [painSearchResults, existingSearchResults] = await Promise.all([
-    needsPainSearch ? searchRealPainPoints(pathContext) : Promise.resolve(null),
-    needsExistingSearch ? searchRealExistingSolutions(pathContext) : Promise.resolve(null)
+    needsPainSearch ? withTimeout(searchRealPainPoints(pathContext), 2000) : Promise.resolve(null),
+    needsExistingSearch ? withTimeout(searchRealExistingSolutions(pathContext), 2000) : Promise.resolve(null)
   ]);
 
   const painGroundingNote = needsPainSearch
@@ -1123,10 +1185,10 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps. Generate up to 5 specific options for EACH of these ${blockNames.length} blocks:\n${blockList}\nPath so far: ${pathDescription}\nEvery option must build on this exact path, fit its block's territory, and be answerable from the person's own knowledge/instinct.${crossBlockNote}${diversityNote}${painGroundingNote}${existingGroundingNote}${SHORT_OPTION_RULE} JSON only: {"groups": [{"options": [{"label": string}]}]} with exactly ${blockNames.length} groups.`;
 
-  const result = await callMistral([
+  const result = await callMistralWithStreaming([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate now.' }
-  ]);
+  ], 350, onToken);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
   // happens to contain — this guarantees exactly blockNames.length groups
@@ -1167,7 +1229,7 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
 // next." Returns the same { groups: [...] } shape generateCandidateBatch
 // does (just with one entry instead of three), so activateOption can pick
 // between them without any change to how the result gets inserted.
-async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = [], nicheTopics = []){
+async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = [], onToken = null){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
 
   const recentLabels = existingLabels.slice(-15);
@@ -1177,10 +1239,10 @@ async function generateIdeaSynthesisCheckpoint(pathContext, existingLabels = [],
 
   const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. The person has finished the first round of exploration. Privately work out the SPECIFIC app concept crystallizing from their path — a concrete, nameable idea you could describe in one sharp sentence. Then produce EXACTLY 2 opposing options for ONE key fork specific to that emerging idea (not a generic preference question — a real direction choice for THIS concept). The two options must be genuinely opposed directions.${diversityNote}${SHORT_OPTION_RULE} JSON only: {"options": [{"label": string}, {"label": string}]}`;
 
-  const result = await callMistral([
+  const result = await callMistralWithStreaming([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Path: ${pathDescription}` }
-  ], 120);
+  ], 120, onToken);
 
   return {
     groups: [{
@@ -1427,7 +1489,7 @@ function sanitizeOptionLabels(rawOptions){
 // combinedOptionIds gets selected and frozen-sibling-handled exactly like
 // optionId does, just without becoming the traversal anchor itself. Every
 // existing call site passes nothing here and behaves completely unchanged.
-async function activateOption(optionId, combinedOptionIds = []){
+async function activateOption(optionId, combinedOptionIds = [], onToken = null){
   const { data: option } = await supabase
     .from('options')
     .select('id, label, group_version_id, is_selected')
@@ -1545,14 +1607,14 @@ async function activateOption(optionId, combinedOptionIds = []){
     const existingLabels = walkExistingOptionLabelsFromSnapshot(nicheOptionId, snapshot);
 
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
-      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels);
+      generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels, onToken);
     } else if(!ideaCheckpointAlreadyShown){
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken);
     } else {
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken);
     }
   }
 
@@ -1841,30 +1903,57 @@ async function fetchFullBlueprintGraph(blueprintId){
 // completed drag from script.js; the frontend decides which is allowed where.
 // Returns the FULL updated graph state alongside the activation result so the
 // client doesn't need a second GET /graph round trip after the AI finishes.
+// Adds a hard timeout to any promise — used on the web search calls
+// so a slow/unresponsive Serper API never delays canvas generation by
+// more than the given ms. Returns null on timeout rather than throwing.
+function withTimeout(promise, ms){
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(null), ms))
+  ]);
+}
+
 app.post('/options/:id/activate', requireAuth, async (req, res) => {
+  // SSE — client receives tokens live as Mistral generates them, then
+  // gets the full graph state at the end. This is the fundamental fix
+  // for perceived latency: instead of waiting 10-15s for a complete
+  // response, the user sees the first options appearing in ~1-2 seconds.
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if behind a proxy
+  res.flushHeaders();
+
+  function send(obj){
+    if(!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  }
+
   try {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
-    if(check.error) return res.status(check.status).json({ error: check.error });
+    if(check.error){
+      send({ type: 'error', error: check.error, status: check.status });
+      return res.end();
+    }
 
-    const result = await activateOption(req.params.id);
+    // activateOption now accepts an onToken callback — when provided, it
+    // calls Mistral in streaming mode and fires onToken for every delta
+    // token so this route can forward them to the client in real-time.
+    const result = await activateOption(req.params.id, [], (tokenText) => {
+      send({ type: 'token', text: tokenText });
+    });
 
-    // Fetch the full updated graph and include it in the same response.
-    // The client used to need a separate GET /graph call after activation to
-    // pick up frozen-sibling changes, but now it gets everything in one round
-    // trip. check.blueprintId comes from verifyOptionOwnershipAndLock above,
-    // which already fetched it — no extra queries needed here.
     let fullGraph = null;
     try {
       fullGraph = await fetchFullBlueprintGraph(check.blueprintId);
     } catch (graphErr) {
       console.error('[ThinkMaps] full graph fetch after activate failed:', graphErr.message);
-      // Non-fatal — the activation itself succeeded; client falls back to a
-      // separate loadGraph() call when fullGraph is null in the response.
     }
 
-    res.status(200).json({ ...result, fullGraph });
+    send({ type: 'done', groups: result.groups, reactivated: result.reactivated, fullGraph });
+    res.end();
   } catch (err) {
-    res.status(500).json({ error: 'Could not activate that option.', detail: err.message });
+    send({ type: 'error', error: 'Could not activate that option.', detail: err.message });
+    res.end();
   }
 });
 
