@@ -1,5 +1,5 @@
 // ---------- feedback.js ----------
-// Shared across every ThinkMaps page — adds a small visual "pop" on
+// Shared across every ThinkMaps page — adds a small visual "pop" onmmm
 // click and a soft synthesized click tick. No UI toggle, no background
 // sound, no audio file — just the one transient synthesized click.
 
