@@ -628,8 +628,41 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 .canvas-busy-indicator{
   position:absolute; top:16px; left:50%; transform:translateX(-50%);
   background:var(--ink); color:var(--bg); font-family:var(--font-mono); font-size:12px;
-  padding:6px 14px; border-radius:999px; z-index:6;
-  max-width:90%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  padding:6px 14px; border-radius:14px; z-index:6;
+  max-width:min(520px, 90%); min-width:120px;
+  transition:max-width .3s ease, padding .2s ease;
+}
+
+/* ---------- Streaming label preview (inside canvas-busy-indicator) ---------- */
+.stream-label-list{
+  display:flex; flex-direction:column; gap:4px; max-height:260px;
+  overflow:hidden; /* no scrollbar — older labels just scroll out of view */
+}
+.stream-label-placeholder{ white-space:nowrap; }
+.stream-label{
+  display:block; font-size:11.5px; line-height:1.45; white-space:pre-wrap;
+  word-break:break-word;
+}
+.stream-label-done{
+  /* Fade in when a label completes — the pop from nothing to full
+     opacity is what makes each new option feel "typed in" rather than
+     just appearing. A very short animation so it's subtle, not distracting. */
+  animation:labelFadeIn .18s ease both;
+}
+.stream-label-typing{
+  opacity:.85; /* slightly dimmer to distinguish from finished labels */
+}
+.stream-cursor{
+  display:inline-block; margin-left:1px; color:var(--accent-soft);
+  animation:cursorBlink .65s step-start infinite;
+}
+@keyframes labelFadeIn{
+  from{ opacity:0; transform:translateY(3px); }
+  to{ opacity:1; transform:translateY(0); }
+}
+@keyframes cursorBlink{
+  0%, 100%{ opacity:1; }
+  50%{ opacity:0; }
 }
 
 /* ---------- IDEATE PAGE ---------- */
