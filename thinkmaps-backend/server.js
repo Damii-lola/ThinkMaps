@@ -21,11 +21,33 @@ const supabase = createClient(
 // ============================================================
 // OTP.DEV INTEGRATION — replaces Supabase's built-in email
 // confirmation. Every signup AND every login now requires a
-// one-time code sent via otp.dev, verified server-side before
-// any session is issued.
+// one-time code sent via otp.dev (GetOTP), verified server-side
+// before any session is issued.
+//
+// otp.dev's real API — confirmed against their published docs at
+// https://otp.dev/en/docs/sms-otp/ (the email channel follows the
+// identical request/response shape, just with an "email" field
+// instead of "phone"/"sender") — is NOT what an earlier draft of
+// this integration assumed. The actual shape:
+//   - Auth header is `X-OTP-Key: <key>`, not `Authorization: Bearer`
+//   - Sending a code is POST https://api.otp.dev/v1/verifications
+//     (there is no /send endpoint)
+//   - Every send call requires a "template" UUID, created ahead of
+//     time in the otp.dev dashboard (Templates -> Create Template).
+//     There is no way to send a code without one.
+//   - Checking a code is GET https://api.otp.dev/v1/verifications
+//     with the code and the recipient as query params — not a POST.
+//   - The send response's correlator field is "message_id", not
+//     "request_id" — kept as requestId in our own pending-state maps
+//     purely so the rest of this file's naming didn't need to change,
+//     but it's message_id under the hood.
 // ============================================================
 const OTP_DEV_BASE_URL = process.env.OTP_DEV_BASE_URL || 'https://api.otp.dev/v1';
 const OTP_DEV_API_KEY = process.env.OTP_DEV_API_KEY;
+// The template created in the otp.dev dashboard (Templates -> Create
+// Template) for the OTP email itself — required on every send call,
+// no way around it per otp.dev's API.
+const OTP_DEV_TEMPLATE_ID = process.env.OTP_DEV_TEMPLATE_ID;
 
 // In-memory pending state — fine for a single Render instance.
 // pendingSignups: email -> { username, password, requestId, expiresAt }
@@ -46,39 +68,61 @@ function cleanupExpiredPending(){
 setInterval(cleanupExpiredPending, 60 * 1000);
 
 async function sendOtpEmail(email){
-  const res = await fetch(`${OTP_DEV_BASE_URL}/send`, {
+  if(!OTP_DEV_API_KEY) throw new Error('OTP_DEV_API_KEY is not set in the environment.');
+  if(!OTP_DEV_TEMPLATE_ID) throw new Error('OTP_DEV_TEMPLATE_ID is not set — create a template in the otp.dev dashboard and set its UUID as this env var.');
+
+  const res = await fetch(`${OTP_DEV_BASE_URL}/verifications`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${OTP_DEV_API_KEY}`,
+      'X-OTP-Key': OTP_DEV_API_KEY,
+      'Accept': 'application/json',
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ email, channel: 'email' })
+    body: JSON.stringify({
+      data: {
+        channel: 'email',
+        email,
+        template: OTP_DEV_TEMPLATE_ID,
+        code_length: 6
+      }
+    })
   });
 
+  const data = await res.json().catch(() => ({}));
+
   if(!res.ok){
-    const errText = await res.text();
-    throw new Error(`otp.dev send failed (${res.status}): ${errText}`);
+    const detail = data?.errors?.[0]?.message || JSON.stringify(data);
+    throw new Error(`otp.dev send failed (${res.status}): ${detail}`);
   }
 
-  const data = await res.json();
-  // otp.dev returns a request_id used to correlate the verify call.
-  return data.request_id;
+  // otp.dev's real correlator field is message_id, not request_id —
+  // kept as .requestId in our own pending-state entries so nothing
+  // else in this file needed renaming.
+  return data.message_id;
 }
 
 async function verifyOtpEmail(email, code, requestId){
-  const res = await fetch(`${OTP_DEV_BASE_URL}/verify`, {
-    method: 'POST',
+  if(!OTP_DEV_API_KEY) throw new Error('OTP_DEV_API_KEY is not set in the environment.');
+
+  const params = new URLSearchParams({ code, email });
+  const res = await fetch(`${OTP_DEV_BASE_URL}/verifications?${params.toString()}`, {
+    method: 'GET',
     headers: {
-      'Authorization': `Bearer ${OTP_DEV_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ email, code, request_id: requestId })
+      'X-OTP-Key': OTP_DEV_API_KEY,
+      'Accept': 'application/json'
+    }
   });
 
   if(!res.ok) return false;
 
-  const data = await res.json();
-  return !!data.valid;
+  const data = await res.json().catch(() => null);
+  // "If the data is empty, it means the code is invalid" per otp.dev's
+  // own docs — a successful, valid-code response comes back with a
+  // populated result instead.
+  if(!data) return false;
+  if(Array.isArray(data)) return data.length > 0;
+  if(Array.isArray(data?.data)) return data.data.length > 0;
+  return !!(data?.status === 'verified' || data?.valid || data?.message_id);
 }
 
 // Free tier locks a blueprint to read-only after this much time since
