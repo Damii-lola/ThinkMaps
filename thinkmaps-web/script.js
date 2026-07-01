@@ -220,43 +220,179 @@ function initGraphDemo(){
 // resolves it to an email first (frontend can't query profiles — RLS blocks it),
 // then the actual password check happens via Supabase Auth, never through our backend.
 function initAuthPage(){
-  const signinForm = document.getElementById('signinForm');
-  const signupForm = document.getElementById('signupForm');
-  if(!signinForm && !signupForm) return;
+  // Guard — only run on auth.html which has these elements
+  const signinStep1 = document.getElementById('signinStep1');
+  const signupStep1 = document.getElementById('signupStep1');
+  if(!signinStep1 && !signupStep1) return;
 
-  // If this page load IS the redirect back from a confirmation email,
-  // Supabase appends the session tokens straight onto the URL hash.
-  // We deliberately don't use them to auto-log the user in — they
-  // should land on the login page and sign in themselves. So: just
-  // strip the hash (purely synchronous, no network call, no lag) and
-  // show a friendly banner explaining why they're here.
-  if(window.location.hash.includes('access_token')){
-    const banner = document.getElementById('emailConfirmedBanner');
-    if(banner) banner.style.display = 'block';
-    history.replaceState(null, '', window.location.pathname);
-  }
-
-  // Tab switching between Sign in / Create account
-  const tabs = document.querySelectorAll('.auth-tab');
-  tabs.forEach(tab => {
+  // Tab switching
+  document.querySelectorAll('.auth-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
-      document.getElementById(`${tab.dataset.tab}Form`).classList.add('active');
+      // Show step 1 of the selected tab, hide everything else
+      const mode = tab.dataset.tab;
+      document.querySelectorAll('.auth-step').forEach(s => s.classList.remove('active'));
+      document.getElementById(`${mode}Step1`)?.classList.add('active');
     });
   });
 
-  if(signinForm){
-    signinForm.addEventListener('submit', handleSignIn);
-  }
-  if(signupForm){
-    signupForm.addEventListener('submit', handleSignUp);
-  }
+  // ── SIGN IN ──
+  // Step 1: validate + send OTP
+  document.getElementById('signinSendOtpBtn')?.addEventListener('click', async () => {
+    const errorEl = document.getElementById('signinError');
+    errorEl.textContent = '';
+    const identifier = document.getElementById('signinIdentifier').value.trim();
+    const password = document.getElementById('signinPassword').value;
+    if(!identifier || !password){ errorEl.textContent = 'Fill in all fields.'; return; }
+
+    const btn = document.getElementById('signinSendOtpBtn');
+    btn.disabled = true; btn.textContent = 'Sending…';
+
+    try {
+      // Resolve username → email if needed
+      const email = await resolveEmail(identifier);
+
+      const res = await fetch(`${API_BASE_URL}/auth/send-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, purpose: 'login' })
+      });
+      const body = await res.json();
+      if(!res.ok){ errorEl.textContent = body.error || 'Could not send code.'; return; }
+
+      // Stash resolved email for step 2
+      document.getElementById('signinOtpEmail').textContent = email;
+      signinStep1.classList.remove('active');
+      document.getElementById('signinStep2').classList.add('active');
+      document.getElementById('signinOtpCode').focus();
+
+      // Wire resend
+      document.getElementById('signinResendBtn').onclick = async () => {
+        document.getElementById('signinOtpError').textContent = '';
+        const r = await fetch(`${API_BASE_URL}/auth/send-otp`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, purpose: 'login' })
+        });
+        const rb = await r.json();
+        document.getElementById('signinOtpError').textContent = r.ok ? 'New code sent.' : (rb.error || 'Could not resend.');
+      };
+
+      // Wire verify
+      document.getElementById('signinVerifyBtn').onclick = async () => {
+        const code = document.getElementById('signinOtpCode').value.trim();
+        const otpErr = document.getElementById('signinOtpError');
+        otpErr.textContent = '';
+        if(code.length !== 6){ otpErr.textContent = 'Enter the 6-digit code.'; return; }
+
+        const vBtn = document.getElementById('signinVerifyBtn');
+        vBtn.disabled = true; vBtn.textContent = 'Verifying…';
+
+        const vRes = await fetch(`${API_BASE_URL}/auth/verify-otp-login`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, code })
+        });
+        const vBody = await vRes.json();
+        if(!vRes.ok){
+          otpErr.textContent = vBody.error || 'Verification failed.';
+          vBtn.disabled = false; vBtn.textContent = 'Sign in';
+          return;
+        }
+        // Store session so getActiveSession() finds it
+        storeSession(vBody.session);
+        window.location.href = 'dashboard.html';
+      };
+    } catch (err) {
+      errorEl.textContent = err.message || 'Something went wrong.';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Continue';
+    }
+  });
+
+  // ── SIGN UP ──
+  document.getElementById('signupSendOtpBtn')?.addEventListener('click', async () => {
+    const errorEl = document.getElementById('signupError');
+    errorEl.textContent = '';
+    const email    = document.getElementById('signupEmail').value.trim();
+    const username = document.getElementById('signupUsername').value.trim();
+    const password = document.getElementById('signupPassword').value;
+    const confirm  = document.getElementById('signupPasswordConfirm').value;
+
+    if(!email || !username || !password || !confirm){ errorEl.textContent = 'Fill in all fields.'; return; }
+    if(password !== confirm){ errorEl.textContent = 'Passwords don\'t match.'; return; }
+    if(password.length < 8){ errorEl.textContent = 'Password must be at least 8 characters.'; return; }
+
+    const btn = document.getElementById('signupSendOtpBtn');
+    btn.disabled = true; btn.textContent = 'Sending…';
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/auth/send-otp`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, purpose: 'signup' })
+      });
+      const body = await res.json();
+      if(!res.ok){ errorEl.textContent = body.error || 'Could not send code.'; return; }
+
+      document.getElementById('signupOtpEmail').textContent = email;
+      signupStep1.classList.remove('active');
+      document.getElementById('signupStep2').classList.add('active');
+      document.getElementById('signupOtpCode').focus();
+
+      document.getElementById('signupResendBtn').onclick = async () => {
+        document.getElementById('signupOtpError').textContent = '';
+        const r = await fetch(`${API_BASE_URL}/auth/send-otp`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, purpose: 'signup' })
+        });
+        const rb = await r.json();
+        document.getElementById('signupOtpError').textContent = r.ok ? 'New code sent.' : (rb.error || 'Could not resend.');
+      };
+
+      document.getElementById('signupVerifyBtn').onclick = async () => {
+        const code = document.getElementById('signupOtpCode').value.trim();
+        const otpErr = document.getElementById('signupOtpError');
+        otpErr.textContent = '';
+        if(code.length !== 6){ otpErr.textContent = 'Enter the 6-digit code.'; return; }
+
+        const vBtn = document.getElementById('signupVerifyBtn');
+        vBtn.disabled = true; vBtn.textContent = 'Creating account…';
+
+        const vRes = await fetch(`${API_BASE_URL}/auth/verify-otp-signup`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, username, password, code })
+        });
+        const vBody = await vRes.json();
+        if(!vRes.ok){
+          otpErr.textContent = vBody.error || 'Verification failed.';
+          vBtn.disabled = false; vBtn.textContent = 'Create account';
+          return;
+        }
+        storeSession(vBody.session);
+        window.location.href = 'dashboard.html';
+      };
+    } catch (err) {
+      errorEl.textContent = err.message || 'Something went wrong.';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Continue';
+    }
+  });
+}
+
+// Stores a Supabase session in localStorage so getActiveSession() can
+// find it on subsequent page loads without Supabase's own auth client.
+function storeSession(session){
+  if(!session) return;
+  try {
+    localStorage.setItem('thinkmaps_session', JSON.stringify({
+      access_token:  session.access_token,
+      refresh_token: session.refresh_token,
+      expires_at:    session.expires_at
+    }));
+  } catch(e){ /* non-fatal */ }
 }
 
 async function resolveEmail(identifier){
-  if(identifier.includes('@')) return identifier; // already an email, nothing to resolve
+  if(identifier.includes('@')) return identifier;
 
   const res = await fetch(`${API_BASE_URL}/auth/resolve-email`, {
     method: 'POST',
@@ -273,92 +409,27 @@ async function resolveEmail(identifier){
   return email;
 }
 
-async function handleSignIn(e){
-  e.preventDefault();
-  const errorEl = document.getElementById('signinError');
-  errorEl.textContent = '';
-
-  const identifier = document.getElementById('signinIdentifier').value.trim();
-  const password = document.getElementById('signinPassword').value;
-
-  try {
-    const email = await resolveEmail(identifier);
-    const sb = await getSupabaseClient();
-    const { error } = await sb.auth.signInWithPassword({ email, password });
-
-    if(error) throw error;
-
-    window.location.href = 'dashboard.html';
-  } catch (err){
-    if(/email not confirmed/i.test(err.message || '')){
-      errorEl.textContent = 'Please confirm your email first — check your inbox for the link.';
-    } else {
-      errorEl.textContent = err.message || 'Could not sign in. Check your details and try again.';
-    }
-  }
-}
-
-async function handleSignUp(e){
-  e.preventDefault();
-  const errorEl = document.getElementById('signupError');
-  errorEl.textContent = '';
-
-  const email = document.getElementById('signupEmail').value.trim();
-  const username = document.getElementById('signupUsername').value.trim();
-  const password = document.getElementById('signupPassword').value;
-  const confirmPassword = document.getElementById('signupPasswordConfirm').value;
-
-  if(password !== confirmPassword){
-    errorEl.textContent = 'Passwords don\'t match.';
-    return;
-  }
-
-  try {
-    const sb = await getSupabaseClient();
-    const { data, error } = await sb.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { username },
-        // Sends the confirmation link back to wherever auth.html actually
-        // lives — works on GitHub Pages without hardcoding the repo path.
-        emailRedirectTo: window.location.origin + window.location.pathname
-      }
-    });
-
-    if(error){
-      if(/duplicate|unique/i.test(error.message)){
-        throw new Error('That email or username is already taken.');
-      }
-      throw error;
-    }
-
-    if(data.session){
-      // Confirmation is off (or already confirmed) — straight in.
-      window.location.href = 'dashboard.html';
-    } else {
-      // Confirmation required — Supabase already sent the email itself.
-      showSignupPending(email);
-    }
-  } catch (err){
-    errorEl.textContent = err.message || 'Could not create your account. Try again.';
-  }
-}
-
-function showSignupPending(email){
-  const signupForm = document.getElementById('signupForm');
-  const pendingEl = document.getElementById('signupPending');
-  const emailEl = document.getElementById('signupPendingEmail');
-
-  if(signupForm) signupForm.style.display = 'none';
-  if(emailEl) emailEl.textContent = email;
-  if(pendingEl) pendingEl.style.display = 'block';
-}
-
 // ---------- SESSION HELPERS ----------
 // Shared by any page that needs to know who's logged in (dashboard, app, ...).
 
 async function getActiveSession(){
+  // Check localStorage first — this is where storeSession() writes after
+  // a successful OTP verify-and-signin. If the token is still valid,
+  // return it directly without a Supabase round trip.
+  try {
+    const stored = localStorage.getItem('thinkmaps_session');
+    if(stored){
+      const parsed = JSON.parse(stored);
+      const expiresAt = parsed.expires_at; // Unix timestamp (seconds)
+      if(parsed.access_token && (!expiresAt || Date.now() / 1000 < expiresAt - 30)){
+        return parsed; // still valid
+      }
+      // Expired — remove it and fall through to Supabase
+      localStorage.removeItem('thinkmaps_session');
+    }
+  } catch(e){ /* non-fatal */ }
+
+  // Fall back to Supabase's own session store (handles token refresh)
   const sb = await getSupabaseClient();
   const { data } = await sb.auth.getSession();
   return data.session; // null if nobody's logged in
@@ -387,6 +458,7 @@ async function authedFetch(path, options = {}){
 }
 
 async function handleLogout(){
+  try { localStorage.removeItem('thinkmaps_session'); } catch(e){}
   const sb = await getSupabaseClient();
   await sb.auth.signOut();
   window.location.href = 'index.html';
