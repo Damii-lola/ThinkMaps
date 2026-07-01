@@ -5722,30 +5722,76 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
       selected: selectedOption
     }];
 
-    if(updatedAnswers.length >= CONFIRMATION_QUESTION_COUNT){
-      // All 3 confirmations are in — the deep dive: real competitive
-      // research, pros adopted, cons solved, then the final synthesis.
-      // This is the one part of the whole app that legitimately takes a
-      // while (up to 3 sequential Mistral calls) — the frontend shows a
-      // distinct "doing deep research" state for exactly this step.
-      const competitiveLandscape = await researchCompetitiveLandscape(session.idea_draft, session.path_summary, updatedAnswers);
-      const solvedProblems = await synthesizeSolutionsFromCons(competitiveLandscape);
-      const finalIdea = await synthesizeFinalIdea(session.idea_draft, session.path_summary, updatedAnswers, competitiveLandscape, solvedProblems);
+    const isLastAnswer = updatedAnswers.length >= CONFIRMATION_QUESTION_COUNT;
 
-      await supabase.from('confirmation_sessions').update({
-        answers: updatedAnswers,
-        status: 'completed',
-        result: finalIdea,
-        pending_question: null
-      }).eq('id', session.id);
+    if(isLastAnswer){
+      // The final answer kicks off the full competitive research pipeline:
+      // webSearchForSimilarProducts + researchCompetitiveLandscape (Mistral)
+      // + synthesizeSolutionsFromCons (Mistral) + synthesizeFinalIdea
+      // (Mistral) — three sequential AI calls that can take 20-40 seconds
+      // total, which reliably hits Render's 30-second HTTP request timeout.
+      //
+      // SSE keeps the connection alive indefinitely. The client already
+      // shows a dedicated "doing deep research" UI for this step; progress
+      // events here let it show what phase is actually running instead of
+      // just a spinner with no feedback at all.
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
 
-      return res.status(200).json({
-        status: 'completed',
-        progress: { current: updatedAnswers.length, total: CONFIRMATION_QUESTION_COUNT },
-        result: finalIdea
-      });
+      function sendProgress(message){
+        if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'progress', message })}\n\n`);
+      }
+      function sendDone(payload){
+        if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'done', ...payload })}\n\n`);
+      }
+      function sendError(error){
+        if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'error', error })}\n\n`);
+      }
+
+      // Heartbeat every 10s — Render (and most proxies) drop idle SSE
+      // connections that send nothing for >30s, so this keeps the pipe
+      // open while the Mistral calls are in flight.
+      const heartbeat = setInterval(() => {
+        if(!res.writableEnded) res.write(': heartbeat\n\n');
+      }, 10000);
+
+      try {
+        sendProgress('Researching what already exists in this space…');
+        const competitiveLandscape = await researchCompetitiveLandscape(session.idea_draft, session.path_summary, updatedAnswers);
+
+        sendProgress('Identifying how to address competitor weaknesses…');
+        const solvedProblems = await synthesizeSolutionsFromCons(competitiveLandscape);
+
+        sendProgress('Synthesizing your final hardened idea…');
+        const finalIdea = await synthesizeFinalIdea(session.idea_draft, session.path_summary, updatedAnswers, competitiveLandscape, solvedProblems);
+
+        await supabase.from('confirmation_sessions').update({
+          answers: updatedAnswers,
+          status: 'completed',
+          result: finalIdea,
+          pending_question: null
+        }).eq('id', session.id);
+
+        sendDone({
+          status: 'completed',
+          progress: { current: updatedAnswers.length, total: CONFIRMATION_QUESTION_COUNT },
+          result: finalIdea
+        });
+        res.end();
+      } catch (pipelineErr) {
+        sendError('Could not complete the deep research pipeline. ' + pipelineErr.message);
+        res.end();
+      } finally {
+        clearInterval(heartbeat);
+      }
+      return;
     }
 
+    // Questions 1–3: fast (one generation call, no risk of timeout) — stay
+    // as regular JSON so no client changes needed for the non-final flow.
     const nextQuestion = await generateConfirmationQuestion(session.idea_draft, session.path_summary, updatedAnswers);
 
     await supabase.from('confirmation_sessions').update({
