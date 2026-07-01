@@ -5,6 +5,7 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const { NICHE_PATHWAYS } = require('./niche_pathways');
 
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
