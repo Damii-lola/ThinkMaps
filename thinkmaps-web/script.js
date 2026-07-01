@@ -2315,37 +2315,95 @@ async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
   const option = canvasState.options.find(o => o.id === optionId);
   setCanvasBusy(true, buildActivationAckMessage(option?.label));
+
+  let tokenCount = 0;
+
   try {
-    const res = await authedFetch(`/options/${optionId}/activate`, { method: 'POST', body: JSON.stringify({}) });
-    if(!res) return;
+    const session = await getActiveSession();
+    if(!session){ window.location.href = 'auth.html'; return; }
+
+    // SSE via fetch+ReadableStream — EventSource only supports GET so we
+    // can't use it here. The server sends token events live as Mistral
+    // generates, then a 'done' event with the full updated graph state.
+    const res = await fetch(`${API_BASE_URL}/options/${optionId}/activate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`
+      },
+      body: JSON.stringify({})
+    });
+
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
-      console.error('[ThinkMaps] activate failed:', body.error, body.detail);
       alert(body.error || 'Could not activate that option.');
       return;
     }
-    canvasState.lastActivatedOptionId = optionId;
-    canvasState.multiSelectStagedIds.clear();
 
-    const body = await res.json();
-    if(body.fullGraph){
-      // Full graph came back in the same response — apply it directly and
-      // re-render without a second network round trip. This is the normal
-      // path; loadGraph() below is a safety fallback only.
-      canvasState.groups = body.fullGraph.groups;
-      canvasState.groupVersions = body.fullGraph.groupVersions;
-      canvasState.options = body.fullGraph.options;
-      renderPathProgress();
-      renderCanvas();
-      maybeAutoFrameCompletedPath();
-    } else {
-      // fullGraph was null (non-fatal server error during graph fetch) —
-      // fall back to the old separate round trip so the canvas always
-      // reflects the correct state.
-      await loadGraph();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while(true){
+      const { done, value } = await reader.read();
+      if(done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // hold the last (possibly incomplete) line
+
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        let event;
+        try { event = JSON.parse(line.slice(6)); } catch(e){ continue; }
+
+        if(event.type === 'token'){
+          tokenCount++;
+          // Update the busy message once the first token arrives — this
+          // is ~1-2 seconds in, which is when the user would otherwise
+          // still be staring at the initial ack message with no feedback.
+          if(tokenCount === 1) setCanvasBusy(true, 'Generating options…');
+        } else if(event.type === 'done'){
+          canvasState.lastActivatedOptionId = optionId;
+          canvasState.multiSelectStagedIds.clear();
+          if(event.fullGraph){
+            canvasState.groups = event.fullGraph.groups;
+            canvasState.groupVersions = event.fullGraph.groupVersions;
+            canvasState.options = event.fullGraph.options;
+            renderPathProgress();
+            renderCanvas();
+            maybeAutoFrameCompletedPath();
+          } else {
+            await loadGraph(); // fallback if full graph wasn't returned
+          }
+        } else if(event.type === 'error'){
+          alert(event.error || 'Could not activate that option.');
+          return;
+        }
+      }
     }
   } catch (err){
-    alert('Something went wrong activating that option.');
+    // Network failure or stream read error — fall back to the old non-streaming path
+    try {
+      const res = await authedFetch(`/options/${optionId}/activate`, { method: 'POST', body: JSON.stringify({}) });
+      if(res && res.ok){
+        canvasState.lastActivatedOptionId = optionId;
+        canvasState.multiSelectStagedIds.clear();
+        const body = await res.json().catch(() => ({}));
+        if(body.fullGraph){
+          canvasState.groups = body.fullGraph.groups;
+          canvasState.groupVersions = body.fullGraph.groupVersions;
+          canvasState.options = body.fullGraph.options;
+          renderPathProgress();
+          renderCanvas();
+          maybeAutoFrameCompletedPath();
+        } else {
+          await loadGraph();
+        }
+      }
+    } catch(fallbackErr){
+      alert('Something went wrong activating that option.');
+    }
   } finally {
     setCanvasBusy(false);
   }
