@@ -3046,48 +3046,106 @@ async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQ
   const questionEl = document.getElementById('confirmQuestion');
   const cardEl = document.getElementById('confirmCard');
   const researchingEl = document.getElementById('confirmResearching');
+  const researchingMsg = researchingEl?.querySelector('p');
   const aiAnswerBtn = document.getElementById('aiAnswerBtn');
 
   if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
   if(aiAnswerBtn) aiAnswerBtn.disabled = true;
 
-  // The 3rd answer kicks off the actual deep-research pipeline on the
-  // backend — genuinely slower than a normal question turnaround, so it
-  // gets its own honest state instead of a "Thinking…" flash that would
-  // otherwise look stuck.
   const isLastQuestion = currentQuestionNumber >= totalQuestions;
   if(isLastQuestion){
     if(cardEl) cardEl.style.display = 'none';
     if(researchingEl) researchingEl.style.display = 'block';
+    if(researchingMsg) researchingMsg.textContent = 'Researching what already exists in this space…';
   } else if(questionEl){
     questionEl.textContent = 'Thinking…';
   }
 
   try {
-    const res = await authedFetch(`/confirm/${confirmState.sessionId}/answer`, {
+    const session = await getActiveSession();
+    if(!session){ window.location.href = 'auth.html'; return; }
+
+    const res = await fetch(`${API_BASE_URL}/confirm/${confirmState.sessionId}/answer`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`
+      },
       body: JSON.stringify({ selectedOption })
     });
-    if(!res) return;
 
-    const body = await res.json();
     if(!res.ok){
+      // Non-SSE error response (questions 1-3 or a real 4xx/5xx before
+      // the pipeline even started)
+      const body = await res.json().catch(() => ({}));
       if(researchingEl) researchingEl.style.display = 'none';
       if(cardEl) cardEl.style.display = 'block';
-      showConfirmError(body.error || 'Something went wrong submitting that.');
+      // Re-enable buttons so user can try again
+      if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+      if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+      showConfirmError(body.error || 'Could not submit that confirmation answer.');
       return;
     }
 
-    if(body.status === 'completed'){
-      renderConfirmResult(body.result);
+    const contentType = res.headers.get('content-type') || '';
+
+    if(contentType.includes('text/event-stream')){
+      // SSE path — only the final question takes this route.
+      // Read progress events and update the researching overlay,
+      // then handle the done/error event at the end.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while(true){
+        const { done, value } = await reader.read();
+        if(done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for(const line of lines){
+          if(line.startsWith(': ')) continue; // heartbeat comment — ignore
+          if(!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch(e){ continue; }
+
+          if(event.type === 'progress'){
+            if(researchingMsg) researchingMsg.textContent = event.message;
+          } else if(event.type === 'done'){
+            if(event.status === 'completed'){
+              renderConfirmResult(event.result);
+            } else {
+              if(researchingEl) researchingEl.style.display = 'none';
+              if(cardEl) cardEl.style.display = 'block';
+              renderConfirmQuestion(event);
+            }
+          } else if(event.type === 'error'){
+            if(researchingEl) researchingEl.style.display = 'none';
+            if(cardEl) cardEl.style.display = 'block';
+            if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+            if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+            showConfirmError(event.error || 'Something went wrong during research.');
+          }
+        }
+      }
     } else {
-      if(cardEl) cardEl.style.display = 'block';
-      renderConfirmQuestion(body);
+      // Regular JSON path — questions 1-3.
+      const body = await res.json();
+      if(body.status === 'completed'){
+        renderConfirmResult(body.result);
+      } else {
+        if(cardEl) cardEl.style.display = 'block';
+        renderConfirmQuestion(body);
+      }
     }
   } catch (err){
     if(researchingEl) researchingEl.style.display = 'none';
     if(cardEl) cardEl.style.display = 'block';
-    showConfirmError('Something went wrong submitting that.');
+    if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = false);
+    if(aiAnswerBtn) aiAnswerBtn.disabled = false;
+    showConfirmError('Could not submit that confirmation answer. Check your connection and try again.');
   }
 }
 
