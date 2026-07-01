@@ -31,40 +31,77 @@ const supabase = createClient(
 // better inbox placement than a generic transactional-email API
 // running under single-sender verification.
 // ============================================================
-const nodemailer = require('nodemailer');
+// ============================================================
+// GMAIL API (HTTPS) — replaces the SMTP-based sender above. Render's
+// free tier was silently blocking/dropping outbound connections to
+// smtp.gmail.com on ports 465/587 (confirmed via the "Connection
+// timeout" after ~8000ms logged on every send attempt), which is a
+// common restriction on PaaS free tiers specifically to prevent spam
+// abuse over raw SMTP. HTTPS on port 443 is never blocked the same
+// way — everything the platform runs on already depends on it — so
+// this sends the exact same email, from the same real Gmail address,
+// through Google's own Gmail API over HTTPS instead of SMTP. Same
+// sending identity and inbox-trust benefit as before, just a
+// transport that Render's network actually allows through.
+//
+// Requires a one-time OAuth setup (see the setup notes below the
+// three env vars) to get a refresh token — more setup than SMTP
+// would have been, but it's the only way to keep genuine Gmail
+// sending without hitting the SMTP port block.
+// ============================================================
+const { google } = require('googleapis');
 
 const GMAIL_USER = process.env.GMAIL_USER;
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const GMAIL_OAUTH_CLIENT_ID = process.env.GMAIL_OAUTH_CLIENT_ID;
+const GMAIL_OAUTH_CLIENT_SECRET = process.env.GMAIL_OAUTH_CLIENT_SECRET;
+const GMAIL_OAUTH_REFRESH_TOKEN = process.env.GMAIL_OAUTH_REFRESH_TOKEN;
 
-// Built once, reused for every send — nodemailer's own docs recommend
-// this over creating a fresh transporter per email; it keeps a pooled
-// connection to Gmail's SMTP servers instead of renegotiating TLS
-// every single time.
-//
-// Explicit host/port/secure + short timeouts on purpose, rather than
-// the shorthand `service: 'gmail'` config — some hosts (Render's free
-// tier included) throttle or silently drop outbound SMTP connections
-// on ports 465/587, and nodemailer's DEFAULT connection timeout is
-// ~2 minutes. Without a short timeout here, a blocked port doesn't
-// fail loudly — it just hangs every route that calls sendOtpEmail
-// (signup-start AND login-start both do) until that default timeout
-// finally gives up, which is exactly the "any button takes ~1 min"
-// symptom. Cutting these down means a blocked port now fails in ~8s
-// with a real error in the response body, instead of silently eating
-// a full minute on every click.
-const mailTransporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
-  auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_APP_PASSWORD
-  },
-  pool: true,
-  connectionTimeout: 8000,
-  greetingTimeout: 8000,
-  socketTimeout: 8000
-});
+// Setup (one-time, done once in Google Cloud Console + OAuth Playground,
+// not something this file can do for you):
+//   1. console.cloud.google.com -> new project -> enable "Gmail API"
+//   2. APIs & Services -> Credentials -> Create Credentials -> OAuth
+//      client ID -> Application type: "Web application" -> Authorized
+//      redirect URIs: add https://developers.google.com/oauthplayground
+//   3. Copy the generated Client ID and Client Secret.
+//   4. Go to developers.google.com/oauthplayground -> gear icon (top
+//      right) -> check "Use your own OAuth credentials" -> paste the
+//      Client ID/Secret from step 3.
+//   5. In the left panel, find "Gmail API v1" -> select the
+//      https://www.googleapis.com/auth/gmail.send scope only ->
+//      Authorize APIs -> sign in with the SAME Gmail account this
+//      should send from -> Exchange authorization code for tokens.
+//   6. Copy the Refresh token shown there.
+//   7. Set all three as Render env vars: GMAIL_OAUTH_CLIENT_ID,
+//      GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN
+//      (GMAIL_USER stays the same as before — the sending address).
+const oauth2Client = new google.auth.OAuth2(
+  GMAIL_OAUTH_CLIENT_ID,
+  GMAIL_OAUTH_CLIENT_SECRET,
+  'https://developers.google.com/oauthplayground'
+);
+oauth2Client.setCredentials({ refresh_token: GMAIL_OAUTH_REFRESH_TOKEN });
+
+const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
+
+// Gmail API sends raw RFC 2822 messages, base64url-encoded — this
+// builds the minimal plain-text version of that by hand rather than
+// pulling in a full MIME-building library for a one-field email.
+function buildRawEmail({ from, to, subject, text }){
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    text
+  ];
+  const message = lines.join('\r\n');
+  return Buffer.from(message)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
 
 // In-memory pending state — fine for a single Render instance.
 // pendingSignups: email -> { username, password, codeHash, expiresAt }
@@ -104,19 +141,24 @@ function hashOtpCode(code){
 // since those are exactly the patterns spam filters key on. Just the
 // code, in a sentence, from a real person's real inbox.
 async function sendOtpEmail(email){
-  if(!GMAIL_USER || !GMAIL_APP_PASSWORD){
-    throw new Error('GMAIL_USER / GMAIL_APP_PASSWORD are not set in the environment.');
+  if(!GMAIL_USER || !GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
+    throw new Error('GMAIL_USER / GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_OAUTH_REFRESH_TOKEN are not all set in the environment.');
   }
 
   const { code, codeHash } = generateOtpCode();
 
+  const raw = buildRawEmail({
+    from: `ThinkMaps <${GMAIL_USER}>`,
+    to: email,
+    subject: `${code} is your ThinkMaps code`,
+    text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`
+  });
+
   const startedAt = Date.now();
   try {
-    await mailTransporter.sendMail({
-      from: `ThinkMaps <${GMAIL_USER}>`,
-      to: email,
-      subject: `${code} is your ThinkMaps code`,
-      text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`
+    await gmailApi.users.messages.send({
+      userId: 'me',
+      requestBody: { raw }
     });
     console.log(`[ThinkMaps] OTP email sent in ${Date.now() - startedAt}ms`);
   } catch (err) {
