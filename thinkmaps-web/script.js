@@ -1239,7 +1239,25 @@ const BLOCK_COLORS = {
   'Your Vision for the Experience': '#3E9999',
   'Context, Distribution & Values': '#A88A3E',
   'Personal Stakes & Long-Term Vision': '#6B5CA8',
-  'What You Actually Know About Yourself': '#5C73A8'
+  'What You Actually Know About Yourself': '#5C73A8',
+  // ---- Colors for the 15 new blocks added to IDEATION_BLOCK_NAMES in
+  // server.js — kept visually distinct from the original 9 above and
+  // from each other, same one-dot-per-block recognition purpose. ----
+  'Your Relationship to Risk & Uncertainty': '#B0553E',
+  'How You Want This to Feel to Use': '#4E8FA6',
+  'Team, Collaborators & Who Else Is Involved': '#7A9E5C',
+  'Technical Feasibility & What You Would Need to Learn': '#8C6B3E',
+  'Growth, Distribution & How People Would Find This': '#5C7EA8',
+  'Business Model Philosophy & How Value Gets Captured': '#A87A3E',
+  'Onboarding & First Impressions': '#5CA88C',
+  'Data, Privacy & Trust Philosophy': '#6B7A9E',
+  'Brand Personality & Tone': '#A85C8A',
+  'Habit Formation & Why People Would Return': '#7C9E9E',
+  'Accessibility & Who Gets Left Out': '#9E7C5C',
+  'Seasonality, Timing & Why Now': '#8A9E5C',
+  'Community & Belonging': '#5C9EA0',
+  'Worst-Case Scenarios & What Could Go Wrong': '#9E5C6B',
+  'Your Long-Term Relationship to This Idea': '#7A5C9E'
 };
 
 function blockColorDotHtml(blockName){
