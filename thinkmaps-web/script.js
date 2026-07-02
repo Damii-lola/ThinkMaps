@@ -608,6 +608,7 @@ async function initDashboardPage(){
   if(logoutBtn) logoutBtn.addEventListener('click', handleLogout);
 
   setupNewBlueprintModal();
+  renderFeedbackButton();
   await loadDashboard();
 }
 
@@ -736,6 +737,118 @@ function showProPlanModal(){
 function closeProPlanModal(){
   const overlay = document.getElementById('proPlanModal');
   if(overlay) overlay.remove();
+}
+
+// ---------- Dashboard feedback button ----------
+// A floating corner button, injected once from initDashboardPage — same
+// "no static markup needed" convention as showToast and showProPlanModal.
+// Opens a small modal where anything typed gets emailed straight to
+// thinkmaps.team@gmail.com via the /feedback route in server.js. No
+// message history is stored or shown back — this is a one-way "send a
+// note to the team" board, not a public comment thread.
+function renderFeedbackButton(){
+  if(document.getElementById('feedbackFab')) return; // already on the page, don't duplicate
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'feedbackFab';
+  btn.className = 'feedback-fab';
+  btn.title = 'Send feedback, a request, or report something';
+  btn.setAttribute('aria-label', 'Send feedback');
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+    </svg>
+  `;
+  btn.addEventListener('click', showFeedbackModal);
+  document.body.appendChild(btn);
+}
+
+function closeFeedbackModal(){
+  const overlay = document.getElementById('feedbackModal');
+  if(overlay) overlay.remove();
+}
+
+function showFeedbackModal(){
+  closeFeedbackModal(); // guard against a stray double-open leaving two overlays stacked
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'feedbackModal';
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <h3>Got feedback?</h3>
+      <p class="muted">A comment, a feature request, a bug report — whatever it is, it goes straight to the ThinkMaps team's inbox.</p>
+      <textarea id="feedbackTextarea" class="revise-textarea" rows="6" maxlength="4000" placeholder="What's on your mind?"></textarea>
+      <p class="auth-error" id="feedbackError"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="closeFeedbackModalBtn">Cancel</button>
+        <button type="button" class="btn btn-primary" id="sendFeedbackBtn">Send</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', (e) => {
+    if(e.target === overlay) closeFeedbackModal(); // click on the dim backdrop itself closes it
+  });
+  document.getElementById('closeFeedbackModalBtn').addEventListener('click', closeFeedbackModal);
+
+  const textarea = document.getElementById('feedbackTextarea');
+  if(textarea) textarea.focus();
+
+  const sendBtn = document.getElementById('sendFeedbackBtn');
+  if(sendBtn){
+    sendBtn.addEventListener('click', () => submitFeedback(textarea, sendBtn));
+  }
+  // Ctrl/Cmd+Enter submits from inside the textarea — small nicety for
+  // anyone used to that shortcut from chat/email apps, entirely optional.
+  if(textarea){
+    textarea.addEventListener('keydown', (e) => {
+      if((e.ctrlKey || e.metaKey) && e.key === 'Enter'){
+        e.preventDefault();
+        submitFeedback(textarea, sendBtn);
+      }
+    });
+  }
+}
+
+async function submitFeedback(textarea, sendBtn){
+  const errorEl = document.getElementById('feedbackError');
+  if(errorEl) errorEl.textContent = '';
+
+  const message = (textarea?.value || '').trim();
+  if(!message){
+    if(errorEl) errorEl.textContent = 'Type something before sending.';
+    return;
+  }
+
+  if(sendBtn){
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+  }
+
+  try {
+    const res = await authedFetch('/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ message })
+    });
+    if(!res) return; // authedFetch already redirected to auth.html
+
+    const body = await res.json().catch(() => ({}));
+
+    if(!res.ok){
+      if(errorEl) errorEl.textContent = body.error || 'Could not send your message.';
+      if(sendBtn){ sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
+      return;
+    }
+
+    closeFeedbackModal();
+    showToast('Thanks — your message is on its way to the team.');
+  } catch (err){
+    if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+    if(sendBtn){ sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
+  }
 }
 
 function renderBlueprintArea(container, blueprints, canCreateNew){
