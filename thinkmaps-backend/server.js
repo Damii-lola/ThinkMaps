@@ -86,15 +86,20 @@ const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
 // Gmail API sends raw RFC 2822 messages, base64url-encoded — this
 // builds the minimal plain-text version of that by hand rather than
 // pulling in a full MIME-building library for a one-field email.
-function buildRawEmail({ from, to, subject, text }){
+function buildRawEmail({ from, to, subject, text, replyTo }){
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
+  ];
+  if(replyTo){
+    lines.push(`Reply-To: ${replyTo}`);
+  }
+  lines.push(
     'Content-Type: text/plain; charset=UTF-8',
     '',
     text
-  ];
+  );
   const message = lines.join('\r\n');
   return Buffer.from(message)
     .toString('base64')
@@ -167,6 +172,37 @@ async function sendOtpEmail(email){
   }
 
   return codeHash;
+}
+
+// General-purpose version of the same send pipeline sendOtpEmail uses —
+// same Gmail API over HTTPS, same real-inbox sending identity, just not
+// locked to the OTP code template. Anything else that needs to email out
+// (the feedback board below, and anything added later) goes through this
+// instead of duplicating the gmailApi.users.messages.send call again.
+async function sendPlainEmail({ to, subject, text, replyTo }){
+  if(!GMAIL_USER || !GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
+    throw new Error('GMAIL_USER / GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_OAUTH_REFRESH_TOKEN are not all set in the environment.');
+  }
+
+  const raw = buildRawEmail({
+    from: `ThinkMaps <${GMAIL_USER}>`,
+    to,
+    subject,
+    text,
+    replyTo
+  });
+
+  const startedAt = Date.now();
+  try {
+    await gmailApi.users.messages.send({
+      userId: 'me',
+      requestBody: { raw }
+    });
+    console.log(`[ThinkMaps] Email to ${to} sent in ${Date.now() - startedAt}ms`);
+  } catch (err) {
+    console.error(`[ThinkMaps] Email to ${to} FAILED after ${Date.now() - startedAt}ms:`, err.message);
+    throw err;
+  }
 }
 
 // Constant-time-ish comparison isn't really the concern here (this
@@ -553,6 +589,68 @@ app.post('/profile/go-pro', requireAuth, async (req, res) => {
     res.status(200).json({ pro_status: next });
   } catch (err) {
     res.status(500).json({ error: 'Could not update Pro status.', detail: err.message });
+  }
+});
+
+// ---------- Feedback board — dashboard's corner button ----------
+// Every submission gets emailed straight to thinkmaps.team@gmail.com via
+// the same Gmail API pipeline the OTP flow uses. No database table for
+// this — it's genuinely just "turn a dashboard message into an email,"
+// nothing here needs to be queried or listed back out later.
+const FEEDBACK_MAX_LENGTH = 4000;
+const FEEDBACK_COOLDOWN_MS = 30 * 1000; // per-user, prevents rapid double-submits from the same click
+const feedbackCooldowns = new Map(); // userId -> last-submitted-at timestamp
+const FEEDBACK_RECIPIENT = 'thinkmaps.team@gmail.com';
+
+// Same "don't grow forever" cleanup pattern as cleanupExpiredPending —
+// entries older than the cooldown window are useless to keep around.
+setInterval(() => {
+  const now = Date.now();
+  for(const [userId, ts] of feedbackCooldowns){
+    if(now - ts > FEEDBACK_COOLDOWN_MS) feedbackCooldowns.delete(userId);
+  }
+}, 60 * 1000);
+
+app.post('/feedback', requireAuth, async (req, res) => {
+  try {
+    const { message } = req.body;
+
+    if(!message || typeof message !== 'string' || !message.trim()){
+      return res.status(400).json({ error: 'Message is required.' });
+    }
+    const trimmed = message.trim();
+    if(trimmed.length > FEEDBACK_MAX_LENGTH){
+      return res.status(400).json({ error: `Keep it under ${FEEDBACK_MAX_LENGTH} characters.` });
+    }
+
+    const lastSubmitted = feedbackCooldowns.get(req.user.id);
+    if(lastSubmitted && Date.now() - lastSubmitted < FEEDBACK_COOLDOWN_MS){
+      return res.status(429).json({ error: 'Give it a few seconds before sending another message.' });
+    }
+
+    const senderEmail = req.user.email || 'unknown';
+    const senderUsername = req.user.user_metadata?.username || 'unknown';
+
+    await sendPlainEmail({
+      to: FEEDBACK_RECIPIENT,
+      subject: `ThinkMaps feedback from ${senderUsername}`,
+      text: [
+        `From: ${senderUsername} (${senderEmail})`,
+        `User ID: ${req.user.id}`,
+        `Sent: ${new Date().toISOString()}`,
+        '',
+        '---',
+        '',
+        trimmed
+      ].join('\n'),
+      replyTo: senderEmail
+    });
+
+    feedbackCooldowns.set(req.user.id, Date.now());
+
+    res.status(200).json({ sent: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not send your message.', detail: err.message });
   }
 });
 
