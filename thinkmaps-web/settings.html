@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>Settings — ThinkMaps</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico" />
+<link rel="icon" type="image/png" sizes="16x16" href="image/favicon-16x16.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="image/favicon-32x32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="image/favicon-192x192.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="image/apple-touch-icon.png" />
+<link rel="manifest" href="image/site.webmanifest" />
+<meta name="theme-color" content="#D97757" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=2">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+<header class="site">
+  <nav class="bar">
+    <a href="dashboard.html" class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </a>
+    <div class="nav-cta">
+      <a href="dashboard.html" class="btn btn-ghost">← Back to dashboard</a>
+    </div>
+  </nav>
+</header>
+
+<main class="settings-main" id="settingsRoot">
+  <div class="wrap settings-wrap">
+    <div class="settings-head">
+      <span class="eyebrow">Account</span>
+      <h1>Settings</h1>
+      <p class="muted">Manage your profile, security, and plan.</p>
+    </div>
+
+    <!-- ---------- PROFILE ---------- -->
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h2>Profile</h2>
+      </div>
+      <div class="settings-card">
+        <div class="settings-avatar-row">
+          <div class="settings-avatar" id="settingsAvatarInitial">?</div>
+          <div>
+            <div class="settings-field-label">Username</div>
+            <div class="settings-field-value" id="settingsUsernameDisplay">Loading…</div>
+          </div>
+          <button type="button" class="btn btn-ghost settings-edit-btn" id="editUsernameBtn">Edit</button>
+        </div>
+
+        <form id="usernameForm" class="settings-inline-form" style="display:none;">
+          <input type="text" id="usernameInput" maxlength="30" placeholder="New username" autocomplete="username" />
+          <div class="settings-inline-actions">
+            <button type="button" class="btn btn-ghost" id="cancelUsernameBtn">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+          </div>
+          <p class="auth-error" id="usernameError"></p>
+        </form>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-row">
+          <div>
+            <div class="settings-field-label">Email</div>
+            <div class="settings-field-value" id="settingsEmailDisplay">Loading…</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- SECURITY ---------- -->
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h2>Security</h2>
+      </div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div>
+            <div class="settings-field-label">Password</div>
+            <div class="settings-field-value">••••••••••••</div>
+          </div>
+          <button type="button" class="btn btn-ghost settings-edit-btn" id="editPasswordBtn">Change</button>
+        </div>
+
+        <form id="passwordForm" class="settings-inline-form" style="display:none;">
+          <input type="password" id="currentPasswordInput" placeholder="Current password" autocomplete="current-password" required />
+          <input type="password" id="newPasswordInput" placeholder="New password (min 8 characters)" autocomplete="new-password" minlength="8" required />
+          <input type="password" id="confirmPasswordInput" placeholder="Confirm new password" autocomplete="new-password" minlength="8" required />
+          <div class="settings-inline-actions">
+            <button type="button" class="btn btn-ghost" id="cancelPasswordBtn">Cancel</button>
+            <button type="submit" class="btn btn-primary">Update password</button>
+          </div>
+          <p class="auth-error" id="passwordError"></p>
+        </form>
+      </div>
+    </section>
+
+    <!-- ---------- PLAN ---------- -->
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h2>Plan</h2>
+      </div>
+      <div class="settings-card">
+        <div class="settings-row" id="settingsPlanRow">
+          <div>
+            <div class="settings-field-label" id="settingsPlanLabel">Loading…</div>
+            <div class="settings-field-value" id="settingsPlanDescription"></div>
+          </div>
+          <button type="button" class="btn btn-primary" id="settingsPlanBtn" style="display:none;">Go Pro</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- DANGER ZONE ---------- -->
+    <section class="settings-section">
+      <div class="settings-section-head">
+        <h2>Danger zone</h2>
+      </div>
+      <div class="settings-card settings-danger-card">
+        <div class="settings-row">
+          <div>
+            <div class="settings-field-label">Delete account</div>
+            <div class="settings-field-value muted">Permanently deletes your account and every blueprint you've created. This can't be undone.</div>
+          </div>
+          <button type="button" class="btn btn-secondary settings-danger-btn" id="deleteAccountBtn">Delete account</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="settings-logout-row">
+      <button type="button" class="btn btn-ghost" id="settingsLogoutBtn">Log out</button>
+    </div>
+  </div>
+</main>
+
+<!-- Delete-account confirmation — types their own username to confirm,
+     matching the server-side check in DELETE /profile exactly. -->
+<div class="modal-overlay" id="deleteAccountModal" style="display:none;">
+  <div class="modal-card">
+    <h3>Delete your account?</h3>
+    <p class="muted">This permanently deletes your account and every blueprint you've created. Type your username to confirm — this can't be undone.</p>
+    <input type="text" id="deleteConfirmInput" placeholder="Type your username" autocomplete="off" />
+    <p class="auth-error" id="deleteAccountError"></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancelDeleteAccountBtn" type="button">Cancel</button>
+      <button class="btn btn-secondary settings-danger-btn" id="confirmDeleteAccountBtn" type="button">Delete my account</button>
+    </div>
+  </div>
+</div>
+
+<script src="script.js?v=2"></script>
+<script src="feedback.js?v=4"></script>
+</body>
+</html>
