@@ -845,6 +845,11 @@ app.delete('/profile', requireAuth, async (req, res) => {
 // off from actual cancellation/non-renewal logic), never from a direct
 // toggle a client can call at will.
 // =====================================================================
+// TEST-ONLY toggle — kept for local development and manual support
+// overrides, but the actual Pro upgrade path is now the Selar webhook
+// below. Nothing in the frontend calls this route anymore as of the
+// Selar integration; it's just not deleted, since it's still genuinely
+// useful for testing without a real payment.
 app.post('/profile/go-pro', requireAuth, async (req, res) => {
   try {
     const pro = await isUserPro(req.user.id);
@@ -860,6 +865,141 @@ app.post('/profile/go-pro', requireAuth, async (req, res) => {
     res.status(200).json({ pro_status: next });
   } catch (err) {
     res.status(500).json({ error: 'Could not update Pro status.', detail: err.message });
+  }
+});
+
+// =====================================================================
+// SELAR PAYMENT WEBHOOK — the real Pro upgrade path.
+//
+// IMPORTANT — read this before assuming this route is fully correct:
+// Selar does not publish a public API/webhook reference documenting
+// their exact JSON payload field names anywhere I could verify (only
+// third-party Zapier integration listings exist, which don't show the
+// raw payload shape). Rather than invent field names and risk this
+// silently failing to match real payloads, this route:
+//   1. Logs the ENTIRE raw payload on every single call, unconditionally
+//      — check Render's logs after your first real (or test) Selar sale
+//      and you'll see exactly what Selar actually sends.
+//   2. Tries several plausible field-name variants for the buyer's email
+//      and the payment status, covering the naming conventions most
+//      payment platforms use, so it has the best real chance of working
+//      correctly the first time.
+//   3. If NONE of those variants match, it logs a clear warning
+//      identifying that mismatch specifically, rather than silently
+//      failing — that log output is exactly what to send back for a
+//      one-line fix to the field names below.
+//
+// Security: Selar's exact webhook-signing scheme also isn't publicly
+// documented, so this uses a URL-embedded shared secret instead (a
+// long random token as part of the URL path itself, configured in
+// Selar's dashboard as the webhook destination) — a standard, secure
+// pattern when a provider's signature scheme isn't confirmed. Anyone
+// who doesn't know the exact URL (including the secret) can't call this
+// route meaningfully.
+// =====================================================================
+app.post('/webhooks/selar/:secret', async (req, res) => {
+  // Always log the full raw payload first, before anything else — this
+  // is the single most useful line in this whole route for getting the
+  // field-name matching below exactly right on the first real sale.
+  console.log('[ThinkMaps] Selar webhook received:', JSON.stringify(req.body));
+
+  // Acknowledge fast regardless of outcome — webhook senders generally
+  // retry on non-2xx responses, and a slow/failing ack here shouldn't
+  // cause Selar to hammer this endpoint with retries for something that
+  // isn't actually a delivery problem on their end.
+  res.status(200).json({ received: true });
+
+  try {
+    if(!process.env.SELAR_WEBHOOK_SECRET){
+      console.error('[ThinkMaps] Selar webhook called but SELAR_WEBHOOK_SECRET is not set in the environment — rejecting.');
+      return;
+    }
+    if(req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+      console.error('[ThinkMaps] Selar webhook called with a wrong/missing secret — ignoring.');
+      return;
+    }
+
+    const body = req.body || {};
+    // Selar's actual payload may nest fields under "data" like many
+    // platforms do — check both the top level and a possible .data
+    // wrapper for every field below.
+    const d = body.data && typeof body.data === 'object' ? body.data : {};
+
+    const buyerEmail =
+      body.buyer_email || body.email || body.customer_email || body.buyerEmail ||
+      d.buyer_email || d.email || d.customer_email || d.buyerEmail ||
+      body.buyer?.email || d.buyer?.email || null;
+
+    const statusValue = (
+      body.status || body.payment_status || body.event || body.type ||
+      d.status || d.payment_status || d.event || d.type || ''
+    ).toString().toLowerCase();
+
+    // Broad match on purpose — covers "completed", "success", "successful",
+    // "paid", "payment.success", etc. without needing the exact string.
+    const looksSuccessful = /success|complet|paid/.test(statusValue) || statusValue === '';
+    // statusValue === '' is intentionally treated as "proceed" rather than
+    // "reject" — if this webhook fires at all and Selar doesn't send an
+    // explicit status field for this event type, a completed sale is a
+    // far more likely explanation than a failed one for why it fired.
+
+    if(!buyerEmail){
+      console.error('[ThinkMaps] Selar webhook: could not find a buyer email in the payload using any known field name. Raw payload logged above — check it and tell Claude the actual field name so this can be fixed in one line.');
+      return;
+    }
+
+    if(!looksSuccessful){
+      console.log(`[ThinkMaps] Selar webhook for ${buyerEmail}: status "${statusValue}" doesn't look like a completed payment — not upgrading.`);
+      return;
+    }
+
+    const { data: profile, error: lookupError } = await supabase
+      .from('profiles')
+      .select('id, username, email, pro_status')
+      .ilike('email', buyerEmail.trim())
+      .maybeSingle();
+
+    if(lookupError || !profile){
+      console.error(`[ThinkMaps] Selar webhook: no ThinkMaps account found for email "${buyerEmail}" — payment received but could not be matched to an account. This person needs manual follow-up.`);
+      return;
+    }
+
+    if(profile.pro_status){
+      console.log(`[ThinkMaps] Selar webhook for ${buyerEmail}: already Pro — nothing to do.`);
+      return;
+    }
+
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({ pro_status: true })
+      .eq('id', profile.id);
+
+    if(updateError){
+      console.error('[ThinkMaps] Selar webhook: found the account but failed to update pro_status:', updateError.message);
+      return;
+    }
+
+    console.log(`[ThinkMaps] Selar webhook: upgraded ${buyerEmail} to Pro successfully.`);
+
+    // Best-effort confirmation email — a failure here shouldn't undo the
+    // upgrade that already succeeded above.
+    try {
+      const bodyHtml = `
+        <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
+        <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
+        <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
+      `;
+      await sendPlainEmail({
+        to: profile.email,
+        subject: "You're on ThinkMaps Pro",
+        text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
+        html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
+      });
+    } catch (emailErr) {
+      console.error('[ThinkMaps] Selar webhook: upgrade succeeded but confirmation email failed:', emailErr.message);
+    }
+  } catch (err) {
+    console.error('[ThinkMaps] Selar webhook: unexpected error:', err.message);
   }
 });
 
@@ -1891,7 +2031,7 @@ async function searchRealExistingSolutions(pathContext){
   return await webSearchForSimilarProducts(`${baseQuery} existing apps solutions reviews`);
 }
 
-async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], onToken = null){
+async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], onToken = null, isPro = false){
   const pathDescription = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ') || 'Start of the blueprint.';
   const blockList = blockNames.map((b, i) => `${i + 1}. ${b}`).join('\n');
 
@@ -1932,12 +2072,25 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   // gain that is outweighed by the speed cost. The path context itself
   // already provides the specificity the model needs.
 
-  const systemPrompt = `You are the node-generation engine for ThinkMaps. Generate up to 5 specific options for EACH of these ${blockNames.length} blocks:\n${blockList}\nPath so far: ${pathDescription}\nEvery option must build on this exact path, fit its block's territory, and be answerable from the person's own knowledge/instinct.${crossBlockNote}${diversityNote}${painGroundingNote}${existingGroundingNote}${SHORT_OPTION_RULE} JSON only: {"groups": [{"options": [{"label": string}]}]} with exactly ${blockNames.length} groups.`;
+  // Pro gets a genuinely richer generation, not just a cosmetic badge:
+  // more candidate options per block to actually explore (7 vs 5), and
+  // a one-line "why this direction" rationale on each option — visible
+  // as a hover tooltip on the canvas (see renderGroups in script.js),
+  // which free users' options simply don't carry at all. Both cost more
+  // output tokens, which is exactly why they're gated to the tier that's
+  // already paying for the heavier generation calls elsewhere.
+  const optionCount = isPro ? 7 : 5;
+  const rationaleInstruction = isPro
+    ? ' For EACH option, also include a "rationale" field: one short clause (under 12 words) explaining specifically why this direction fits the path so far — not a generic justification, something that references the actual prior choices.'
+    : '';
+  const rationaleShape = isPro ? ', "rationale": string' : '';
+
+  const systemPrompt = `You are the node-generation engine for ThinkMaps. Generate up to ${optionCount} specific options for EACH of these ${blockNames.length} blocks:\n${blockList}\nPath so far: ${pathDescription}\nEvery option must build on this exact path, fit its block's territory, and be answerable from the person's own knowledge/instinct.${crossBlockNote}${diversityNote}${painGroundingNote}${existingGroundingNote}${rationaleInstruction}${SHORT_OPTION_RULE} JSON only: {"groups": [{"options": [{"label": string${rationaleShape}}]}]} with exactly ${blockNames.length} groups.`;
 
   const result = await callMistralWithStreaming([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate now.' }
-  ], 800, onToken);
+  ], isPro ? 1100 : 800, onToken);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
   // happens to contain — this guarantees exactly blockNames.length groups
@@ -2227,7 +2380,13 @@ function estimateHeaderHeight(label){
 function sanitizeOptionLabels(rawOptions){
   return (rawOptions || [])
     .filter(o => o && typeof o.label === 'string' && o.label.trim().length > 0)
-    .map(o => ({ label: o.label.trim() }));
+    .map(o => {
+      const clean = { label: o.label.trim() };
+      if(typeof o.rationale === 'string' && o.rationale.trim()){
+        clean.rationale = o.rationale.trim();
+      }
+      return clean;
+    });
 }
 
 // combinedOptionIds is the NEW, optional piece: when non-empty, this is a
@@ -2238,7 +2397,7 @@ function sanitizeOptionLabels(rawOptions){
 // combinedOptionIds gets selected and frozen-sibling-handled exactly like
 // optionId does, just without becoming the traversal anchor itself. Every
 // existing call site passes nothing here and behaves completely unchanged.
-async function activateOption(optionId, combinedOptionIds = [], onToken = null){
+async function activateOption(optionId, combinedOptionIds = [], onToken = null, isPro = false){
   const { data: option } = await supabase
     .from('options')
     .select('id, label, group_version_id, is_selected')
@@ -2360,10 +2519,10 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null){
     } else if(!ideaCheckpointAlreadyShown){
       const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken, isPro);
     } else {
       const assignedBlocks = pickNextBlocks(usedBlocks, 3);
-      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken);
+      generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken, isPro);
     }
   }
 
@@ -2533,9 +2692,10 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null){
       }
     }
 
-    const optionRows = sanitizedOptions.slice(0, 6).map((o, index) => ({
+    const optionRows = sanitizedOptions.slice(0, isPro ? 8 : 6).map((o, index) => ({
       group_version_id: newVersion.id,
       label: o.label,
+      rationale: o.rationale || null,
       position: index
     }));
 
@@ -2624,6 +2784,174 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
   }
 });
 
+// =====================================================================
+// PRO FEATURE: BLUEPRINT SNAPSHOTS — named save points across a
+// blueprint's whole graph, with real restore (not just a label — the
+// entire groups/group_versions/options state gets swapped back). This
+// is what makes "Pro" mean something structurally different from free,
+// not just more generations: free users' exploration is genuinely
+// one-directional (Retry/Random overwrite, frozen branches sit there but
+// nothing brings back a whole prior STATE of the graph at once), while
+// Pro users can checkpoint the graph at a point they like and always get
+// back to it exactly, even after a dozen more clicks down other paths.
+// =====================================================================
+
+// Save the CURRENT full graph state as a named snapshot. Reuses
+// fetchFullBlueprintGraph (already existed for the activate route's
+// single-round-trip response) rather than re-deriving the same
+// {groups, groupVersions, options} shape a second way.
+app.post('/blueprints/:id/snapshots', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { name } = req.body;
+    if(!name || !name.trim()){
+      return res.status(400).json({ error: 'A snapshot name is required.' });
+    }
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const graphState = await fetchFullBlueprintGraph(blueprint.id);
+
+    const { data: snapshot, error } = await supabase
+      .from('blueprint_snapshots')
+      .insert({
+        blueprint_id: blueprint.id,
+        user_id: req.user.id,
+        name: name.trim().slice(0, 80),
+        snapshot_data: graphState
+      })
+      .select('id, name, created_at')
+      .single();
+
+    if(error) throw error;
+
+    res.status(201).json({ snapshot });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not save this snapshot.', detail: err.message });
+  }
+});
+
+// List every snapshot for this blueprint — summaries only (id, name,
+// timestamp, a node count for context), never the full snapshot_data
+// payload, which can be sizeable for a deep graph and isn't needed
+// until a specific snapshot is actually restored.
+app.get('/blueprints/:id/snapshots', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { data: snapshots, error } = await supabase
+      .from('blueprint_snapshots')
+      .select('id, name, created_at, snapshot_data')
+      .eq('blueprint_id', blueprint.id)
+      .order('created_at', { ascending: false });
+
+    if(error) throw error;
+
+    const summaries = (snapshots || []).map(s => ({
+      id: s.id,
+      name: s.name,
+      createdAt: s.created_at,
+      groupCount: (s.snapshot_data?.groups || []).length
+    }));
+
+    res.status(200).json({ snapshots: summaries });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load snapshots.', detail: err.message });
+  }
+});
+
+// Restores a snapshot as the blueprint's LIVE state. Genuinely
+// destructive to whatever's currently there — which is exactly why this
+// automatically saves a "Before restore" safety snapshot of the CURRENT
+// state first, unprompted, before touching anything. Someone restoring
+// an old snapshot by mistake (or changing their mind five minutes later)
+// always has a way back, without needing to have thought to save one
+// themselves first.
+app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { data: targetSnapshot, error: fetchError } = await supabase
+      .from('blueprint_snapshots')
+      .select('*')
+      .eq('id', req.params.snapshotId)
+      .eq('blueprint_id', blueprint.id)
+      .single();
+
+    if(fetchError || !targetSnapshot){
+      return res.status(404).json({ error: 'Snapshot not found.' });
+    }
+
+    // Safety snapshot of what's about to be overwritten — silent, automatic,
+    // named so it's obviously distinguishable from ones the person saved
+    // deliberately.
+    const currentState = await fetchFullBlueprintGraph(blueprint.id);
+    await supabase.from('blueprint_snapshots').insert({
+      blueprint_id: blueprint.id,
+      user_id: req.user.id,
+      name: `Before restoring "${targetSnapshot.name}"`,
+      snapshot_data: currentState
+    });
+
+    // Wipe the current live graph — groups cascade-delete their own
+    // group_versions and options (same cascade the existing DELETE
+    // /groups/:id route already relies on), so deleting just the groups
+    // here is sufficient, not a gap.
+    await supabase.from('groups').delete().eq('blueprint_id', blueprint.id);
+
+    // Re-insert the snapshot's rows AS-IS, original IDs and all. Safe
+    // specifically because every group/version/option for this blueprint
+    // was just deleted above, freeing those exact UUIDs back up — and
+    // re-using them (rather than generating new ones) means every
+    // spawned_from_option_id and group_version_id reference already
+    // baked into the snapshot's own rows stays correct with zero remapping.
+    const snap = targetSnapshot.snapshot_data || {};
+    if(snap.groups?.length){
+      await supabase.from('groups').insert(snap.groups);
+    }
+    if(snap.groupVersions?.length){
+      await supabase.from('group_versions').insert(snap.groupVersions);
+    }
+    if(snap.options?.length){
+      await supabase.from('options').insert(snap.options);
+    }
+
+    const restoredGraph = await fetchFullBlueprintGraph(blueprint.id);
+    res.status(200).json({ restored: true, fullGraph: restoredGraph });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not restore this snapshot.', detail: err.message });
+  }
+});
+
+app.delete('/blueprints/:id/snapshots/:snapshotId', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { error } = await supabase
+      .from('blueprint_snapshots')
+      .delete()
+      .eq('id', req.params.snapshotId)
+      .eq('blueprint_id', blueprint.id);
+
+    if(error) throw error;
+
+    res.status(200).json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not delete this snapshot.', detail: err.message });
+  }
+});
+
 // Returns the full {groups, groupVersions, options} triple for a blueprint
 // in one 3-query flat fetch (same shape the GET /graph route already
 // returns, minus the auto-generation logic which only applies on the very
@@ -2687,9 +3015,10 @@ app.post('/options/:id/activate', requireAuth, async (req, res) => {
     // activateOption now accepts an onToken callback — when provided, it
     // calls Mistral in streaming mode and fires onToken for every delta
     // token so this route can forward them to the client in real-time.
+    const isPro = await isUserPro(req.user.id);
     const result = await activateOption(req.params.id, [], (tokenText) => {
       send({ type: 'token', text: tokenText });
-    });
+    }, isPro);
 
     let fullGraph = null;
     try {
@@ -2773,7 +3102,7 @@ app.post('/options/combine-activate', requireAuth, async (req, res) => {
     const validation = await validateCombinationSet(optionIds);
     if(validation.error) return res.status(400).json({ error: validation.error });
 
-    const result = await activateOption(primaryOptionId, combinedOptionIds);
+    const result = await activateOption(primaryOptionId, combinedOptionIds, null, true);
     res.status(200).json(result);
   } catch (err) {
     res.status(500).json({ error: 'Could not activate that combination.', detail: err.message });
@@ -2925,7 +3254,8 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
       ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
       : [];
     const chosen = await pickBestOptionWithAI(currentOptions, pathContext);
-    const result = await activateOption(chosen.id);
+    const isPro = await isUserPro(req.user.id);
+    const result = await activateOption(chosen.id, [], null, isPro);
 
     res.status(200).json({ ...result, chosenOption: chosen });
   } catch (err) {
@@ -3062,7 +3392,8 @@ app.post('/options/:id/random-spawned', requireAuth, async (req, res) => {
     }
 
     const chosenOption = optionsInGroup[Math.floor(Math.random() * optionsInGroup.length)];
-    const result = await activateOption(chosenOption.id);
+    const isPro = await isUserPro(req.user.id);
+    const result = await activateOption(chosenOption.id, [], null, isPro);
 
     res.status(200).json({ ...result, chosenGroupId: chosenGroup.id, chosenOption });
   } catch (err) {
