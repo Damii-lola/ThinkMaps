@@ -1165,6 +1165,44 @@ function renderCanvas(){
   renderGroups(visible, infoByGroupId);
   renderLines(visible, infoByGroupId);
   applyWorldTransform();
+  renderMultiSelectStatusBar();
+}
+
+// Floating bar, injected fresh each render — same "no static markup
+// needed" pattern as showToast. Exists mainly for touch users: desktop's
+// ctrl+click already telegraphs "you're in a special selection mode"
+// through the modifier key itself, but a long-press has no equivalent
+// built-in signal, so this makes the resulting state (how many are
+// staged, what to do next) visible and gives an explicit Cancel escape
+// hatch alongside the existing Escape-key one. Hidden entirely once
+// nothing is staged, on both desktop and mobile.
+function renderMultiSelectStatusBar(){
+  let bar = document.getElementById('multiSelectStatusBar');
+  const count = canvasState.multiSelectStagedIds.size;
+
+  if(count === 0){
+    if(bar) bar.remove();
+    return;
+  }
+
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'multiSelectStatusBar';
+    bar.className = 'multi-select-status-bar';
+    document.body.appendChild(bar);
+  }
+
+  const label = count === 1
+    ? '1 option staged — long-press or ctrl+click one more, then tap a staged card to combine'
+    : `${count} options staged — tap any highlighted card to combine them`;
+
+  bar.innerHTML = `
+    <span class="multi-select-status-text">${escapeHtml(label)}</span>
+    <button type="button" class="multi-select-cancel-btn" id="multiSelectCancelBtn">Cancel</button>
+  `;
+
+  const cancelBtn = document.getElementById('multiSelectCancelBtn');
+  if(cancelBtn) cancelBtn.addEventListener('click', clearMultiSelectStage);
 }
 
 // A "batch" is every group spawned from the SAME option activation —
@@ -1711,6 +1749,71 @@ function clearMultiSelectStage(){
   renderCanvas();
 }
 
+// Mobile's answer to ctrl+click: there's no modifier key to hold on a
+// touchscreen, so long-press is the gesture that stages an option for a
+// combined activation instead. Cancels itself if the finger moves more
+// than a few pixels before the hold completes (so panning the canvas or
+// scrolling never gets misread as a long-press), and marks the element
+// with a short-lived suppressClick flag so the synthetic click every
+// mobile browser fires right after a touch doesn't immediately re-open
+// or activate the option it just staged.
+const LONG_PRESS_DURATION_MS = 480;
+const LONG_PRESS_MOVE_CANCEL_PX = 12;
+
+function setupLongPressStaging(optEl, optionId, groupId){
+  let pressTimer = null;
+  let startX = 0;
+  let startY = 0;
+  let fired = false;
+
+  optEl.addEventListener('touchstart', (e) => {
+    if(e.touches.length !== 1) return; // a pinch or multi-finger gesture isn't a long-press attempt
+    fired = false;
+    const t = e.touches[0];
+    startX = t.clientX;
+    startY = t.clientY;
+    pressTimer = setTimeout(() => {
+      fired = true;
+      optEl.dataset.suppressClick = '1';
+      if(navigator.vibrate) navigator.vibrate(35); // small haptic confirmation the hold registered
+      toggleMultiSelectStage(optionId, groupId);
+    }, LONG_PRESS_DURATION_MS);
+  }, { passive: true });
+
+  optEl.addEventListener('touchmove', (e) => {
+    if(!pressTimer) return;
+    const t = e.touches[0];
+    if(!t) return;
+    const dx = Math.abs(t.clientX - startX);
+    const dy = Math.abs(t.clientY - startY);
+    if(dx > LONG_PRESS_MOVE_CANCEL_PX || dy > LONG_PRESS_MOVE_CANCEL_PX){
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  }, { passive: true });
+
+  optEl.addEventListener('touchend', () => {
+    if(pressTimer){
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+    if(fired){
+      // The suppressClick flag only needs to survive long enough to eat
+      // the ONE synthetic click this exact touch is about to generate —
+      // clearing it shortly after means a genuinely separate later tap
+      // on the same element still works normally.
+      setTimeout(() => { delete optEl.dataset.suppressClick; }, 400);
+    }
+  });
+
+  optEl.addEventListener('touchcancel', () => {
+    if(pressTimer){
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  });
+}
+
 function wireGroupEvents(){
   document.querySelectorAll('.canvas-group').forEach(card => {
     const groupId = card.dataset.groupId;
@@ -1733,12 +1836,27 @@ function wireGroupEvents(){
       // rejected inside toggleMultiSelectStage itself.
       if(!optEl.classList.contains('selected')){
         optEl.addEventListener('click', (e) => {
+          if(optEl.dataset.suppressClick === '1'){
+            // A long-press JUST fired on this exact element and already
+            // staged it — the synthetic click mobile browsers send right
+            // after a touch would otherwise immediately activate the
+            // option too, undoing the whole point of staging it. Eat
+            // this one click, then get out of the way.
+            delete optEl.dataset.suppressClick;
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
           if(e.ctrlKey || e.metaKey){
             e.stopPropagation();
             e.preventDefault();
             toggleMultiSelectStage(optionId, groupId);
           }
         });
+        // Touch devices have no ctrl/cmd key to hold — long-press is the
+        // mobile equivalent of ctrl+click for staging an option toward a
+        // combined activation. See setupLongPressStaging below.
+        setupLongPressStaging(optEl, optionId, groupId);
       }
 
       if(optEl.classList.contains('selected')){
@@ -1762,6 +1880,12 @@ function wireGroupEvents(){
         // explanation. Mirrors endLineDrag's exact same check, so a click
         // and a completed drag onto a staged option behave identically.
         optEl.addEventListener('click', (e) => {
+          if(optEl.dataset.suppressClick === '1'){
+            delete optEl.dataset.suppressClick;
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
           if(e.ctrlKey || e.metaKey) return; // handled by the listener above instead
           if(canvasState.multiSelectStagedIds.size >= 2 && canvasState.multiSelectStagedIds.has(optionId)){
             const others = [...canvasState.multiSelectStagedIds].filter(id => id !== optionId);
@@ -3161,12 +3285,68 @@ async function runAiAnswer(currentQuestionNumber, totalQuestions){
   setTimeout(() => submitConfirmAnswer(body.selected, currentQuestionNumber, totalQuestions), 500);
 }
 
+// The exact three progress messages server.js's SSE pipeline sends
+// during final confirmation-answer synthesis (see sendProgress calls in
+// the /confirm/:sessionId/answer route) — kept here so the step
+// checklist below can match incoming messages to a fixed position
+// rather than just appending an open-ended list of whatever text shows
+// up. If the server ever sends something outside this set, it still
+// falls back to plain text instead of silently dropping the update.
+const RESEARCH_STEP_MESSAGES = [
+  'Researching what already exists in this space…',
+  'Identifying how to address competitor weaknesses…',
+  'Synthesizing your final hardened idea…'
+];
+
+// Renders (or re-renders) the step checklist inside #confirmResearching,
+// marking everything before the current message as done, the current
+// message as active (with a pulsing marker), and anything after as
+// still pending. Replaces the old "one spinner, one line of swapped
+// text" state — the 30-40 second wait during final synthesis now reads
+// as visible forward motion through 3 concrete stages instead of an
+// ambiguous single spinner someone might assume has frozen.
+function renderResearchStepsList(currentMessage){
+  const researchingEl = document.getElementById('confirmResearching');
+  if(!researchingEl) return;
+
+  const currentIndex = RESEARCH_STEP_MESSAGES.indexOf(currentMessage);
+
+  const stepsHtml = RESEARCH_STEP_MESSAGES.map((msg, i) => {
+    let stateClass = '';
+    if(currentIndex === -1){
+      // Message didn't match any known step (unexpected server text) —
+      // don't guess at step state, just leave everything neutral and
+      // rely on the fallback line below to actually convey what's happening.
+      stateClass = '';
+    } else if(i < currentIndex){
+      stateClass = 'done';
+    } else if(i === currentIndex){
+      stateClass = 'active';
+    }
+    return `
+      <div class="research-step ${stateClass}">
+        <span class="research-step-marker"></span>
+        <span>${escapeHtml(msg.replace('…', ''))}</span>
+      </div>
+    `;
+  }).join('');
+
+  const fallbackLine = currentIndex === -1
+    ? `<p>${escapeHtml(currentMessage || 'Working on it…')}</p>`
+    : '';
+
+  researchingEl.innerHTML = `
+    <div class="confirm-spinner"></div>
+    ${fallbackLine}
+    <div class="research-steps-list">${stepsHtml}</div>
+  `;
+}
+
 async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQuestions){
   const optionsEl = document.getElementById('confirmOptions');
   const questionEl = document.getElementById('confirmQuestion');
   const cardEl = document.getElementById('confirmCard');
   const researchingEl = document.getElementById('confirmResearching');
-  const researchingMsg = researchingEl?.querySelector('p');
   const aiAnswerBtn = document.getElementById('aiAnswerBtn');
 
   if(optionsEl) optionsEl.querySelectorAll('.ideate-option').forEach(b => b.disabled = true);
@@ -3176,7 +3356,7 @@ async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQ
   if(isLastQuestion){
     if(cardEl) cardEl.style.display = 'none';
     if(researchingEl) researchingEl.style.display = 'block';
-    if(researchingMsg) researchingMsg.textContent = 'Researching what already exists in this space…';
+    renderResearchStepsList(RESEARCH_STEP_MESSAGES[0]);
   } else if(questionEl){
     questionEl.textContent = 'Thinking…';
   }
@@ -3232,7 +3412,7 @@ async function submitConfirmAnswer(selectedOption, currentQuestionNumber, totalQ
           try { event = JSON.parse(line.slice(6)); } catch(e){ continue; }
 
           if(event.type === 'progress'){
-            if(researchingMsg) researchingMsg.textContent = event.message;
+            renderResearchStepsList(event.message);
           } else if(event.type === 'done'){
             if(event.status === 'completed'){
               renderConfirmResult(event.result);
@@ -3484,6 +3664,7 @@ function renderDeeperAnalysis(deeperAnalysis){
     <div id="deeperFixesSection"></div>
   `;
 
+  deeperEl.classList.add('result-section-enter');
   renderDeeperFixesSection();
 }
 
@@ -3674,6 +3855,7 @@ function renderRevisePreview(pendingRevision){
     </div>
   `;
 
+  el.classList.add('result-section-enter');
   const keepBtn = document.getElementById('keepRevisionBtn');
   const discardBtn = document.getElementById('discardRevisionBtn');
   if(keepBtn) keepBtn.addEventListener('click', commitRevision);
@@ -3814,6 +3996,7 @@ function renderBuildBrief(buildBrief){
     </div>
   `;
 
+  el.classList.add('result-section-enter');
   const regenBtn = document.getElementById('regenerateBuildBriefBtn');
   if(regenBtn) regenBtn.addEventListener('click', () => runBuildBrief(true));
 
