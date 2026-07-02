@@ -1500,3 +1500,68 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
   .export-wrap{ max-width:100%; padding:0; }
   .export-section, .export-persona-page{ page-break-inside:avoid; }
 }
+
+/* =====================================================================
+   PRO BLUEPRINT UPGRADE — richer generation hint, snapshots, and a
+   genuinely different premium feel to the canvas itself for Pro users.
+   ===================================================================== */
+
+/* ---------- Rationale hint (Pro-only "why this fits" tooltip) ---------- */
+.opt-rationale-dot{
+  flex-shrink:0; font-size:10px; color:var(--accent); opacity:0.6; cursor:help;
+  margin-left:2px; transition:opacity .15s ease;
+}
+.canvas-option:hover .opt-rationale-dot{ opacity:1; }
+
+/* ---------- Snapshots button (canvas-controls cluster) ---------- */
+.snapshots-btn{ font-size:15px; }
+.pro-glow-btn{
+  box-shadow:0 0 0 1px rgba(217,163,62,0.4), 0 0 10px rgba(217,163,62,0.25);
+}
+
+/* ---------- Snapshots modal ---------- */
+.snapshots-modal-card{ max-width:480px; }
+.snapshot-save-row{ display:flex; gap:8px; margin:14px 0 4px; }
+.snapshot-save-row input{
+  flex:1; font-family:var(--font-body); font-size:14px; color:var(--ink);
+  background:var(--bg); border:1px solid var(--line); border-radius:8px;
+  padding:10px 12px; outline:none;
+}
+.snapshot-save-row input:focus{ border-color:var(--accent); }
+.snapshots-list{ max-height:280px; overflow-y:auto; margin-top:16px; display:flex; flex-direction:column; gap:8px; }
+.snapshots-empty{ text-align:center; padding:20px 0; font-size:13px; }
+.snapshot-row{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  background:var(--bg); border:1px solid var(--line); border-radius:8px;
+  padding:10px 12px;
+}
+.snapshot-row-info{ min-width:0; }
+.snapshot-row-name{ display:block; font-size:13.5px; font-weight:600; color:var(--ink); }
+.snapshot-row-meta{ display:block; font-size:11.5px; color:var(--ink-muted); margin-top:2px; }
+.snapshot-row-actions{ display:flex; gap:6px; flex-shrink:0; }
+.snapshot-restore-btn{ font-size:12px; padding:7px 12px; }
+.snapshot-delete-btn{ font-size:13px; padding:7px 10px; color:var(--ink-muted); }
+.snapshot-delete-btn:hover{ color:#C24A3D; border-color:#C24A3D; }
+
+/* ---------- Premium Pro canvas theme ----------
+   A genuinely different feel for the workspace itself, not just a badge
+   bolted on somewhere — a warm gold-tinted glow behind the dot-grid
+   background and a subtle ring around the blueprint title, both purely
+   additive on top of the existing canvas styling (nothing here overrides
+   base colors, so a free-tier canvas is completely unaffected). */
+.canvas-viewport.pro-canvas{
+  background-image:
+    radial-gradient(circle, var(--line) 1px, transparent 1.4px),
+    radial-gradient(ellipse 900px 500px at 20% 15%, rgba(217,163,62,0.05), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 85% 80%, rgba(217,119,87,0.045), transparent 60%);
+  background-size: 22px 22px, 100% 100%, 100% 100%;
+}
+.app-blueprint-title.pro-title{
+  position:relative;
+}
+.app-blueprint-title.pro-title::after{
+  content:'PRO';
+  font-family:var(--font-mono); font-size:9px; font-weight:700; letter-spacing:.06em;
+  color:#9A7320; background:rgba(217,163,62,0.16);
+  padding:2px 5px; border-radius:4px; margin-left:8px; vertical-align:middle;
+}
