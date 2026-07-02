@@ -1171,3 +1171,26 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 @media (prefers-reduced-motion:reduce){
   .research-step-marker::after{ animation:none; }
 }
+
+/* ---------- Dashboard feedback button (renderFeedbackButton in script.js) ----------
+   Bottom-RIGHT specifically: this only ever renders on dashboard.html,
+   which has no canvas/zoom controls or multi-select status bar competing
+   for that corner (those only exist on app.html), so there's no clash
+   to route around the way feedback.js's sound toggle had to avoid
+   .canvas-controls by going bottom-left instead. */
+.feedback-fab{
+  position:fixed; right:24px; bottom:24px; z-index:150;
+  width:52px; height:52px; border-radius:50%;
+  background:var(--accent); color:#FAF6F1; border:none;
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; box-shadow:0 6px 18px rgba(217,119,87,0.35);
+  transition:transform .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.feedback-fab:hover{
+  background:var(--accent-deep); transform:translateY(-2px);
+  box-shadow:0 10px 24px rgba(217,119,87,0.42);
+}
+.feedback-fab:active{ transform:translateY(0) scale(0.96); }
+@media (hover:none) and (pointer:coarse){
+  .feedback-fab{ width:56px; height:56px; right:18px; bottom:18px; }
+}
