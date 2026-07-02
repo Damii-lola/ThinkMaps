@@ -1,3 +1,5 @@
+server.js
+
 require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
@@ -387,9 +389,16 @@ app.post('/auth/login-start', async (req, res) => {
       expiresAt: Date.now() + OTP_PENDING_TTL_MS
     });
 
-    // Sign this temp session back out immediately — the real session
-    // handoff only happens once the OTP in step 2 is confirmed.
-    await anonClient.auth.signOut();
+    // NOTE: deliberately NOT calling anonClient.auth.signOut() here.
+    // Supabase's signOut() revokes the refresh token on Supabase's own
+    // servers by default (global scope) — calling it here was killing
+    // the exact session tokens stored above, before login-verify ever
+    // got a chance to hand them back to the browser. That's what caused
+    // setSession() to succeed locally (it just writes to storage) while
+    // the very next request (getUser()) came back 403 — Supabase had
+    // already revoked the session server-side by then. anonClient is a
+    // fresh, throwaway instance created fresh per-request with nothing
+    // persisted between calls, so there's nothing to actually clean up.
 
     res.status(200).json({ sent: true, email });
   } catch (err) {
