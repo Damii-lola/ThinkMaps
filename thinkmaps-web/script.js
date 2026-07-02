@@ -48,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAppPage();
   initIdeatePage();
   initConfirmPage();
+  initSettingsPage();
 });
 
 // ---------- BACKEND CONNECTION ----------
@@ -513,7 +514,15 @@ async function initNavAuthState(){
 
   const navCta = document.getElementById('navCta');
   if(navCta){
-    navCta.innerHTML = `<a href="dashboard.html" class="btn btn-primary">Dashboard</a>`;
+    navCta.innerHTML = `
+      <a href="dashboard.html" class="btn btn-primary">Dashboard</a>
+      <a href="settings.html" class="user-icon-btn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="19" height="19">
+          <circle cx="12" cy="8" r="4"/>
+          <path d="M4 20c0-4.4 3.6-7 8-7s8 2.6 8 7"/>
+        </svg>
+      </a>
+    `;
   }
 
   document.querySelectorAll('a[href="auth.html"]').forEach(a => {
@@ -719,7 +728,11 @@ function showProPlanModal(){
         const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
         if(res && res.ok){
           closeProPlanModal();
-          await loadDashboard();
+          // Refresh whichever page actually has this modal open — dashboard.html
+          // and settings.html both surface plan status, and each has its own
+          // reload function since they render completely different markup.
+          if(document.getElementById('dashboardRoot')) await loadDashboard();
+          if(document.getElementById('settingsRoot')) await loadSettingsProfile();
         } else {
           goProBtn.disabled = false;
           goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
@@ -849,6 +862,281 @@ async function submitFeedback(textarea, sendBtn){
     if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
     if(sendBtn){ sendBtn.disabled = false; sendBtn.textContent = 'Send'; }
   }
+}
+
+// ---------- SETTINGS PAGE (settings.html) ----------
+// Everything here talks to routes that already existed in server.js
+// before this page did — GET/POST /profile, POST /profile/password,
+// DELETE /profile — this is purely the frontend for infrastructure that
+// was already there.
+const settingsState = { username: '', email: '', isPro: false };
+
+async function initSettingsPage(){
+  const root = document.getElementById('settingsRoot');
+  if(!root) return;
+
+  const session = await getActiveSession();
+  if(!session){ window.location.href = 'auth.html'; return; }
+
+  await loadSettingsProfile();
+  wireSettingsUsernameForm();
+  wireSettingsPasswordForm();
+  wireSettingsDeleteAccount();
+
+  const logoutBtn = document.getElementById('settingsLogoutBtn');
+  if(logoutBtn) logoutBtn.addEventListener('click', handleLogout);
+}
+
+async function loadSettingsProfile(){
+  try {
+    const res = await authedFetch('/profile');
+    if(!res) return; // authedFetch already redirected to auth.html
+    if(!res.ok) throw new Error('Could not load your profile.');
+
+    const profile = await res.json();
+    settingsState.username = profile.username || '';
+    settingsState.email = profile.email || '';
+    settingsState.isPro = !!profile.pro_status;
+
+    const usernameDisplay = document.getElementById('settingsUsernameDisplay');
+    const emailDisplay = document.getElementById('settingsEmailDisplay');
+    const avatarInitial = document.getElementById('settingsAvatarInitial');
+
+    if(usernameDisplay) usernameDisplay.textContent = settingsState.username || '—';
+    if(emailDisplay) emailDisplay.textContent = settingsState.email || '—';
+    if(avatarInitial){
+      avatarInitial.textContent = (settingsState.username || settingsState.email || '?').charAt(0).toUpperCase();
+    }
+
+    renderSettingsPlan();
+  } catch (err){
+    showToast('Could not load your profile — try refreshing.');
+  }
+}
+
+function renderSettingsPlan(){
+  const labelEl = document.getElementById('settingsPlanLabel');
+  const descEl = document.getElementById('settingsPlanDescription');
+  const btnEl = document.getElementById('settingsPlanBtn');
+  if(!labelEl || !descEl || !btnEl) return;
+
+  if(settingsState.isPro){
+    labelEl.innerHTML = '<span class="eyebrow">Pro</span>';
+    descEl.textContent = 'Unlimited blueprints, no edit lock, never deleted.';
+    btnEl.textContent = 'Manage plan';
+  } else {
+    labelEl.innerHTML = '<span class="eyebrow">Free plan</span>';
+    descEl.textContent = 'One blueprint, 30 minutes to edit, then read-only — deleted after 3 days.';
+    btnEl.textContent = 'Go Pro';
+  }
+  btnEl.style.display = 'inline-flex';
+
+  // showProPlanModal reads dashboardState.isPro (a module-level object
+  // shared across every page this script runs on, not just dashboard.html)
+  // to decide its own copy/behavior — keeping it in sync here means the
+  // exact same modal works correctly whether it was opened from the
+  // dashboard or from here.
+  btnEl.onclick = () => {
+    dashboardState.isPro = settingsState.isPro;
+    showProPlanModal();
+  };
+}
+
+function wireSettingsUsernameForm(){
+  const displayRow = document.getElementById('settingsUsernameDisplay');
+  const editBtn = document.getElementById('editUsernameBtn');
+  const form = document.getElementById('usernameForm');
+  const input = document.getElementById('usernameInput');
+  const cancelBtn = document.getElementById('cancelUsernameBtn');
+  const errorEl = document.getElementById('usernameError');
+  if(!editBtn || !form || !input) return;
+
+  editBtn.addEventListener('click', () => {
+    input.value = settingsState.username;
+    if(errorEl) errorEl.textContent = '';
+    form.style.display = 'flex';
+    editBtn.style.display = 'none';
+    input.focus();
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    form.style.display = 'none';
+    editBtn.style.display = 'inline-flex';
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if(errorEl) errorEl.textContent = '';
+
+    const newUsername = input.value.trim();
+    if(!newUsername){
+      if(errorEl) errorEl.textContent = 'Username is required.';
+      return;
+    }
+
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; }
+
+    try {
+      const res = await authedFetch('/profile/username', {
+        method: 'POST',
+        body: JSON.stringify({ username: newUsername })
+      });
+      if(!res) return;
+
+      const body = await res.json().catch(() => ({}));
+      if(!res.ok){
+        if(errorEl) errorEl.textContent = body.error || 'Could not update username.';
+        return;
+      }
+
+      settingsState.username = body.username;
+      if(displayRow) displayRow.textContent = body.username;
+      const avatarInitial = document.getElementById('settingsAvatarInitial');
+      if(avatarInitial) avatarInitial.textContent = body.username.charAt(0).toUpperCase();
+
+      form.style.display = 'none';
+      editBtn.style.display = 'inline-flex';
+      showToast('Username updated.');
+    } catch (err){
+      if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+    } finally {
+      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Save'; }
+    }
+  });
+}
+
+function wireSettingsPasswordForm(){
+  const editBtn = document.getElementById('editPasswordBtn');
+  const form = document.getElementById('passwordForm');
+  const currentInput = document.getElementById('currentPasswordInput');
+  const newInput = document.getElementById('newPasswordInput');
+  const confirmInput = document.getElementById('confirmPasswordInput');
+  const cancelBtn = document.getElementById('cancelPasswordBtn');
+  const errorEl = document.getElementById('passwordError');
+  if(!editBtn || !form) return;
+
+  editBtn.addEventListener('click', () => {
+    form.reset();
+    if(errorEl) errorEl.textContent = '';
+    form.style.display = 'flex';
+    editBtn.style.display = 'none';
+    currentInput?.focus();
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    form.style.display = 'none';
+    editBtn.style.display = 'inline-flex';
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if(errorEl) errorEl.textContent = '';
+
+    const currentPassword = currentInput.value;
+    const newPassword = newInput.value;
+    const confirmPassword = confirmInput.value;
+
+    if(newPassword !== confirmPassword){
+      if(errorEl) errorEl.textContent = 'New passwords don\'t match.';
+      return;
+    }
+    if(newPassword.length < 8){
+      if(errorEl) errorEl.textContent = 'New password must be at least 8 characters.';
+      return;
+    }
+
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Updating…'; }
+
+    try {
+      const res = await authedFetch('/profile/password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      if(!res) return;
+
+      const body = await res.json().catch(() => ({}));
+      if(!res.ok){
+        if(errorEl) errorEl.textContent = body.error || 'Could not update password.';
+        return;
+      }
+
+      form.reset();
+      form.style.display = 'none';
+      editBtn.style.display = 'inline-flex';
+      showToast('Password updated.');
+    } catch (err){
+      if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+    } finally {
+      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Update password'; }
+    }
+  });
+}
+
+function wireSettingsDeleteAccount(){
+  const openBtn = document.getElementById('deleteAccountBtn');
+  const modal = document.getElementById('deleteAccountModal');
+  const cancelBtn = document.getElementById('cancelDeleteAccountBtn');
+  const confirmBtn = document.getElementById('confirmDeleteAccountBtn');
+  const input = document.getElementById('deleteConfirmInput');
+  const errorEl = document.getElementById('deleteAccountError');
+  if(!openBtn || !modal) return;
+
+  openBtn.addEventListener('click', () => {
+    if(input) input.value = '';
+    if(errorEl) errorEl.textContent = '';
+    modal.style.display = 'flex';
+    input?.focus();
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    modal.style.display = 'none';
+  });
+
+  modal.addEventListener('click', (e) => {
+    if(e.target === modal) modal.style.display = 'none';
+  });
+
+  confirmBtn?.addEventListener('click', async () => {
+    if(errorEl) errorEl.textContent = '';
+    const typed = (input?.value || '').trim();
+
+    if(!typed){
+      if(errorEl) errorEl.textContent = 'Type your username to confirm.';
+      return;
+    }
+
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Deleting…';
+
+    try {
+      const res = await authedFetch('/profile', {
+        method: 'DELETE',
+        body: JSON.stringify({ confirmUsername: typed })
+      });
+      if(!res) return;
+
+      const body = await res.json().catch(() => ({}));
+      if(!res.ok){
+        if(errorEl) errorEl.textContent = body.error || 'Could not delete your account.';
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Delete my account';
+        return;
+      }
+
+      // Account is gone server-side — clear the local session and send
+      // them somewhere that isn't behind a login wall for an account
+      // that no longer exists.
+      const sb = await getSupabaseClient();
+      await sb.auth.signOut();
+      window.location.href = 'index.html';
+    } catch (err){
+      if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Delete my account';
+    }
+  });
 }
 
 function renderBlueprintArea(container, blueprints, canCreateNew){
@@ -2723,10 +3011,87 @@ function updateStreamingPreview(labels, tokenCount){
   }
 }
 
+// ---------- 5. "Idea Already Exists?" Pre-Check ----------
+// Fires exactly once per blueprint, right after the very first root
+// option activation (see the isFirstEverActivation capture in
+// handleOptionActivate below). Never blocks — this is context, not a
+// gate, so any failure just quietly does nothing rather than
+// interrupting canvas exploration.
+async function maybeRunPreCheck(nicheLabel){
+  if(!nicheLabel) return;
+  // Pro-only, checked here before ever hitting the endpoint — this
+  // trigger is automatic, not something the user clicked, so a free
+  // user should just see nothing happen rather than an upgrade prompt
+  // interrupting their very first canvas click.
+  if(!canvasState.isPro) return;
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/precheck`, {
+      method: 'POST',
+      body: JSON.stringify({ nicheLabel, firstOptionText: nicheLabel })
+    });
+    if(!res || !res.ok) return;
+    const body = await res.json();
+    if(body?.precheck) showPreCheckModal(body.precheck);
+  } catch (err) {
+    // Silent — pre-check is a nice-to-have, never worth surfacing an
+    // error over on top of what's already a smooth canvas moment.
+  }
+}
+
+function showPreCheckModal(precheck){
+  const existing = document.getElementById('preCheckModal');
+  if(existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'preCheckModal';
+
+  const productsHtml = (precheck.products || []).map(p => `
+    <a href="${escapeHtml(p.url || '#')}" target="_blank" rel="noopener" class="precheck-product-row">
+      <span class="precheck-product-name">${escapeHtml(p.name)}</span>
+      <span class="precheck-product-desc">${escapeHtml(p.description)}</span>
+    </a>
+  `).join('');
+
+  overlay.innerHTML = `
+    <div class="modal-card precheck-modal-card">
+      <span class="eyebrow">Worth knowing</span>
+      <h3>Here's what's already out there</h3>
+      ${productsHtml ? `<div class="precheck-products-list">${productsHtml}</div>` : ''}
+      <p class="precheck-gap-sentence">${escapeHtml(precheck.gapSentence || '')}</p>
+      <p class="muted precheck-disclaimer">This is context, not a verdict — some of the best ideas look crowded from the outside.</p>
+      <div class="modal-actions precheck-actions">
+        <button class="btn btn-ghost" id="precheckRethinkBtn" type="button">Let me rethink the niche</button>
+        <button class="btn btn-primary" id="precheckContinueBtn" type="button">I see the gap, keep going</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  document.getElementById('precheckContinueBtn')?.addEventListener('click', () => overlay.remove());
+  document.getElementById('precheckRethinkBtn')?.addEventListener('click', () => {
+    overlay.remove();
+    // Collapses back to niche selection WITHOUT losing the blueprint —
+    // the root group is still there, this just pans/zooms the view back
+    // to it (reusing the same function the zoom-reset button already
+    // calls) so the person can pick a different root option instead.
+    canvasState.zoom = 1;
+    centerCanvasOnRoot();
+  });
+}
+
+
 async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
   const option = canvasState.options.find(o => o.id === optionId);
   setCanvasBusy(true, buildActivationAckMessage(option?.label));
+
+  // Only the root "Niches" group exists before anything has ever been
+  // activated on this blueprint — capturing that BEFORE the fetch call
+  // below is what lets the pre-check trigger fire exactly once, on the
+  // genuinely first click, and never again on any later activation.
+  const isFirstEverActivation = canvasState.groups.length === 1;
+  const nicheLabelForPrecheck = option?.label;
 
   let tokenCount = 0;
 
@@ -2803,6 +3168,7 @@ async function handleOptionActivate(optionId){
           } else {
             await loadGraph(); // fallback if full graph wasn't returned
           }
+          if(isFirstEverActivation) maybeRunPreCheck(nicheLabelForPrecheck);
         } else if(event.type === 'error'){
           alert(event.error || 'Could not activate that option.');
           return;
@@ -2827,6 +3193,7 @@ async function handleOptionActivate(optionId){
         } else {
           await loadGraph();
         }
+        if(isFirstEverActivation) maybeRunPreCheck(nicheLabelForPrecheck);
       }
     } catch(fallbackErr){
       alert('Something went wrong activating that option.');
@@ -3260,6 +3627,13 @@ async function initConfirmPage(){
       confirmState.buildBrief = body.buildBrief || null;
       confirmState.shareToken = body.shareToken || null;
       confirmState.pendingRevision = body.pendingRevision || null;
+      confirmState.pivots = body.pivots || null;
+      confirmState.landingCopy = body.landingCopy || null;
+      confirmState.strengthScore = body.strengthScore || null;
+      confirmState.personas = body.personas || null;
+      confirmState.launchChecklist = body.launchChecklist || null;
+      confirmState.redTeam = body.redTeam || null;
+      confirmState.spyMode = body.spyMode || null;
       renderConfirmResult(body.result);
       return;
     }
@@ -3620,6 +3994,22 @@ async function renderConfirmResult(result){
 
     <div id="buildBriefSection"></div>
 
+    <div class="idea-toolkit">
+      <h3 class="confirm-section-title">Idea toolkit</h3>
+      <p class="idea-toolkit-intro muted">Everything below builds on the hardened idea above — take what's useful, skip what isn't.</p>
+
+      <div class="toolkit-grid">
+        <div class="toolkit-card" id="strengthScoreCard"></div>
+        <div class="toolkit-card" id="pivotsCard"></div>
+        <div class="toolkit-card" id="personasCard"></div>
+        <div class="toolkit-card" id="landingCopyCard"></div>
+        <div class="toolkit-card" id="redTeamCard"></div>
+        <div class="toolkit-card" id="spyModeCard"></div>
+        <div class="toolkit-card" id="launchChecklistCard"></div>
+        <div class="toolkit-card" id="exportCard"></div>
+      </div>
+    </div>
+
     <div class="confirm-final-actions">
       <div id="shareLinkSection"></div>
       <a href="dashboard.html" class="btn btn-primary">Back to dashboard</a>
@@ -3649,6 +4039,7 @@ async function renderConfirmResult(result){
   renderReviseSection();
   renderBuildBriefSection();
   renderShareLinkSection();
+  initIdeaToolkit();
 }
 
 // The swappable "core idea" block — name through the full pitch
@@ -4250,4 +4641,749 @@ function renderShareLink(token){
       input?.select();
     }
   });
+}
+
+// =====================================================================
+// IDEA TOOLKIT — 9 features, all built on top of the hardened idea.
+// Every one of these follows the same shape as Build Brief above:
+// renderXSection() decides gated-button vs already-cached-result,
+// runX() fetches/generates and caches into confirmState, renderX()
+// paints the actual result. initIdeaToolkit() just calls all 8 section
+// renderers once (the 9th, the Pre-Check, isn't rendered here at all —
+// it's triggered from the canvas on the very first option activation,
+// see initAppPage).
+// =====================================================================
+function initIdeaToolkit(){
+  renderStrengthScoreSection();
+  renderPivotsSection();
+  renderPersonasSection();
+  renderLandingCopySection();
+  renderRedTeamSection();
+  renderSpyModeSection();
+  renderLaunchChecklistSection();
+  renderExportSection();
+}
+
+// ---------- 1. Idea Strength Score ----------
+function renderStrengthScoreSection(){
+  const el = document.getElementById('strengthScoreCard');
+  if(!el) return;
+  if(confirmState.strengthScore){
+    renderStrengthScore(confirmState.strengthScore);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Idea Strength Score</h4><p class="muted">Four honest scores, not one number.</p></div>`;
+  renderProGatedButton(el, 'Score This Idea', runStrengthScore);
+}
+
+async function runStrengthScore(){
+  const el = document.getElementById('strengthScoreCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Idea Strength Score</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Scoring market clarity, competitive gap, personal fit, and technical feasibility…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/strength-score`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not score this idea.')}</p>`;
+      return;
+    }
+    confirmState.strengthScore = body.strengthScore;
+    renderStrengthScore(body.strengthScore);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong scoring this idea.</p>`;
+  }
+}
+
+function scoreColor(score){
+  if(score <= 4) return '#C24A3D';
+  if(score <= 7) return '#D9A33E';
+  return '#5C8A5C';
+}
+
+// Hand-rolled SVG radar chart — no charting library exists anywhere in
+// this codebase, and pulling one in for a single 4-axis chart isn't
+// worth the dependency. 4 axes at 90-degree spacing starting from the
+// top, each axis scaled 0-10 from center to edge.
+function buildRadarChartSvg(dims){
+  const cx = 100, cy = 100, maxR = 70;
+  const angles = [-90, 0, 90, 180]; // top, right, bottom, left
+  const points = dims.map((d, i) => {
+    const angle = (angles[i] * Math.PI) / 180;
+    const r = (d.score / 10) * maxR;
+    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+  });
+  const pointsStr = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+
+  const gridRings = [0.25, 0.5, 0.75, 1].map(frac => {
+    const ringPoints = angles.map(a => {
+      const angle = (a * Math.PI) / 180;
+      const r = maxR * frac;
+      return `${(cx + r * Math.cos(angle)).toFixed(1)},${(cy + r * Math.sin(angle)).toFixed(1)}`;
+    }).join(' ');
+    return `<polygon points="${ringPoints}" fill="none" stroke="#DAD5C7" stroke-width="1"/>`;
+  }).join('');
+
+  const axisLines = angles.map(a => {
+    const angle = (a * Math.PI) / 180;
+    const x = cx + maxR * Math.cos(angle);
+    const y = cy + maxR * Math.sin(angle);
+    return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#DAD5C7" stroke-width="1"/>`;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 200 200" class="strength-radar-svg">
+      ${gridRings}
+      ${axisLines}
+      <polygon points="${pointsStr}" fill="#D97757" fill-opacity="0.24" stroke="#D97757" stroke-width="2"/>
+      ${points.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#D97757"/>`).join('')}
+    </svg>
+  `;
+}
+
+function renderStrengthScore(strengthScore){
+  const el = document.getElementById('strengthScoreCard');
+  if(!el) return;
+
+  const dims = [
+    { key: 'marketClarity', label: 'Market Clarity', ...strengthScore.marketClarity },
+    { key: 'competitiveGap', label: 'Competitive Gap', ...strengthScore.competitiveGap },
+    { key: 'personalFit', label: 'Personal Fit', ...strengthScore.personalFit },
+    { key: 'technicalFeasibility', label: 'Technical Feasibility', ...strengthScore.technicalFeasibility }
+  ];
+  const overall = Math.round(dims.reduce((s, d) => s + (d.score || 0), 0) / dims.length);
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Idea Strength Score</h4></div>
+    <div class="strength-score-layout">
+      <div class="strength-radar-wrap">
+        ${buildRadarChartSvg(dims)}
+        <div class="strength-overall" style="color:${scoreColor(overall)};">${overall}<span>/10</span></div>
+      </div>
+      <div class="strength-dims-list">
+        ${dims.map(d => `
+          <div class="strength-dim-row">
+            <div class="strength-dim-header">
+              <span class="strength-dim-label">${escapeHtml(d.label)}</span>
+              <span class="strength-dim-score" style="color:${scoreColor(d.score)};">${d.score}/10</span>
+            </div>
+            <p class="strength-dim-explanation">${escapeHtml(d.explanation || '')}</p>
+            ${d.topAction ? `<p class="strength-dim-action"><strong>Do this:</strong> ${escapeHtml(d.topAction)}</p>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    ${!dashboardHasFounderProfileNote() ? `<p class="strength-fit-note muted">Personal Fit is necessarily limited without a full Founder Profile — take that score as a rough signal, not a precise one.</p>` : ''}
+  `;
+  el.classList.add('result-section-enter');
+}
+
+// No Founder Profile feature exists yet in this codebase — this just
+// centralizes the one place that'd need to change if/when one gets
+// built, rather than hardcoding "false" inline where it's used above.
+function dashboardHasFounderProfileNote(){ return false; }
+
+// ---------- 2. Pivot Generator ----------
+function renderPivotsSection(){
+  const el = document.getElementById('pivotsCard');
+  if(!el) return;
+  if(confirmState.pivots){
+    renderPivots(confirmState.pivots);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Pivot Generator</h4><p class="muted">Three genuinely different directions, not variations.</p></div>`;
+  renderProGatedButton(el, 'Show Me 3 Pivots', runPivots);
+}
+
+async function runPivots(){
+  const el = document.getElementById('pivotsCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Pivot Generator</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Working out an audience pivot, a monetization pivot, and a scope pivot…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/pivots`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate pivots.')}</p>`;
+      return;
+    }
+    confirmState.pivots = body.pivots;
+    renderPivots(body.pivots);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating pivots.</p>`;
+  }
+}
+
+function renderPivots(pivots){
+  const el = document.getElementById('pivotsCard');
+  if(!el) return;
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Pivot Generator</h4></div>
+    <div class="pivots-accordion">
+      ${pivots.map((p, i) => `
+        <details class="pivot-item" ${i === 0 ? 'open' : ''}>
+          <summary>
+            <span class="pivot-type-badge pivot-type-${escapeHtml(p.type)}">${escapeHtml(p.label || p.type)}</span>
+            <span class="pivot-concept-name">${escapeHtml(p.renamedConcept?.name || '')}</span>
+          </summary>
+          <div class="pivot-item-body">
+            <p class="pivot-oneliner">${escapeHtml(p.renamedConcept?.oneLiner || '')}</p>
+            <div class="idea-block"><div class="lbl">Direction</div><p>${escapeHtml(p.direction || '')}</p></div>
+            <div class="idea-block"><div class="lbl">Why it's defensible</div><p>${escapeHtml(p.whyDefensible || '')}</p></div>
+            <div class="idea-block"><div class="lbl">The 10x unlock</div><p>${escapeHtml(p.tenXUnlock || '')}</p></div>
+            <button class="btn btn-primary pivot-build-btn" type="button" data-pivot-index="${i}">Build This Instead</button>
+          </div>
+        </details>
+      `).join('')}
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+
+  el.querySelectorAll('.pivot-build-btn').forEach(btn => {
+    btn.addEventListener('click', () => buildPivotInstead(pivots[parseInt(btn.dataset.pivotIndex, 10)], btn));
+  });
+}
+
+async function buildPivotInstead(pivot, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Starting new blueprint…'; }
+
+  try {
+    const res = await authedFetch(`/blueprints/${confirmState.blueprintId}/pivot-into`, {
+      method: 'POST',
+      body: JSON.stringify({ pivot })
+    });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      showToast(body.error || 'Could not start a new blueprint from this pivot.');
+      if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; }
+      return;
+    }
+    window.location.href = `app.html?blueprint=${body.blueprint.id}`;
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+    if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; }
+  }
+}
+
+// ---------- 3. User Persona Cards ----------
+function renderPersonasSection(){
+  const el = document.getElementById('personasCard');
+  if(!el) return;
+  if(confirmState.personas){
+    renderPersonas(confirmState.personas);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>User Persona Cards</h4><p class="muted">Three specific people, not generic demographics.</p></div>`;
+  renderProGatedButton(el, 'Generate Personas', runPersonas);
+}
+
+async function runPersonas(){
+  const el = document.getElementById('personasCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>User Persona Cards</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Building 3 specific people who represent your real audience…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/personas`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate personas.')}</p>`;
+      return;
+    }
+    confirmState.personas = body.personas;
+    renderPersonas(body.personas);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating personas.</p>`;
+  }
+}
+
+function personaInitials(name){
+  return (name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function renderPersonas(personasResult){
+  const el = document.getElementById('personasCard');
+  if(!el) return;
+
+  const personas = personasResult.personas || [];
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>User Persona Cards</h4></div>
+    <div class="personas-scroll-row">
+      ${personas.map(p => `
+        <div class="persona-full-card">
+          <div class="persona-full-avatar">${escapeHtml(personaInitials(p.name))}</div>
+          <div class="persona-full-name">${escapeHtml(p.name)}, ${escapeHtml(String(p.age || ''))}</div>
+          <div class="persona-full-occupation">${escapeHtml(p.occupation || '')}</div>
+          <p class="persona-full-routine">${escapeHtml(p.dailyRoutine || '')}</p>
+          <div class="lbl">Top frustrations</div>
+          <ul>${(p.topFrustrations || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
+          <div class="lbl">Already tried</div>
+          <p class="persona-full-tried">${escapeHtml(p.alreadyTried || '')}</p>
+          <div class="lbl">Would pay if</div>
+          <p class="persona-full-wouldpay">${escapeHtml(p.wouldPayIf || '')}</p>
+          <p class="persona-full-quote">&ldquo;${escapeHtml(p.quote || '')}&rdquo;</p>
+        </div>
+      `).join('')}
+    </div>
+    <div class="toolkit-card-actions">
+      <a href="export.html?session=${confirmState.sessionId}&view=personas" target="_blank" class="btn btn-ghost">Download as PDF</a>
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+}
+
+// ---------- 4. Landing Page Copy Generator ----------
+function renderLandingCopySection(){
+  const el = document.getElementById('landingCopyCard');
+  if(!el) return;
+  if(confirmState.landingCopy){
+    renderLandingCopy(confirmState.landingCopy);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Landing Page Copy</h4><p class="muted">Real, paste-ready copy — not a fill-in-the-blank template.</p></div>`;
+  renderProGatedButton(el, 'Generate Landing Copy', runLandingCopy);
+}
+
+async function runLandingCopy(){
+  const el = document.getElementById('landingCopyCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Landing Page Copy</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Writing a headline, sub-headline, feature bullets, and CTA options…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/landing-copy`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate landing page copy.')}</p>`;
+      return;
+    }
+    confirmState.landingCopy = body.landingCopy;
+    renderLandingCopy(body.landingCopy);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating landing page copy.</p>`;
+  }
+}
+
+function landingCopyAsMarkdown(lc){
+  return [
+    `# ${lc.heroHeadline}`,
+    '',
+    lc.subHeadline,
+    '',
+    ...(lc.featureBullets || []).map(b => `- ${b}`),
+    '',
+    `**CTA options:** ${lc.ctaOptions?.cautious} / ${lc.ctaOptions?.medium} / ${lc.ctaOptions?.aggressive}`,
+    '',
+    `_${lc.socialProofPlaceholder}_`
+  ].join('\n');
+}
+
+function renderLandingCopy(lc){
+  const el = document.getElementById('landingCopyCard');
+  if(!el) return;
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Landing Page Copy</h4></div>
+    <div class="landing-copy-preview">
+      <div class="lc-section"><div class="lbl">Hero headline</div><p class="lc-hero">${escapeHtml(lc.heroHeadline)}</p></div>
+      <div class="lc-section"><div class="lbl">Sub-headline</div><p>${escapeHtml(lc.subHeadline)}</p></div>
+      <div class="lc-section"><div class="lbl">Feature bullets</div><ul>${(lc.featureBullets || []).map(b => `<li>${escapeHtml(b)}</li>`).join('')}</ul></div>
+      <div class="lc-section">
+        <div class="lbl">CTA button text</div>
+        <div class="lc-cta-options">
+          <span class="lc-cta-pill">Cautious: ${escapeHtml(lc.ctaOptions?.cautious || '')}</span>
+          <span class="lc-cta-pill">Medium: ${escapeHtml(lc.ctaOptions?.medium || '')}</span>
+          <span class="lc-cta-pill">Aggressive: ${escapeHtml(lc.ctaOptions?.aggressive || '')}</span>
+        </div>
+      </div>
+      <div class="lc-section"><div class="lbl">Social proof placeholder</div><p class="muted">${escapeHtml(lc.socialProofPlaceholder || '')}</p></div>
+    </div>
+    <div class="toolkit-card-actions">
+      <button class="btn btn-secondary" id="copyLandingCopyBtn" type="button">Copy All</button>
+      <a href="https://carrd.co" target="_blank" rel="noopener" class="btn btn-ghost" title="Paste this in — you can launch today">Open Carrd →</a>
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+
+  const copyBtn = document.getElementById('copyLandingCopyBtn');
+  if(copyBtn) copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(landingCopyAsMarkdown(lc));
+      const original = copyBtn.textContent;
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = original; }, 1800);
+    } catch (err) {
+      showToast('Could not copy — try selecting the text manually.');
+    }
+  });
+}
+
+// ---------- 5. Red Team Mode ("Challenge This Idea") ----------
+function renderRedTeamSection(){
+  const el = document.getElementById('redTeamCard');
+  if(!el) return;
+  if(confirmState.redTeam){
+    renderRedTeam(confirmState.redTeam);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Challenge This Idea</h4><p class="muted">A sharp, honest counterweight to the case you've already seen.</p></div>`;
+  renderProGatedButton(el, 'Challenge This Idea', runRedTeam);
+}
+
+async function runRedTeam(){
+  const el = document.getElementById('redTeamCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Challenge This Idea</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Attacking this idea across market risk, technical traps, distribution, timing, and founder fit…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/red-team`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not challenge this idea.')}</p>`;
+      return;
+    }
+    confirmState.redTeam = body.redTeam;
+    renderRedTeam(body.redTeam);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong challenging this idea.</p>`;
+  }
+}
+
+function renderRedTeam(redTeam){
+  const el = document.getElementById('redTeamCard');
+  if(!el) return;
+
+  const rebuttals = redTeam.rebuttals || {};
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Challenge This Idea</h4></div>
+    <div class="red-team-angles">
+      ${redTeam.angles.map((a) => {
+        const existing = rebuttals[a.angle];
+        return `
+        <details class="red-team-angle">
+          <summary>
+            <span class="red-team-angle-label">${escapeHtml(a.label)}</span>
+            ${existing ? `<span class="red-team-verdict red-team-verdict-${escapeHtml(existing.verdict)}">${escapeHtml(existing.verdict)}</span>` : ''}
+          </summary>
+          <div class="red-team-angle-body">
+            <p class="red-team-critique">${escapeHtml(a.critique)}</p>
+            <p class="red-team-question"><strong>Answer this:</strong> ${escapeHtml(a.pointedQuestion)}</p>
+            <div class="red-team-rebuttal-box">
+              <textarea class="revise-textarea red-team-rebuttal-input" data-angle="${escapeHtml(a.angle)}" placeholder="How would you respond to this?" rows="3">${existing ? escapeHtml(existing.rebuttal) : ''}</textarea>
+              <button class="btn btn-secondary red-team-submit-btn" type="button" data-angle="${escapeHtml(a.angle)}">Submit Response</button>
+              ${existing ? `<p class="red-team-response"><strong>Verdict:</strong> ${escapeHtml(existing.response)}</p>` : ''}
+            </div>
+          </div>
+        </details>
+      `;
+      }).join('')}
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+
+  el.querySelectorAll('.red-team-submit-btn').forEach(btn => {
+    btn.addEventListener('click', () => submitRedTeamRebuttal(btn.dataset.angle, btn));
+  });
+}
+
+async function submitRedTeamRebuttal(angle, btn){
+  const textarea = document.querySelector(`.red-team-rebuttal-input[data-angle="${angle}"]`);
+  const rebuttal = (textarea?.value || '').trim();
+  if(!rebuttal){
+    showToast('Write a response before submitting.');
+    return;
+  }
+
+  if(btn){ btn.disabled = true; btn.textContent = 'Evaluating…'; }
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/red-team/respond`, {
+      method: 'POST',
+      body: JSON.stringify({ angle, rebuttal })
+    });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      showToast(body.error || 'Could not evaluate your response.');
+      if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; }
+      return;
+    }
+    confirmState.redTeam = body.redTeam;
+    renderRedTeam(body.redTeam);
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+    if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; }
+  }
+}
+
+// ---------- 6. Competitor Deep Dive ("Spy Mode") ----------
+function renderSpyModeSection(){
+  const el = document.getElementById('spyModeCard');
+  if(!el) return;
+  if(confirmState.spyMode){
+    renderSpyMode(confirmState.spyMode);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Spy Mode</h4><p class="muted">A full intelligence profile on each real competitor found.</p></div>`;
+  renderProGatedButton(el, 'Run Competitor Deep Dive', runSpyMode);
+}
+
+async function runSpyMode(){
+  const el = document.getElementById('spyModeCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Spy Mode</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Digging into reviews, alternatives, and pricing for each competitor — this takes a bit longer.</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/spy-mode`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not run the competitor deep dive.')}</p>`;
+      return;
+    }
+    confirmState.spyMode = body.spyMode;
+    renderSpyMode(body.spyMode);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong running the competitor deep dive.</p>`;
+  }
+}
+
+function renderSpyMode(spyMode){
+  const el = document.getElementById('spyModeCard');
+  if(!el) return;
+
+  const competitors = spyMode.competitors || [];
+  if(!competitors.length){
+    el.innerHTML = `<div class="toolkit-card-head"><h4>Spy Mode</h4></div><p class="muted">No competitor profiles available.</p>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Spy Mode</h4></div>
+    <div class="spy-mode-tabs">
+      <div class="spy-mode-tab-buttons">
+        ${competitors.map((c, i) => `<button type="button" class="spy-mode-tab-btn ${i === 0 ? 'active' : ''}" data-tab-index="${i}">${escapeHtml(c.name)}</button>`).join('')}
+      </div>
+      ${competitors.map((c, i) => `
+        <div class="spy-mode-tab-panel ${i === 0 ? 'active' : ''}" data-panel-index="${i}">
+          <div class="idea-block"><div class="lbl">What they're good at</div><p>${escapeHtml(c.whatTheyreGoodAt || '')}</p></div>
+          <div class="idea-block"><div class="lbl">Where users complain</div><p>${escapeHtml(c.whereUsersComplain || '')}</p></div>
+          <div class="idea-block"><div class="lbl">Apparent pricing <span class="spy-mode-confirmed-date">(last confirmed ${escapeHtml((c.lastConfirmed || '').slice(0, 10))})</span></div><p>${escapeHtml(c.apparentPricing || '')}</p></div>
+          <div class="idea-block"><div class="lbl">Positioning gap</div><p>${escapeHtml(c.positioningGap || '')}</p></div>
+          <div class="idea-block"><div class="lbl">Attack vector</div><p>${escapeHtml(c.attackVector || '')}</p></div>
+          <button class="btn btn-primary spy-mode-steal-btn" type="button" data-competitor="${escapeHtml(c.name)}" data-attack="${escapeHtml(c.attackVector || '')}">Steal This</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+
+  el.querySelectorAll('.spy-mode-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = btn.dataset.tabIndex;
+      el.querySelectorAll('.spy-mode-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tabIndex === idx));
+      el.querySelectorAll('.spy-mode-tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panelIndex === idx));
+    });
+  });
+
+  el.querySelectorAll('.spy-mode-steal-btn').forEach(btn => {
+    btn.addEventListener('click', () => stealFromSpyMode(btn.dataset.competitor, btn.dataset.attack, btn));
+  });
+}
+
+async function stealFromSpyMode(competitorName, attackVector, btn){
+  if(btn){ btn.disabled = true; btn.textContent = 'Adding to build brief…'; }
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/spy-mode/steal`, {
+      method: 'POST',
+      body: JSON.stringify({ competitorName, attackVector })
+    });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      showToast(body.error || 'Could not add this to the build brief.');
+      if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; }
+      return;
+    }
+    confirmState.buildBrief = body.buildBrief;
+    renderBuildBrief(body.buildBrief);
+    if(btn){ btn.textContent = 'Added to Build Brief ✓'; }
+    showToast('Added to your build brief — pulled from Spy Mode.');
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+    if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; }
+  }
+}
+
+// ---------- 7. Launch Checklist ----------
+function renderLaunchChecklistSection(){
+  const el = document.getElementById('launchChecklistCard');
+  if(!el) return;
+  if(confirmState.launchChecklist){
+    renderLaunchChecklist(confirmState.launchChecklist);
+    return;
+  }
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Launch Checklist</h4><p class="muted">Week-by-week, specific to this idea — not a generic startup checklist.</p></div>`;
+  if(!confirmState.buildBrief){
+    el.innerHTML += `<p class="muted toolkit-locked-note">Generate the Build Brief first — this checklist is built from it.</p>`;
+    return;
+  }
+  renderProGatedButton(el, 'Generate Launch Checklist', runLaunchChecklist);
+}
+
+async function runLaunchChecklist(){
+  const el = document.getElementById('launchChecklistCard');
+  if(!el) return;
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Launch Checklist</h4></div><div class="confirm-researching"><div class="confirm-spinner"></div><p>Planning 4 weeks — validate, build, get users, measure…</p></div>`;
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/launch-checklist`, { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      el.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not generate the launch checklist.')}</p>`;
+      return;
+    }
+    confirmState.launchChecklist = body.launchChecklist;
+    renderLaunchChecklist(body.launchChecklist);
+  } catch (err) {
+    el.innerHTML = `<p class="confirm-error">Something went wrong generating the launch checklist.</p>`;
+  }
+}
+
+// Checklist completion state lives in localStorage, keyed per-session —
+// this is explicitly a living working document per the spec, not a
+// static read, so it needs to persist across visits without a server
+// round trip for every single checkbox click.
+function checklistStorageKey(){
+  return `thinkmaps_checklist_${confirmState.sessionId}`;
+}
+
+function getChecklistState(){
+  try {
+    const raw = localStorage.getItem(checklistStorageKey());
+    return raw ? JSON.parse(raw) : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+function setChecklistTaskDone(taskId, done){
+  const state = getChecklistState();
+  state[taskId] = done;
+  try {
+    localStorage.setItem(checklistStorageKey(), JSON.stringify(state));
+  } catch (err) {
+    // Storage full or unavailable — the checkbox itself still visually
+    // reflects the click, it just won't persist across a reload. Not
+    // worth interrupting the person with an error over.
+  }
+}
+
+function renderLaunchChecklist(launchChecklist){
+  const el = document.getElementById('launchChecklistCard');
+  if(!el) return;
+
+  const checklistState = getChecklistState();
+  const weeks = launchChecklist.weeks || [];
+
+  let totalTasks = 0;
+  let doneTasks = 0;
+  weeks.forEach((w, wi) => {
+    (w.tasks || []).forEach((t, ti) => {
+      totalTasks++;
+      if(checklistState[`${wi}-${ti}`]) doneTasks++;
+    });
+  });
+
+  // Which week to show as "current" — the first week that isn't 100%
+  // complete yet, or the last week if everything's done.
+  let currentWeekIndex = weeks.findIndex((w, wi) => {
+    const tasks = w.tasks || [];
+    return tasks.some((t, ti) => !checklistState[`${wi}-${ti}`]);
+  });
+  if(currentWeekIndex === -1) currentWeekIndex = weeks.length - 1;
+
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Launch Checklist</h4></div>
+    <div class="checklist-progress-header">
+      <span>Week ${(currentWeekIndex + 1)} of ${weeks.length} · ${doneTasks}/${totalTasks} tasks done</span>
+      <div class="checklist-progress-track"><div class="checklist-progress-fill" style="width:${totalTasks ? (doneTasks / totalTasks) * 100 : 0}%;"></div></div>
+    </div>
+    <div class="checklist-weeks">
+      ${weeks.map((w, wi) => `
+        <details class="checklist-week" ${wi === currentWeekIndex ? 'open' : ''}>
+          <summary>Week ${w.weekNumber} — ${escapeHtml(w.title)}</summary>
+          <div class="checklist-week-body">
+            ${(w.tasks || []).map((t, ti) => `
+              <label class="checklist-task">
+                <input type="checkbox" data-week="${wi}" data-task="${ti}" ${checklistState[`${wi}-${ti}`] ? 'checked' : ''} />
+                <span class="checklist-task-text">${escapeHtml(t.task)}</span>
+                <span class="checklist-task-criterion">${escapeHtml(t.passFailCriterion || '')}</span>
+              </label>
+            `).join('')}
+            ${w.metrics ? `
+              <div class="checklist-metrics">
+                <div class="lbl">Metrics to track</div>
+                ${w.metrics.map(m => `
+                  <div class="checklist-metric-row">
+                    <strong>${escapeHtml(m.metric)}</strong> — threshold: ${escapeHtml(m.threshold)}
+                    <p class="muted">${escapeHtml(m.decisionRule)}</p>
+                  </div>
+                `).join('')}
+                <a href="#pivotsCard" class="hint-link checklist-pivot-link">Didn't hit the threshold? Run the Pivot Generator →</a>
+              </div>
+            ` : ''}
+          </div>
+        </details>
+      `).join('')}
+    </div>
+    <div class="toolkit-card-actions">
+      <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-ghost" id="exportChecklistMdLink">Export to Markdown</a>
+    </div>
+  `;
+  el.classList.add('result-section-enter');
+
+  el.querySelectorAll('.checklist-task input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const key = `${cb.dataset.week}-${cb.dataset.task}`;
+      setChecklistTaskDone(key, cb.checked);
+      renderLaunchChecklist(launchChecklist); // re-render to update the progress bar/header
+    });
+  });
+}
+
+// ---------- 8. Export (Markdown + PDF) ----------
+function renderExportSection(){
+  const el = document.getElementById('exportCard');
+  if(!el) return;
+
+  el.innerHTML = `<div class="toolkit-card-head"><h4>Export This Idea</h4><p class="muted">A complete, properly formatted package — everything generated so far.</p></div>`;
+
+  if(confirmState.isPro){
+    el.innerHTML += `
+      <div class="toolkit-card-actions">
+        <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-secondary" download>Download Markdown</a>
+        <a href="export.html?session=${confirmState.sessionId}" target="_blank" class="btn btn-primary">Export as PDF</a>
+      </div>
+    `;
+    return;
+  }
+
+  el.innerHTML += `
+    <div class="pro-gate">
+      <button class="btn btn-secondary" type="button" disabled>Download Markdown</button>
+      <button class="btn btn-primary" type="button" disabled>Export as PDF</button>
+      <span class="pro-gate-badge">PRO</span>
+      <a href="index.html#pricing" class="pro-gate-link">Upgrade to unlock</a>
+    </div>
+  `;
 }
