@@ -984,3 +984,190 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
   max-width:80vw; text-align:center;
 }
 .app-toast.app-toast-visible{ opacity:1; transform:translate(-50%, 0); }
+
+/* ============================================================
+   MOBILE OVERHAUL — three parts:
+   1. Floating multi-select status bar (renderMultiSelectStatusBar in
+      script.js) — the discoverable UI for the long-press staging
+      gesture that replaces ctrl+click on touch devices.
+   2. A (hover:none)/(pointer:coarse) pass widening every tap target on
+      the canvas — option rows, footer buttons, zoom controls, header
+      controls — since the desktop sizing throughout this file was
+      tuned for a mouse cursor's precision, not a fingertip's.
+   3. A real responsive pass over the ideation/confirmation screens:
+      bigger comfortable type on small viewports, tighter but not
+      cramped spacing, a sticky progress header so position in the
+      flow is never scrolled out of view, and smoother state-change
+      animations so the whole thing feels considered rather than just
+      "the desktop layout, shrunk."
+   ============================================================ */
+
+/* ---------- 1. Multi-select status bar ---------- */
+.multi-select-status-bar{
+  position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+  z-index:900; max-width:min(560px, 92vw);
+  display:flex; align-items:center; gap:14px;
+  background:var(--ink); color:var(--bg);
+  border-radius:14px; padding:12px 16px 12px 18px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.28);
+  animation:multiSelectBarIn .18s ease both;
+}
+@keyframes multiSelectBarIn{
+  from{ opacity:0; transform:translateX(-50%) translateY(10px); }
+  to{ opacity:1; transform:translateX(-50%) translateY(0); }
+}
+.multi-select-status-text{
+  font-size:13px; line-height:1.4; flex:1;
+}
+.multi-select-cancel-btn{
+  flex-shrink:0; font-family:var(--font-mono); font-size:11px; font-weight:600;
+  text-transform:uppercase; letter-spacing:.04em;
+  background:rgba(250,246,241,0.14); color:var(--bg);
+  border:1px solid rgba(250,246,241,0.28); border-radius:8px;
+  padding:8px 12px; cursor:pointer;
+}
+.multi-select-cancel-btn:hover{ background:rgba(250,246,241,0.24); }
+/* Give the status bar room above the canvas's own zoom controls on
+   narrow screens instead of the two stacking on top of each other. */
+@media (max-width:640px){
+  .multi-select-status-bar{ bottom:18px; max-width:94vw; padding:11px 14px 11px 16px; gap:10px; }
+  .multi-select-status-text{ font-size:12.5px; }
+}
+
+/* ---------- 2. Bigger touch targets on coarse-pointer devices ----------
+   (hover:none) is the real signal for "this is a touch input" — better
+   than a viewport-width media query alone, since a touch laptop or a
+   tablet in landscape can be wide but still needs finger-sized targets,
+   while a narrow desktop browser window still has mouse precision. */
+@media (hover:none) and (pointer:coarse){
+  .canvas-option{
+    min-height:48px; padding:11px 14px; font-size:14px;
+  }
+  .canvas-option .opt-dot{
+    width:16px; height:16px; /* the drag-to-activate handle — was tuned for a mouse's pixel precision */
+  }
+  .canvas-group-footer{ padding:10px; gap:6px; }
+  .mini-btn{ padding:10px 0; font-size:11px; }
+  .remove-btn{ font-size:19px; padding:6px 8px; }
+  .version-nav button{ font-size:16px; padding:4px 6px; }
+  .zoom-btn{ width:42px; height:42px; font-size:18px; }
+  .canvas-controls{ bottom:28px; right:16px; gap:10px; }
+  .canvas-group-header{ min-height:46px; padding:10px 10px 8px 14px; }
+  .canvas-generate-ideas-body .btn{ padding:14px 20px; }
+  /* Cards get a touch more breathing room since fingers are less
+     precise than a cursor at judging where one card ends and the next
+     begins — a wider card reduces accidental mis-taps between them. */
+  .canvas-group{ width:230px; }
+  .fullscreen-btn, #fullscreenBtn{ width:42px; height:42px; font-size:18px; }
+}
+
+/* ---------- 3. Ideation & confirmation screen responsive pass ---------- */
+@media (max-width:640px){
+  .ideate-main{ padding:20px 0 80px; }
+  .wrap{ padding:0 16px; }
+
+  /* Sticky progress header — keeps "where am I in this flow" visible
+     even mid-scroll through a long confirmation result, instead of it
+     living only at the very top where a single swipe hides it. */
+  .ideate-meta{
+    position:sticky; top:0; z-index:40;
+    background:var(--bg); padding:14px 0 8px; margin-bottom:0;
+    border-bottom:1px solid var(--line);
+  }
+  .ideate-progress-track{ margin-bottom:0; }
+
+  .ideate-card, .confirm-result, .ideate-result{
+    padding:22px 18px; border-radius:14px;
+  }
+  .ideate-question{
+    font-size:19px; line-height:1.3; margin-bottom:20px;
+  }
+  .ideate-option{
+    padding:15px 16px; font-size:14.5px; border-radius:12px;
+    transition:border-color .15s ease, background .15s ease, transform .1s ease;
+  }
+  .ideate-option:active{ transform:scale(0.98); }
+  .ideate-options{ gap:9px; }
+
+  .idea-draft-context{ padding:16px 18px; border-radius:12px; }
+  .idea-draft-name{ font-size:17px; }
+  .idea-draft-fields{ gap:10px 14px; }
+
+  .confirm-result h2, .ideate-result h2{ font-size:21px; }
+  .confirm-section-title{ font-size:14.5px; margin:22px 0 12px; padding-top:16px; }
+
+  .competitor-block{ padding:14px 15px; }
+  .competitor-cols{ gap:12px; }
+  .solution-block{ padding:11px 14px; font-size:12.5px; }
+  .persona-card{ padding:14px 15px; }
+  .risk-card{ padding:12px 14px; }
+
+  .revise-form{ padding:14px; }
+  .revise-textarea{ min-height:110px; font-size:16px; } /* 16px prevents iOS Safari's auto-zoom-on-focus for inputs under 16px */
+  .mvp-item{ padding:12px 14px; }
+
+  .confirm-researching{ padding:32px 20px; }
+  .confirm-researching h3{ font-size:16px; }
+
+  .auth-card{ padding:28px 22px; }
+  .auth-form input{ font-size:16px; padding:13px 14px; } /* same iOS zoom-prevention reasoning as the textarea above */
+}
+
+/* Gentle entrance animation for freshly-rendered result sections —
+   applied via a class script.js can add to a freshly-populated
+   container, so a new section (deeper analysis, build brief, a
+   revision preview) reads as something that just arrived rather than
+   snapping into place with no transition at all. Respects
+   prefers-reduced-motion via the existing global rule pattern already
+   used elsewhere in this file. */
+@keyframes resultSectionIn{
+  from{ opacity:0; transform:translateY(8px); }
+  to{ opacity:1; transform:translateY(0); }
+}
+.result-section-enter{
+  animation:resultSectionIn .3s ease both;
+}
+@media (prefers-reduced-motion:reduce){
+  .result-section-enter{ animation:none; }
+}
+
+/* ---------- Step-based researching indicator (confirm.html Q4 flow) ----------
+   Replaces a single spinner + one line of swapped text with a real
+   checklist that fills in as each SSE progress event arrives, so the
+   30-40 second wait during final idea synthesis reads as visible
+   forward motion instead of an ambiguous "is this stuck?" spinner. */
+.research-steps-list{
+  display:flex; flex-direction:column; gap:10px;
+  max-width:380px; margin:22px auto 0; text-align:left;
+}
+.research-step{
+  display:flex; align-items:center; gap:12px;
+  font-size:13.5px; color:var(--ink-muted);
+  opacity:0.5; transition:opacity .25s ease, color .25s ease;
+}
+.research-step.active{ opacity:1; color:var(--ink); font-weight:600; }
+.research-step.done{ opacity:1; color:var(--ink-muted); }
+.research-step-marker{
+  flex-shrink:0; width:20px; height:20px; border-radius:50%;
+  border:2px solid var(--line); display:flex; align-items:center; justify-content:center;
+  font-size:11px; color:transparent; transition:all .2s ease;
+}
+.research-step.active .research-step-marker{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+.research-step.active .research-step-marker::after{
+  content:''; width:8px; height:8px; border-radius:50%; background:var(--accent);
+  animation:researchStepPulse 1s ease-in-out infinite;
+}
+@keyframes researchStepPulse{
+  0%, 100%{ opacity:0.4; transform:scale(0.8); }
+  50%{ opacity:1; transform:scale(1); }
+}
+.research-step.done .research-step-marker{
+  border-color:#5C8A5C; background:#5C8A5C; color:#FAF6F1;
+}
+.research-step.done .research-step-marker::before{ content:'✓'; }
+@media (prefers-reduced-motion:reduce){
+  .research-step-marker::after{ animation:none; }
+}
