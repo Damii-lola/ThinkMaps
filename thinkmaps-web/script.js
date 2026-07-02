@@ -4,6 +4,12 @@
 // All backend calls go through API_BASE_URL, pointed at the Render service.
 
 const API_BASE_URL = 'https://thinkmaps.onrender.com';
+// Real Pro upgrade path — the actual payment happens on Selar, and the
+// upgrade itself is applied by the SELAR_WEBHOOK_SECRET-gated webhook in
+// server.js once a payment completes, matched back to a ThinkMaps
+// account by email. This link is the only thing the frontend needs to
+// know about payment at all.
+const SELAR_PAYMENT_URL = 'https://selar.com/130n178z3r';
 
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
@@ -560,28 +566,27 @@ async function initPricingSection(){
 
   applyPricingProState(isPro, freeCard, grid, goProBtn);
 
-  goProBtn.addEventListener('click', async (e) => {
-    e.preventDefault(); // signed in — this always toggles in place, never navigates
-    const originalLabel = goProBtn.textContent;
-    goProBtn.textContent = isPro ? 'Updating…' : 'Upgrading…';
-    goProBtn.style.pointerEvents = 'none';
-
-    try {
-      const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
-      if(res && res.ok){
-        const body = await res.json();
-        isPro = !!body.pro_status;
-        applyPricingProState(isPro, freeCard, grid, goProBtn);
-      } else {
-        goProBtn.textContent = originalLabel;
-        showToast('Could not update your Pro status — try again.');
-      }
-    } catch (err) {
-      goProBtn.textContent = originalLabel;
-      showToast('Could not reach the server — try again.');
-    }
-    goProBtn.style.pointerEvents = '';
+  goProBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if(isPro) return; // button is disabled in this state, but guard anyway
+    openSelarCheckout(session);
   });
+}
+
+// Opens the real Selar payment page. The webhook that actually applies
+// the upgrade (see /webhooks/selar/:secret in server.js) matches the
+// payment back to a ThinkMaps account by EMAIL — so the one thing that
+// genuinely matters here is the person using the same email at Selar
+// checkout as their ThinkMaps account. Surfaced as a plain confirm
+// dialog rather than silently hoping they notice, since a mismatched
+// email means a real payment with no automatic upgrade to show for it.
+function openSelarCheckout(session){
+  const accountEmail = session?.user?.email;
+  const message = accountEmail
+    ? `Use this exact email at checkout so we can match your payment to your account: ${accountEmail}`
+    : 'Use the same email at checkout as your ThinkMaps account, so we can match your payment to it.';
+  alert(message);
+  window.open(SELAR_PAYMENT_URL, '_blank', 'noopener');
 }
 
 // Shared between initPricingSection above and the dashboard's "Go Pro"
@@ -590,7 +595,8 @@ async function initPricingSection(){
 function applyPricingProState(isPro, freeCard, grid, goProBtn){
   freeCard.style.display = isPro ? 'none' : '';
   grid.classList.toggle('pro-only', isPro);
-  goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
+  goProBtn.textContent = isPro ? "You're on Pro" : 'Go Pro';
+  goProBtn.disabled = isPro;
 }
 
 // ---------- DASHBOARD PAGE ----------
@@ -707,7 +713,7 @@ function showProPlanModal(){
           <li>Detailed Build Brief for your MVP</li>
           <li>Suggest Changes — revise with your own feedback</li>
         </ul>
-        <button type="button" class="btn btn-primary" id="modalGoProBtn">${isPro ? 'Cancel Pro (test)' : 'Go Pro'}</button>
+        <button type="button" class="btn btn-primary" id="modalGoProBtn" ${isPro ? 'disabled' : ''}>${isPro ? "You're on Pro" : 'Go Pro'}</button>
       </div>
       <button type="button" class="btn btn-ghost modal-close-btn" id="closeProPlanModalBtn">Close</button>
     </div>
@@ -720,29 +726,10 @@ function showProPlanModal(){
   document.getElementById('closeProPlanModalBtn').addEventListener('click', closeProPlanModal);
 
   const goProBtn = document.getElementById('modalGoProBtn');
-  if(goProBtn){
+  if(goProBtn && !isPro){
     goProBtn.addEventListener('click', async () => {
-      goProBtn.disabled = true;
-      goProBtn.textContent = isPro ? 'Updating…' : 'Upgrading…';
-      try {
-        const res = await authedFetch('/profile/go-pro', { method: 'POST', body: JSON.stringify({}) });
-        if(res && res.ok){
-          closeProPlanModal();
-          // Refresh whichever page actually has this modal open — dashboard.html
-          // and settings.html both surface plan status, and each has its own
-          // reload function since they render completely different markup.
-          if(document.getElementById('dashboardRoot')) await loadDashboard();
-          if(document.getElementById('settingsRoot')) await loadSettingsProfile();
-        } else {
-          goProBtn.disabled = false;
-          goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
-          showToast('Could not update Pro status — try again.');
-        }
-      } catch (err) {
-        goProBtn.disabled = false;
-        goProBtn.textContent = isPro ? 'Cancel Pro (test)' : 'Go Pro';
-        showToast('Could not reach the server — try again.');
-      }
+      const session = await getActiveSession();
+      openSelarCheckout(session);
     });
   }
 }
@@ -1470,6 +1457,9 @@ async function loadGraph(){
     canvasState.groupVersions = data.groupVersions;
     canvasState.options = data.options;
 
+    renderSnapshotsButton();
+    applyProCanvasTheme();
+
     // canvasState.lastActivatedOptionId only ever gets set by an actual
     // click within THIS session — on a fresh page load of an already-built
     // blueprint, nothing's been clicked yet here, so without this it would
@@ -1503,6 +1493,220 @@ async function loadGraph(){
     }
   }
 }
+
+// ---------- PRO FEATURE: Blueprint Snapshots ----------
+// Injected into the existing .canvas-controls cluster (same corner as
+// zoom/fullscreen) rather than needing any change to app.html's own
+// markup — same "no static HTML needed" pattern used throughout this
+// app for dynamically-rendered UI (toasts, modals, the feedback FAB).
+function renderSnapshotsButton(){
+  const controls = document.querySelector('.canvas-controls');
+  if(!controls || document.getElementById('snapshotsBtn')) return;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'snapshotsBtn';
+  btn.className = 'zoom-btn snapshots-btn';
+  btn.title = canvasState.isPro ? 'Snapshots' : 'Snapshots — Pro feature';
+  btn.innerHTML = '⧉';
+  if(canvasState.isPro) btn.classList.add('pro-glow-btn');
+  btn.addEventListener('click', () => {
+    if(!canvasState.isPro){
+      showToast('Snapshots are a Pro feature — save named checkpoints of your whole graph and restore them anytime.');
+      return;
+    }
+    openSnapshotsModal();
+  });
+  controls.appendChild(btn);
+}
+
+// Real premium visual treatment for Pro canvases — not just a badge
+// somewhere, an actual different FEEL to the workspace itself: a subtle
+// warm glow behind the canvas dot-grid and a gold-tinted ring around the
+// blueprint title. Toggled via a class on the viewport itself so it's a
+// pure CSS concern from here on, easy to extend later without touching
+// this function again.
+function applyProCanvasTheme(){
+  const viewport = document.getElementById('canvasViewport');
+  if(viewport) viewport.classList.toggle('pro-canvas', !!canvasState.isPro);
+  const titleEl = document.getElementById('blueprintTitle');
+  if(titleEl) titleEl.classList.toggle('pro-title', !!canvasState.isPro);
+}
+
+function closeSnapshotsModal(){
+  const overlay = document.getElementById('snapshotsModal');
+  if(overlay) overlay.remove();
+}
+
+async function openSnapshotsModal(){
+  closeSnapshotsModal();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'snapshotsModal';
+  overlay.innerHTML = `
+    <div class="modal-card snapshots-modal-card">
+      <span class="eyebrow">Pro</span>
+      <h3>Snapshots</h3>
+      <p class="muted">Save a named checkpoint of your whole graph, restore it anytime — nothing is ever lost when you restore, a safety copy of your current state is saved automatically first.</p>
+
+      <div class="snapshot-save-row">
+        <input type="text" id="newSnapshotNameInput" placeholder="e.g. Before trying the B2B angle" maxlength="80" />
+        <button class="btn btn-primary" id="saveSnapshotBtn" type="button">Save current state</button>
+      </div>
+      <p class="auth-error" id="snapshotsError"></p>
+
+      <div class="snapshots-list" id="snapshotsList">
+        <div class="confirm-spinner"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="closeSnapshotsModalBtn" type="button">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', (e) => { if(e.target === overlay) closeSnapshotsModal(); });
+  document.getElementById('closeSnapshotsModalBtn')?.addEventListener('click', closeSnapshotsModal);
+  document.getElementById('saveSnapshotBtn')?.addEventListener('click', saveCurrentSnapshot);
+
+  await loadSnapshotsList();
+}
+
+async function loadSnapshotsList(){
+  const listEl = document.getElementById('snapshotsList');
+  if(!listEl) return;
+
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/snapshots`);
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      listEl.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not load snapshots.')}</p>`;
+      return;
+    }
+    renderSnapshotsList(body.snapshots || []);
+  } catch (err) {
+    listEl.innerHTML = `<p class="confirm-error">Could not reach the server.</p>`;
+  }
+}
+
+function renderSnapshotsList(snapshots){
+  const listEl = document.getElementById('snapshotsList');
+  if(!listEl) return;
+
+  if(snapshots.length === 0){
+    listEl.innerHTML = `<p class="muted snapshots-empty">No snapshots yet — save your first checkpoint above.</p>`;
+    return;
+  }
+
+  listEl.innerHTML = snapshots.map(s => `
+    <div class="snapshot-row" data-snapshot-id="${s.id}">
+      <div class="snapshot-row-info">
+        <span class="snapshot-row-name">${escapeHtml(s.name)}</span>
+        <span class="snapshot-row-meta">${new Date(s.createdAt).toLocaleString()} · ${s.groupCount} group${s.groupCount === 1 ? '' : 's'}</span>
+      </div>
+      <div class="snapshot-row-actions">
+        <button class="btn btn-ghost snapshot-restore-btn" type="button" data-id="${s.id}">Restore</button>
+        <button class="btn btn-ghost snapshot-delete-btn" type="button" data-id="${s.id}" title="Delete snapshot">✕</button>
+      </div>
+    </div>
+  `).join('');
+
+  listEl.querySelectorAll('.snapshot-restore-btn').forEach(btn => {
+    btn.addEventListener('click', () => restoreSnapshot(btn.dataset.id, btn));
+  });
+  listEl.querySelectorAll('.snapshot-delete-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteSnapshot(btn.dataset.id));
+  });
+}
+
+async function saveCurrentSnapshot(){
+  const input = document.getElementById('newSnapshotNameInput');
+  const errorEl = document.getElementById('snapshotsError');
+  const saveBtn = document.getElementById('saveSnapshotBtn');
+  if(errorEl) errorEl.textContent = '';
+
+  const name = (input?.value || '').trim();
+  if(!name){
+    if(errorEl) errorEl.textContent = 'Name this snapshot before saving.';
+    return;
+  }
+
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/snapshots`, {
+      method: 'POST',
+      body: JSON.stringify({ name })
+    });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      if(errorEl) errorEl.textContent = body.error || 'Could not save this snapshot.';
+      return;
+    }
+    if(input) input.value = '';
+    showToast('Snapshot saved.');
+    await loadSnapshotsList();
+  } catch (err) {
+    if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+  } finally {
+    if(saveBtn){ saveBtn.disabled = false; saveBtn.textContent = 'Save current state'; }
+  }
+}
+
+async function restoreSnapshot(snapshotId, btn){
+  if(!confirm('Restore this snapshot? Your current state will be saved automatically first, so nothing is lost.')) return;
+
+  if(btn){ btn.disabled = true; btn.textContent = 'Restoring…'; }
+
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/snapshots/${snapshotId}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    if(!res) return;
+    const body = await res.json();
+    if(!res.ok){
+      showToast(body.error || 'Could not restore this snapshot.');
+      if(btn){ btn.disabled = false; btn.textContent = 'Restore'; }
+      return;
+    }
+
+    canvasState.groups = body.fullGraph.groups;
+    canvasState.groupVersions = body.fullGraph.groupVersions;
+    canvasState.options = body.fullGraph.options;
+    canvasState.lastActivatedOptionId = findDeepestLiveOptionId();
+    renderCanvas();
+    renderPathProgress();
+    centerCanvasOnRoot();
+    closeSnapshotsModal();
+    showToast('Snapshot restored — your previous state was saved automatically.');
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+    if(btn){ btn.disabled = false; btn.textContent = 'Restore'; }
+  }
+}
+
+async function deleteSnapshot(snapshotId){
+  if(!confirm('Delete this snapshot? This can\'t be undone.')) return;
+
+  try {
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/snapshots/${snapshotId}`, { method: 'DELETE' });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || 'Could not delete this snapshot.');
+      return;
+    }
+    await loadSnapshotsList();
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+  }
+}
+
 
 // Walks down from the root group, following only each group's CURRENTLY
 // ACTIVE version — this is what makes Retry's old versions invisible without
@@ -2000,10 +2204,18 @@ function renderGroups(visible, infoByGroupId){
       const stateClass = opt.is_selected ? 'selected' : ((isRootGroup || isCheckpointNode) ? 'root-clickable' : 'inert');
       const stagedClass = canvasState.multiSelectStagedIds.has(opt.id) ? ' multi-staged' : '';
       const secondaryClass = secondaryCombinedIds.has(opt.id) ? ' selected-secondary' : '';
+      // rationale only ever exists on options generated for Pro users
+      // (see the isPro branch in generateCandidateBatch on the backend) —
+      // free-tier options simply never carry this field, so this check
+      // alone is what keeps the "why this fits" hint Pro-exclusive without
+      // needing a separate canvasState.isPro check here too.
+      const rationaleAttr = opt.rationale ? ` title="${escapeHtml(opt.rationale)}"` : '';
+      const rationaleIcon = opt.rationale ? `<span class="opt-rationale-dot" title="${escapeHtml(opt.rationale)}">✦</span>` : '';
       return `
-        <div class="canvas-option ${stateClass}${secondaryClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}">
+        <div class="canvas-option ${stateClass}${secondaryClass}${stagedClass}" data-option-id="${opt.id}" data-option-index="${optionIndex}"${rationaleAttr}>
           <span class="opt-dot"></span>
           <span class="opt-label">${escapeHtml(opt.label)}</span>
+          ${rationaleIcon}
         </div>
       `;
     }).join('');
