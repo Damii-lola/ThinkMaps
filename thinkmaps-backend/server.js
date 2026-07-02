@@ -86,26 +86,133 @@ const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
 // Gmail API sends raw RFC 2822 messages, base64url-encoded — this
 // builds the minimal plain-text version of that by hand rather than
 // pulling in a full MIME-building library for a one-field email.
-function buildRawEmail({ from, to, subject, text, replyTo }){
-  const lines = [
+function buildRawEmail({ from, to, subject, text, html, replyTo }){
+  const headerLines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
   ];
   if(replyTo){
-    lines.push(`Reply-To: ${replyTo}`);
+    headerLines.push(`Reply-To: ${replyTo}`);
   }
-  lines.push(
-    'Content-Type: text/plain; charset=UTF-8',
-    '',
-    text
-  );
-  const message = lines.join('\r\n');
+
+  let message;
+
+  if(html){
+    // multipart/alternative: text/plain first as the fallback body for
+    // clients that don't render HTML, text/html second as the version
+    // every modern client (Gmail included) actually displays. A random
+    // boundary string just needs to be unlikely to appear inside either
+    // body — crypto.randomBytes gives that without needing anything fancier.
+    const boundary = `thinkmaps_${crypto.randomBytes(12).toString('hex')}`;
+    headerLines.push('MIME-Version: 1.0');
+    headerLines.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+
+    const parts = [
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      text || '',
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      '',
+      html,
+      '',
+      `--${boundary}--`
+    ];
+
+    message = headerLines.join('\r\n') + '\r\n\r\n' + parts.join('\r\n');
+  } else {
+    headerLines.push('Content-Type: text/plain; charset=UTF-8');
+    message = headerLines.join('\r\n') + '\r\n\r\n' + text;
+  }
+
   return Buffer.from(message)
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
+
+// Shared HTML email shell — a single centered card on a soft cream
+// background, matching ThinkMaps' actual site palette (--bg, --accent,
+// etc. from styles.css) rather than a generic email-template look. Table
+// -based layout with everything inlined is deliberate: Gmail, Outlook,
+// and most mobile mail clients strip <style> blocks or apply them
+// inconsistently, but they all respect inline style attributes on table
+// cells. No custom web font — Fraunces/Inter aren't safe to assume are
+// installed on whatever's reading this, so the heading falls back to a
+// generic serif (close to Fraunces' feel) and the body to a generic
+// sans-serif (close to Inter's).
+function emailShell({ preheader, bodyHtml }){
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ThinkMaps</title>
+</head>
+<body style="margin:0; padding:0; background-color:#F0EEE6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <!-- Preheader: hidden preview text shown in inbox lists, before the
+       email is opened — without this, clients fall back to grabbing
+       whatever text happens to be first in the body, which usually
+       looks messy. -->
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0;">${escapeHtmlServer(preheader || '')}</div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F0EEE6; padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px; width:100%; background-color:#FAF9F5; border:1px solid #DAD5C7; border-radius:16px; overflow:hidden;">
+
+          <!-- Wordmark header -->
+          <tr>
+            <td style="padding:28px 32px 0 32px;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="font-family:Georgia,'Times New Roman',serif; font-weight:bold; font-size:18px; color:#1F1B16; letter-spacing:-0.01em;">
+                    <span style="color:#D97757;">Think</span>Maps
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:20px 32px 32px 32px;">
+              ${bodyHtml}
+            </td>
+          </tr>
+
+        </table>
+
+        <table role="presentation" width="480" cellpadding="0" cellspacing="0" style="max-width:480px; width:100%;">
+          <tr>
+            <td style="padding:20px 12px 0 12px; text-align:center; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; font-size:12px; color:#6B6358; line-height:1.5;">
+              ThinkMaps — a Blueprint Graph for solo founders
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+// Minimal HTML-escaping for values interpolated into email templates —
+// separate from the frontend's escapeHtml (that one runs in the
+// browser and uses a real DOM element; this runs in Node, where no DOM
+// exists, so it needs its own small implementation covering the same
+// five characters that actually matter for breaking out of HTML.
+function escapeHtmlServer(str){
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // In-memory pending state — fine for a single Render instance.
@@ -141,26 +248,56 @@ function hashOtpCode(code){
   return crypto.createHash('sha256').update(code).digest('hex');
 }
 
-// Deliberately plain, boring, and short — no marketing-style formatting,
-// no links, no urgency language ("act now", "verify immediately"),
-// since those are exactly the patterns spam filters key on. Just the
-// code, in a sentence, from a real person's real inbox.
+// Deliberately plain, boring, and short in its PLAIN-TEXT fallback — no
+// marketing-style formatting, no links, no urgency language ("act now",
+// "verify immediately"), since those are exactly the patterns spam
+// filters key on. The HTML version gets real visual design (see
+// emailShell), but the underlying message stays just as simple: here's
+// the code, here's when it expires, nothing else.
 async function sendOtpEmail(email){
   if(!GMAIL_USER || !GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
     throw new Error('GMAIL_USER / GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_OAUTH_REFRESH_TOKEN are not all set in the environment.');
   }
 
   const { code, codeHash } = generateOtpCode();
+  // Spaced-out digits ("042 817" style, via letter-spacing rather than
+  // literal spaces) read far more legibly at a glance than a solid run
+  // of six digits — the same reasoning the OTP input field on auth.html
+  // already applies with its own letter-spacing.
+  const codeDigitsHtml = code
+    .split('')
+    .map(d => `<span style="display:inline-block; min-width:34px;">${d}</span>`)
+    .join('');
 
-  const raw = buildRawEmail({
-    from: `ThinkMaps <${GMAIL_USER}>`,
-    to: email,
-    subject: `${code} is your ThinkMaps code`,
-    text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`
+  const bodyHtml = `
+    <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">Your verification code</h1>
+    <p style="margin:0 0 24px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Enter this code to finish signing in to ThinkMaps. It expires in 10 minutes.</p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;">
+      <tr>
+        <td align="center" style="background-color:#F0EEE6; border:1px solid #DAD5C7; border-radius:12px; padding:20px 16px;">
+          <span style="font-family:'Courier New',Courier,monospace; font-size:32px; font-weight:bold; color:#D97757; letter-spacing:4px;">${codeDigitsHtml}</span>
+        </td>
+      </tr>
+    </table>
+
+    <p style="margin:0; font-size:13px; line-height:1.6; color:#AEA99D;">Didn't request this code? You can safely ignore this email — no account changes will be made without it.</p>
+  `;
+
+  const html = emailShell({
+    preheader: `${code} is your ThinkMaps verification code`,
+    bodyHtml
   });
 
   const startedAt = Date.now();
   try {
+    const raw = buildRawEmail({
+      from: `ThinkMaps <${GMAIL_USER}>`,
+      to: email,
+      subject: `${code} is your ThinkMaps code`,
+      text: `Your ThinkMaps verification code is ${code}. It expires in 10 minutes.`,
+      html
+    });
     await gmailApi.users.messages.send({
       userId: 'me',
       requestBody: { raw }
@@ -179,7 +316,7 @@ async function sendOtpEmail(email){
 // locked to the OTP code template. Anything else that needs to email out
 // (the feedback board below, and anything added later) goes through this
 // instead of duplicating the gmailApi.users.messages.send call again.
-async function sendPlainEmail({ to, subject, text, replyTo }){
+async function sendPlainEmail({ to, subject, text, html, replyTo }){
   if(!GMAIL_USER || !GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
     throw new Error('GMAIL_USER / GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_OAUTH_REFRESH_TOKEN are not all set in the environment.');
   }
@@ -189,6 +326,7 @@ async function sendPlainEmail({ to, subject, text, replyTo }){
     to,
     subject,
     text,
+    html,
     replyTo
   });
 
@@ -546,15 +684,148 @@ app.get('/profile', requireAuth, async (req, res) => {
   try {
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('pro_status')
+      .select('pro_status, username, email')
       .eq('id', req.user.id)
       .single();
 
     if(error) throw error;
 
-    res.status(200).json({ pro_status: !!profile?.pro_status });
+    res.status(200).json({
+      pro_status: !!profile?.pro_status,
+      username: profile?.username || req.user.user_metadata?.username || '',
+      email: profile?.email || req.user.email || ''
+    });
   } catch (err) {
     res.status(500).json({ error: 'Could not load profile.', detail: err.message });
+  }
+});
+
+// ---------- Settings page: change username ----------
+app.post('/profile/username', requireAuth, async (req, res) => {
+  try {
+    const { username } = req.body;
+    if(!username || typeof username !== 'string' || !username.trim()){
+      return res.status(400).json({ error: 'Username is required.' });
+    }
+    const trimmed = username.trim();
+    if(trimmed.length < 3 || trimmed.length > 30){
+      return res.status(400).json({ error: 'Username must be between 3 and 30 characters.' });
+    }
+    if(!/^[a-zA-Z0-9_]+$/.test(trimmed)){
+      return res.status(400).json({ error: 'Username can only contain letters, numbers, and underscores.' });
+    }
+
+    // Someone else already using it — checked before writing, not relying
+    // solely on a DB unique-constraint error, so the error message here
+    // can actually say "taken" instead of a generic database failure.
+    const { data: existing } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('username', trimmed)
+      .neq('id', req.user.id)
+      .maybeSingle();
+
+    if(existing){
+      return res.status(400).json({ error: 'That username is already taken.' });
+    }
+
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .update({ username: trimmed })
+      .eq('id', req.user.id);
+
+    if(profileError) throw profileError;
+
+    // Keep auth.users' own metadata copy in sync too — user_metadata.username
+    // is what /auth/login-start and the JWT itself carry around, and
+    // letting it silently drift from the profiles table row is exactly
+    // the kind of thing that causes a confusing bug three months from now.
+    await supabase.auth.admin.updateUserById(req.user.id, {
+      user_metadata: { ...req.user.user_metadata, username: trimmed }
+    });
+
+    res.status(200).json({ username: trimmed });
+  } catch (err) {
+    if(/duplicate|unique/i.test(err.message || '')){
+      return res.status(400).json({ error: 'That username is already taken.' });
+    }
+    res.status(500).json({ error: 'Could not update username.', detail: err.message });
+  }
+});
+
+// ---------- Settings page: change password ----------
+// Re-verifies the CURRENT password before allowing a change, even though
+// the request is already authenticated via a valid session token — a
+// valid session alone (e.g. a left-open browser tab) isn't the same
+// guarantee as the person actually knowing the current password, and
+// password changes are exactly the kind of action worth that extra check.
+app.post('/profile/password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if(!currentPassword || !newPassword){
+      return res.status(400).json({ error: 'Current and new password are both required.' });
+    }
+    if(newPassword.length < 8){
+      return res.status(400).json({ error: 'New password must be at least 8 characters.' });
+    }
+
+    const anonClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    const { error: verifyError } = await anonClient.auth.signInWithPassword({
+      email: req.user.email,
+      password: currentPassword
+    });
+
+    if(verifyError){
+      return res.status(401).json({ error: 'Current password is incorrect.' });
+    }
+
+    const { error: updateError } = await supabase.auth.admin.updateUserById(req.user.id, {
+      password: newPassword
+    });
+
+    if(updateError) throw updateError;
+
+    res.status(200).json({ updated: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not update password.', detail: err.message });
+  }
+});
+
+// ---------- Settings page: delete account ----------
+// Requires the person to type their own username as confirmation
+// (enforced here, not just in the UI) before anything gets deleted —
+// mirrors the "type DELETE to confirm" pattern most products use for a
+// genuinely irreversible action. Cleans up blueprints and the profiles
+// row explicitly rather than assuming ON DELETE CASCADE is set up
+// correctly on every foreign key — belt and suspenders for something
+// that can't be undone.
+app.delete('/profile', requireAuth, async (req, res) => {
+  try {
+    const { confirmUsername } = req.body;
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('username')
+      .eq('id', req.user.id)
+      .single();
+
+    if(!confirmUsername || confirmUsername !== profile?.username){
+      return res.status(400).json({ error: 'Type your username exactly to confirm account deletion.' });
+    }
+
+    // Blueprints first (and anything under them via their own cascade),
+    // then the profile row, then the actual auth user last — deleting
+    // the auth user first would orphan everything else with no way to
+    // clean it up afterward.
+    await supabase.from('blueprints').delete().eq('user_id', req.user.id);
+    await supabase.from('profiles').delete().eq('id', req.user.id);
+
+    const { error: deleteAuthError } = await supabase.auth.admin.deleteUser(req.user.id);
+    if(deleteAuthError) throw deleteAuthError;
+
+    res.status(200).json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not delete account.', detail: err.message });
   }
 });
 
@@ -630,6 +901,37 @@ app.post('/feedback', requireAuth, async (req, res) => {
 
     const senderEmail = req.user.email || 'unknown';
     const senderUsername = req.user.user_metadata?.username || 'unknown';
+    const sentAt = new Date();
+
+    const bodyHtml = `
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 4px 0;">
+        <tr><td style="font-size:11px; font-weight:bold; letter-spacing:0.06em; text-transform:uppercase; color:#D97757; font-family:'Courier New',Courier,monospace;">New dashboard feedback</td></tr>
+      </table>
+      <h1 style="margin:6px 0 20px 0; font-family:Georgia,'Times New Roman',serif; font-size:20px; font-weight:bold; color:#1F1B16;">${escapeHtmlServer(senderUsername)} sent a message</h1>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0; background-color:#F0EEE6; border-radius:10px;">
+        <tr>
+          <td style="padding:14px 16px; font-size:13px; line-height:1.9; color:#6B6358;">
+            <strong style="color:#1F1B16;">From:</strong> ${escapeHtmlServer(senderUsername)} — <a href="mailto:${escapeHtmlServer(senderEmail)}" style="color:#D97757; text-decoration:none;">${escapeHtmlServer(senderEmail)}</a><br />
+            <strong style="color:#1F1B16;">User ID:</strong> ${escapeHtmlServer(req.user.id)}<br />
+            <strong style="color:#1F1B16;">Sent:</strong> ${escapeHtmlServer(sentAt.toUTCString())}
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0; background-color:#FAF9F5; border:1px solid #DAD5C7; border-radius:10px;">
+        <tr>
+          <td style="padding:18px 18px; font-size:14.5px; line-height:1.7; color:#1F1B16; white-space:pre-wrap;">${escapeHtmlServer(trimmed)}</td>
+        </tr>
+      </table>
+
+      <a href="mailto:${escapeHtmlServer(senderEmail)}" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Reply to ${escapeHtmlServer(senderUsername)}</a>
+    `;
+
+    const html = emailShell({
+      preheader: `${senderUsername}: ${trimmed.slice(0, 100)}`,
+      bodyHtml
+    });
 
     await sendPlainEmail({
       to: FEEDBACK_RECIPIENT,
@@ -637,12 +939,13 @@ app.post('/feedback', requireAuth, async (req, res) => {
       text: [
         `From: ${senderUsername} (${senderEmail})`,
         `User ID: ${req.user.id}`,
-        `Sent: ${new Date().toISOString()}`,
+        `Sent: ${sentAt.toISOString()}`,
         '',
         '---',
         '',
         trimmed
       ].join('\n'),
+      html,
       replyTo: senderEmail
     });
 
