@@ -66,11 +66,19 @@ const GMAIL_OAUTH_REFRESH_TOKEN = process.env.GMAIL_OAUTH_REFRESH_TOKEN;
 //   4. Go to developers.google.com/oauthplayground -> gear icon (top
 //      right) -> check "Use your own OAuth credentials" -> paste the
 //      Client ID/Secret from step 3.
-//   5. In the left panel, find "Gmail API v1" -> select the
-//      https://www.googleapis.com/auth/gmail.send scope only ->
-//      Authorize APIs -> sign in with the SAME Gmail account this
-//      should send from -> Exchange authorization code for tokens.
-//   6. Copy the Refresh token shown there.
+//   5. In the left panel, find "Gmail API v1" -> select BOTH
+//      https://www.googleapis.com/auth/gmail.send AND
+//      https://www.googleapis.com/auth/gmail.readonly (the second one is
+//      required for checkForNewSelarPayments below, which reads this
+//      inbox for Selar sale notifications — send-only is no longer
+//      enough once this feature exists) -> Authorize APIs -> sign in
+//      with the SAME Gmail account this should send from AND that
+//      receives Selar's seller sale-notification emails -> Exchange
+//      authorization code for tokens.
+//   6. Copy the Refresh token shown there. If you already have a
+//      send-only refresh token from before this feature existed, you
+//      MUST redo this step with both scopes checked — the old token
+//      won't have read access no matter what.
 //   7. Set all three as Render env vars: GMAIL_OAUTH_CLIENT_ID,
 //      GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN
 //      (GMAIL_USER stays the same as before — the sending address).
@@ -82,6 +90,50 @@ const oauth2Client = new google.auth.OAuth2(
 oauth2Client.setCredentials({ refresh_token: GMAIL_OAUTH_REFRESH_TOKEN });
 
 const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
+
+// ============================================================
+// SECOND GMAIL IDENTITY — for READING, not sending.
+//
+// Gmail API access is scoped per-account: one refresh token only ever
+// grants access to whichever single inbox it was authorized against.
+// Selar's seller sale-notification emails land in a DIFFERENT inbox
+// than GMAIL_USER (the sending identity above) — so
+// checkForNewSelarPayments below needs its own, separate reader
+// credentials pointed at THAT inbox specifically, rather than trying to
+// make one identity do both jobs.
+//
+// Setup — same process as the sender identity's OAuth Playground steps
+// above, just done a SECOND time against the inbox that actually
+// receives Selar's notifications:
+//   1. developers.google.com/oauthplayground -> gear icon -> "Use your
+//      own OAuth credentials" -> paste the SAME Client ID/Secret as
+//      before (same Google Cloud project, reused — no need for a new one).
+//   2. Gmail API v1 -> select ONLY gmail.readonly this time (no send
+//      access needed for this identity at all).
+//   3. Authorize APIs -> sign in with the Gmail account that actually
+//      RECEIVES Selar's "you made a sale" notifications (not
+//      necessarily the same account GMAIL_USER sends from).
+//   4. Exchange authorization code for tokens -> copy the refresh token.
+//   5. Set as Render env vars: GMAIL_READER_USER (that inbox's address)
+//      and GMAIL_READER_OAUTH_REFRESH_TOKEN.
+// If these aren't set, checkForNewSelarPayments below falls back to
+// polling GMAIL_USER's own inbox instead (the original assumption),
+// so nothing breaks for anyone who genuinely does get notifications
+// in the same inbox as the sender identity.
+// ============================================================
+const GMAIL_READER_USER = process.env.GMAIL_READER_USER || GMAIL_USER;
+const GMAIL_READER_OAUTH_REFRESH_TOKEN = process.env.GMAIL_READER_OAUTH_REFRESH_TOKEN;
+
+const gmailReaderOAuthClient = new google.auth.OAuth2(
+  GMAIL_OAUTH_CLIENT_ID,
+  GMAIL_OAUTH_CLIENT_SECRET,
+  'https://developers.google.com/oauthplayground'
+);
+gmailReaderOAuthClient.setCredentials({
+  refresh_token: GMAIL_READER_OAUTH_REFRESH_TOKEN || GMAIL_OAUTH_REFRESH_TOKEN
+});
+
+const gmailReaderApi = google.gmail({ version: 'v1', auth: gmailReaderOAuthClient });
 
 // Gmail API sends raw RFC 2822 messages, base64url-encoded — this
 // builds the minimal plain-text version of that by hand rather than
@@ -1001,6 +1053,203 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
   } catch (err) {
     console.error('[ThinkMaps] Selar webhook: unexpected error:', err.message);
   }
+});
+
+// =====================================================================
+// SELAR PAYMENT DETECTION — INBOX POLLING (the PRIMARY upgrade path)
+//
+// Both Selar's own webhook UI and Zapier's free tier hit dead ends
+// (Selar's webhook field never appeared; Zapier paywalls the raw
+// Webhooks action). This routes around both entirely by having the
+// server read its OWN Gmail inbox directly — infrastructure already
+// fully owned and authorized, no third-party platform's tier limits to
+// fight. Requires the gmail.readonly scope added to the OAuth setup
+// above.
+//
+// IMPORTANT — this only works if Selar's SELLER sale-notification
+// emails (not the buyer's own receipt, a separate email sent to the
+// BUYER) land in the SAME inbox GMAIL_USER points to. If your Selar
+// seller account's contact/notification email isn't already
+// GMAIL_USER's address, either change it in Selar's account settings,
+// or set up a Gmail forwarding filter from wherever it currently goes
+// to this inbox.
+// =====================================================================
+
+// Every message ID this has ever looked at, successful match or not —
+// prevents re-processing the same email forever on every 5-minute poll.
+// A tiny table, but a real one (not in-memory), so this survives a
+// server restart without re-scanning old emails.
+async function isPaymentEmailProcessed(messageId){
+  const { data } = await supabase
+    .from('processed_payment_emails')
+    .select('message_id')
+    .eq('message_id', messageId)
+    .maybeSingle();
+  return !!data;
+}
+
+async function markPaymentEmailProcessed(messageId){
+  await supabase.from('processed_payment_emails').insert({ message_id: messageId }).select();
+}
+
+// Gmail's API returns message bodies as base64url — this walks the
+// (possibly multipart) payload structure to find and decode the
+// text/plain or text/html part, whichever is present, since Selar's
+// exact email structure isn't something I could verify in advance any
+// more than their webhook payload was.
+function extractGmailMessageText(payload){
+  if(!payload) return '';
+
+  if(payload.body?.data){
+    return Buffer.from(payload.body.data, 'base64').toString('utf8');
+  }
+
+  if(payload.parts){
+    for(const part of payload.parts){
+      const text = extractGmailMessageText(part);
+      if(text) return text;
+    }
+  }
+
+  return '';
+}
+
+// Same "try every plausible pattern, log what didn't match" defensive
+// approach as the webhook route above — this has even less certainty to
+// lean on, since it's parsing free-form email text rather than
+// structured JSON. Looks for an email address near common receipt
+// labels first (most specific, least likely to grab the wrong address
+// out of a multi-address email), then falls back to the first email
+// address found anywhere in the message body as a last resort.
+function extractBuyerEmailFromText(text){
+  if(!text) return null;
+
+  const labeledPatterns = [
+    /(?:buyer|customer|email)[\s:]*\n?\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i,
+  ];
+  for(const pattern of labeledPatterns){
+    const match = text.match(pattern);
+    if(match) return match[1];
+  }
+
+  const anyEmailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  return anyEmailMatch ? anyEmailMatch[0] : null;
+}
+
+async function checkForNewSelarPayments(){
+  if(!GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET){
+    return; // Gmail OAuth isn't configured at all — nothing to check
+  }
+
+  try {
+    // Broad search on purpose — "selar" anywhere in the sender or
+    // subject, last 2 days (generous overlap window, since
+    // isPaymentEmailProcessed already guarantees no email is ever
+    // double-processed regardless of how many times it's re-seen here).
+    const listRes = await gmailReaderApi.users.messages.list({
+      userId: 'me',
+      q: 'selar newer_than:2d',
+      maxResults: 20
+    });
+
+    const messages = listRes.data.messages || [];
+    if(messages.length === 0) return;
+
+    for(const msgRef of messages){
+      const alreadyProcessed = await isPaymentEmailProcessed(msgRef.id);
+      if(alreadyProcessed) continue;
+
+      const fullMessage = await gmailReaderApi.users.messages.get({
+        userId: 'me',
+        id: msgRef.id,
+        format: 'full'
+      });
+
+      const headers = fullMessage.data.payload?.headers || [];
+      const subject = headers.find(h => h.name === 'Subject')?.value || '';
+      const bodyText = extractGmailMessageText(fullMessage.data.payload) || fullMessage.data.snippet || '';
+
+      console.log(`[ThinkMaps] Selar inbox check: examining message "${subject}"`);
+
+      const buyerEmail = extractBuyerEmailFromText(bodyText);
+
+      if(!buyerEmail){
+        console.error(`[ThinkMaps] Selar inbox check: could not find any email address in message "${subject}" — skipping. Marking as processed either way to avoid re-checking it forever.`);
+        await markPaymentEmailProcessed(msgRef.id);
+        continue;
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('id, username, email, pro_status')
+        .ilike('email', buyerEmail.trim())
+        .maybeSingle();
+
+      if(!profile){
+        console.log(`[ThinkMaps] Selar inbox check: found email "${buyerEmail}" in message "${subject}" but no matching ThinkMaps account — likely someone else's Selar email in this inbox, or an unrelated message. Skipping.`);
+        await markPaymentEmailProcessed(msgRef.id);
+        continue;
+      }
+
+      if(profile.pro_status){
+        console.log(`[ThinkMaps] Selar inbox check: ${buyerEmail} is already Pro — nothing to do.`);
+        await markPaymentEmailProcessed(msgRef.id);
+        continue;
+      }
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ pro_status: true })
+        .eq('id', profile.id);
+
+      if(updateError){
+        console.error(`[ThinkMaps] Selar inbox check: found account for ${buyerEmail} but failed to update pro_status:`, updateError.message);
+        continue; // don't mark processed — worth retrying next poll
+      }
+
+      console.log(`[ThinkMaps] Selar inbox check: upgraded ${buyerEmail} to Pro from message "${subject}".`);
+      await markPaymentEmailProcessed(msgRef.id);
+
+      try {
+        const bodyHtml = `
+          <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
+          <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
+          <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
+        `;
+        await sendPlainEmail({
+          to: profile.email,
+          subject: "You're on ThinkMaps Pro",
+          text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
+          html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
+        });
+      } catch (emailErr) {
+        console.error('[ThinkMaps] Selar inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
+      }
+    }
+  } catch (err) {
+    console.error('[ThinkMaps] Selar inbox check: failed:', err.message);
+  }
+}
+
+// Runs automatically every 5 minutes. Also runs once at startup after a
+// short delay (30s — gives the server time to fully finish booting
+// first), so a payment made while the server was between deploys or a
+// free-tier cold-start gets caught quickly instead of waiting a full
+// 5 minutes.
+setTimeout(checkForNewSelarPayments, 30 * 1000);
+setInterval(checkForNewSelarPayments, 5 * 60 * 1000);
+
+// Manual trigger — same secret-in-URL pattern as the webhook route
+// above, since this is also unauthenticated (no ThinkMaps user session
+// makes sense for "check my email for payments"). Useful for testing
+// right after a real purchase instead of waiting up to 5 minutes for
+// the next automatic poll.
+app.post('/admin/check-selar-payments/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+  await checkForNewSelarPayments();
+  res.status(200).json({ checked: true });
 });
 
 // ---------- Feedback board — dashboard's corner button ----------
