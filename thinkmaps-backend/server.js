@@ -1100,9 +1100,18 @@ async function getOptionGroupLabelPair(optionId){
 
 // Generates up to 6 options for a SINGLE group (used for the root "Niches"
 // group, and for Retry — both deal with one group's own option list).
-// The same 9 blocks driving the 45-question ideation intake. The canvas's
-// candidate-group generation is now tied to this exact list — a group's
-// label is ASSIGNED by the backend, never invented freely by the model.
+// The original 9 blocks still drive the 45-question ideation intake
+// (IDEATION_SCAFFOLD, a separate system — see its own comment further
+// down) and still occupy the first 9 slots here unchanged, so nothing
+// about that older flow or BLOCKS_BEFORE_IDEA_CHECKPOINT's timing shifts.
+// Everything from index 9 onward is NEW: 15 additional themed blocks
+// that only the canvas's own generation path (activateOption ->
+// pickNextBlocks -> generateCandidateBatch) ever draws from, once a
+// path has gone past the original 9 and the idea-checkpoint fork. Same
+// rule as the original 9 applies to every new one — a group's label is
+// ASSIGNED by the backend from this list, never invented freely by the
+// model — this just gives a much deeper, more varied pool to draw from
+// before pickNextBlocks' wraparound logic ever has to repeat a theme.
 const IDEATION_BLOCK_NAMES = [
   'Personal Pull',
   'Personal Connection to the Audience',
@@ -1112,7 +1121,25 @@ const IDEATION_BLOCK_NAMES = [
   'Your Vision for the Experience',
   'Context, Distribution & Values',
   'Personal Stakes & Long-Term Vision',
-  'What You Actually Know About Yourself'
+  'What You Actually Know About Yourself',
+  // ---- New blocks below — each a distinct facet of ideation the
+  // original 9 don't directly cover, for paths that go deep enough to
+  // reach them. ----
+  'Your Relationship to Risk & Uncertainty', // how much ambiguity/failure risk they're personally comfortable building into
+  'How You Want This to Feel to Use', // the emotional texture of using the product — calm, playful, urgent, intimate, etc.
+  'Team, Collaborators & Who Else Is Involved', // solo build versus co-founders, hired help, community contributors
+  'Technical Feasibility & What You Would Need to Learn', // honest gap between what they know and what building this requires
+  'Growth, Distribution & How People Would Find This', // organic, paid, partnerships, word of mouth — their actual instinct here
+  'Business Model Philosophy & How Value Gets Captured', // philosophy-level (subscription vs one-time vs ads vs marketplace), not specific prices
+  'Onboarding & First Impressions', // what the very first 60 seconds of using this should feel like
+  'Data, Privacy & Trust Philosophy', // how they personally want to handle user data and earn trust
+  'Brand Personality & Tone', // the voice/personality this product would have if it were a person
+  'Habit Formation & Why People Would Return', // what makes this something people come back to, not a one-time use
+  'Accessibility & Who Gets Left Out', // who this unintentionally excludes and whether that's acceptable
+  'Seasonality, Timing & Why Now', // why this idea makes sense to build right now specifically
+  'Community & Belonging', // whether and how this creates a sense of community among users
+  'Worst-Case Scenarios & What Could Go Wrong', // pre-mortem thinking — what failure would actually look like
+  'Your Long-Term Relationship to This Idea' // whether they want to run this for years, flip it, or just prove it works
 ];
 
 // Once a niche's exploration has used all 6 of these — its pull toward
