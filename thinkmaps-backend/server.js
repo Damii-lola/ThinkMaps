@@ -633,12 +633,42 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 // ============================================================
 // MISTRAL — the node-generation engine for the Blueprint Graph.
 // ============================================================
+
+// Rotates across every Mistral key that's actually configured — picks
+// one at RANDOM per call, not round-robin, since random distribution
+// spreads load evenly across keys without needing any shared counter
+// state (which would need coordinating across concurrent requests on
+// the same instance anyway). Supports MISTRAL_API_KEY plus
+// MISTRAL_API_KEY_2 through MISTRAL_API_KEY_8 — set only the ones you
+// actually have; unset slots are just skipped, not treated as errors.
+// Every one of the four callMistral* functions below goes through this
+// single function, so adding or removing a key only ever needs to
+// happen in the environment variables, never in code.
+const MISTRAL_API_KEYS = [
+  process.env.MISTRAL_API_KEY,
+  process.env.MISTRAL_API_KEY_2,
+  process.env.MISTRAL_API_KEY_3,
+  process.env.MISTRAL_API_KEY_4,
+  process.env.MISTRAL_API_KEY_5,
+  process.env.MISTRAL_API_KEY_6,
+  process.env.MISTRAL_API_KEY_7,
+  process.env.MISTRAL_API_KEY_8
+].filter(Boolean);
+
+function getMistralApiKey(){
+  if(MISTRAL_API_KEYS.length === 0){
+    throw new Error('No Mistral API keys configured — set MISTRAL_API_KEY (and optionally MISTRAL_API_KEY_2..8).');
+  }
+  const index = Math.floor(Math.random() * MISTRAL_API_KEYS.length);
+  return MISTRAL_API_KEYS[index];
+}
+
 async function callMistral(messages, maxTokens = 350){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
       model: 'mistral-small-2503',
@@ -700,7 +730,7 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
       model: 'mistral-small-2503',
@@ -761,7 +791,7 @@ async function callMistralPlainText(messages){
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({ model: 'mistral-small-2503', messages, max_tokens: 700 })
   });
@@ -788,7 +818,7 @@ async function callMistralStreaming(messages, maxTokens = 350){
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`
+      'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
       model: 'mistral-small-2503',
