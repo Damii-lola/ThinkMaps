@@ -1812,13 +1812,17 @@ async function getNicheTopicsForGrounding(nicheOptionId){
 // options rather than crammed into one.
 const SHORT_OPTION_RULE = ' Keep every option SHORT — about 4 to 7 words, never a full sentence. If one underlying idea is naturally big or has multiple parts, split it into two or three separate short options instead of writing one long one.';
 
-async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null, existingLabels = [] } = {}){
+async function generateGroupOptions(pathContext, { isRetry = false, isRoot = false, blockName = null, existingLabels = [], pivotContext = null } = {}){
   const pathDescription = pathContext.length === 0
     ? 'This is the very start of the blueprint — no path chosen yet.'
     : pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
 
+  const pivotInstruction = pivotContext
+    ? ` IMPORTANT: this blueprint was started as a ${pivotContext.pivotType} PIVOT of an earlier idea — the earlier idea's direction was: "${pivotContext.direction}", targeting: "${pivotContext.audience}". Generate niches that genuinely explore THIS pivot's new direction — do not regenerate generic niches that ignore this context, and do not just repeat the original idea's ground. This should feel like a real fresh direction, grounded in the pivot's specific angle.`
+    : '';
+
   const instructions = isRoot
-    ? 'Generate the starting "Niches" group for a new app-idea Blueprint Graph: up to 6 high-quality, distinct app niches (e.g. Fitness, Finance & Commerce, Productivity, Entertainment).'
+    ? `Generate the starting "Niches" group for a new app-idea Blueprint Graph: up to 6 high-quality, distinct app niches (e.g. Fitness, Finance & Commerce, Productivity, Entertainment).${pivotInstruction}`
     : `The path below is a SPECIFIC, REAL sequence of choices this exact person has made — not a generic example. Based on THAT exact path, generate up to 6 specific, concrete options for the "${blockName}" block, each one reading as a personalized continuation of what they've already chosen — reference or clearly connect to those prior choices, don't write options that could apply to any random blueprint. Every option must fit squarely within that block's territory and must be something the person could answer from their own knowledge, instinct, or preference, never something requiring market research they don't have. While generating, privately consider how the choices in this path could combine into a genuinely useful, monetizable app idea — let that sense of direction inform your phrasing, even though you're not asked to state the idea itself yet.`;
 
   const retryNote = isRetry
@@ -2064,7 +2068,7 @@ async function getBlueprintIdForGroup(groupId){
 async function getOwnedBlueprint(blueprintId, userId){
   const { data: blueprint, error } = await supabase
     .from('blueprints')
-    .select('id, user_id, title, created_at')
+    .select('id, user_id, title, created_at, pivot_context')
     .eq('id', blueprintId)
     .single();
 
@@ -2571,7 +2575,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     if(groupsError) throw groupsError;
 
     if(groups.length === 0){
-      const generated = await generateGroupOptions([], { isRoot: true });
+      const generated = await generateGroupOptions([], { isRoot: true, pivotContext: blueprint.pivot_context || null });
 
       const { data: rootGroup, error: rootGroupError } = await supabase
         .from('groups')
@@ -6115,6 +6119,477 @@ Respond ONLY with valid JSON: {"fixes": [{"problem": string, "solution": string}
   ]);
 }
 
+// =====================================================================
+// FEATURE: PIVOT GENERATOR — "Show Me 3 Pivots"
+// =====================================================================
+// Always exactly 3 pivots, always in this order: Audience, Monetization,
+// Scope. One Mistral call generates all three together (not three
+// separate calls) specifically so each pivot can be genuinely aware of
+// the other two and stay meaningfully distinct from them, rather than
+// three independently-generated pivots that might accidentally overlap.
+async function generatePivots(idea, pathSummary, competitiveLandscape){
+  const systemPrompt = `You are the pivot-strategy engine for ThinkMaps. Given an already-hardened app idea, its full development path, and its competitive landscape, generate exactly 3 genuinely DIFFERENT pivots — not variations, real strategic alternatives. Generate them together, aware of each other, so they stay meaningfully distinct from one another.
+
+Always generate exactly these 3, in this exact order:
+1. AUDIENCE PIVOT — same core problem, same solution shape, a completely different target person than the original idea's audience.
+2. MONETIZATION PIVOT — same product, same audience, a genuinely different business model (e.g. subscription becomes marketplace, or becomes B2B licensing, or becomes usage-based) — not just a different price point.
+3. SCOPE PIVOT — same audience, same problem, but the solution is either radically NARROWER (do one thing, do it perfectly) or radically BROADER (the full platform play) than the original.
+
+For each pivot, provide: a one-line description of the pivot direction itself, a concrete renamed product concept (a new name and one-liner, not the original's), a specific reason this direction is defensible (grounded in the actual competitive landscape provided, not generic), and what the "10x unlock" is for this specific pivot compared to the original idea.
+
+Original idea: ${JSON.stringify(idea)}
+
+Competitive landscape already researched: ${JSON.stringify(competitiveLandscape || {})}
+
+Respond ONLY with valid JSON: {"pivots": [{"type": "audience"|"monetization"|"scope", "label": string, "direction": string, "renamedConcept": {"name": string, "oneLiner": string}, "whyDefensible": string, "tenXUnlock": string}, ...]} with exactly 3 entries in the order audience, monetization, scope.`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path that produced this idea: ${pathSummary}` }
+  ], 900);
+}
+
+// =====================================================================
+// FEATURE: LANDING PAGE COPY GENERATOR
+// =====================================================================
+// The system prompt's ban list (no "seamlessly", no "-ing" headlines, no
+// "solution"/"platform", no passive voice) is doing most of the actual
+// work here — it's specifically targeting the generic-AI-copy tells that
+// make output instantly recognizable as unedited AI slop. Grounding in
+// the REAL forum-chatter phrases already gathered in Phase 8 (not
+// AI-invented pain language) is the other half of what makes this land
+// as specific rather than templated.
+async function generateLandingPageCopy(idea, marketIntel){
+  const forumChatter = marketIntel?.forumChatter || [];
+
+  const systemPrompt = `You are a sharp, specific landing-page copywriter — not a corporate copywriter, not a "helpful assistant." Write real, opinionated, paste-ready landing page copy for the app idea below. This is for a solo founder who needs to put this on Carrd TONIGHT, not for a Series A pitch deck.
+
+STRICT bans, no exceptions: no corporate language, no passive voice, no "-ing" headlines (nothing starting with a gerund), never use the words "solution," "platform," or "seamlessly," no generic AI-copy phrasing.
+
+Generate exactly this structure:
+- heroHeadline: one punchy line, 8 words maximum, names the TRANSFORMATION not the feature.
+- subHeadline: 15-20 words — who it's for and what changes for them specifically.
+- featureBullets: exactly 3 bullets, each following "Problem → Solution → Outcome" in a SINGLE line each. Specific, not abstract.
+- ctaOptions: exactly 3 button text options — one cautious, one medium-commitment, one aggressive.
+- socialProofPlaceholder: one fill-in-the-blank sentence shaped for early traction (the founder fills in a real number/detail later).
+
+Use this REAL pain-point language from actual forum chatter about this exact problem — real phrases from real people are far better raw material than anything you'd invent: ${JSON.stringify(forumChatter)}
+
+Idea: ${JSON.stringify(idea)}
+
+Respond ONLY with valid JSON: {"heroHeadline": string, "subHeadline": string, "featureBullets": [string, string, string], "ctaOptions": {"cautious": string, "medium": string, "aggressive": string}, "socialProofPlaceholder": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Generate the landing page copy now.' }
+  ], 700);
+}
+
+// =====================================================================
+// FEATURE: IDEA STRENGTH SCORE
+// =====================================================================
+// The single most important line in this prompt is the explicit
+// instruction that LOW scores are valuable, not failures — Mistral's
+// default tendency toward encouraging, rounded-up scores is worth
+// fighting directly rather than hoping a neutral prompt avoids it.
+// personalFitNote is included specifically because Personal Fit can't
+// be scored well without a real Founder Profile (which doesn't exist
+// yet in this codebase) — rather than silently producing a low-quality
+// guess, the prompt is told to say so honestly in its own explanation.
+async function generateIdeaStrengthScore(idea, pathSummary, competitiveLandscape, marketIntel){
+  const systemPrompt = `You are a blunt, honest startup idea evaluator — NOT an encouraging assistant. Your single biggest failure mode is being too generous. A 4/10 with a sharp, specific explanation is far more useful to a founder than a cheerful 7/10 that glosses over real problems. Fight your own default tendency to round scores up.
+
+Score this idea across exactly these 4 dimensions, each 1-10 (integer):
+
+1. MARKET CLARITY — how well-defined is the problem and who has it? Is there real evidence people are actively seeking a solution (forum posts, competitor traction)? Ground this in the actual search/forum evidence provided below, not vibes.
+
+2. COMPETITIVE GAP — is there a real opening, or is this space genuinely saturated? Base this DIRECTLY on the competitive landscape provided below — if it shows 5 well-funded direct competitors, that's a low score, full stop.
+
+3. PERSONAL FIT — how well does this match what the founder revealed about themselves across their path (skills, time, budget, lived experience with the problem)? Note explicitly in your explanation that this dimension is necessarily limited without a full founder profile, and score conservatively when the path doesn't reveal much about the founder's actual capacity to build this.
+
+4. TECHNICAL FEASIBILITY — how buildable is the core mechanic given what the path reveals about the founder's technical background? An ambitious real-time AI feature is a LOW score for someone who indicated no-code tools only — say so plainly.
+
+For each dimension: an integer score, a 3-5 sentence honest explanation specific to THIS idea (never generic), and — only if the score is under 6 — one single most-important-thing-to-do-about-it.
+
+Idea: ${JSON.stringify(idea)}
+
+Competitive landscape: ${JSON.stringify(competitiveLandscape || {})}
+
+Market intel gathered: ${JSON.stringify(marketIntel || {})}
+
+Full path: ${pathSummary}
+
+Respond ONLY with valid JSON: {"marketClarity": {"score": number, "explanation": string, "topAction": string|null}, "competitiveGap": {"score": number, "explanation": string, "topAction": string|null}, "personalFit": {"score": number, "explanation": string, "topAction": string|null}, "technicalFeasibility": {"score": number, "explanation": string, "topAction": string|null}}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Score this idea now — be honest, not encouraging.' }
+  ], 900);
+}
+
+// =====================================================================
+// FEATURE: USER PERSONA CARDS
+// =====================================================================
+// The "what they've already tried, and why it failed" field and the
+// explicit ban on writing frustrations ABOUT this product (only about
+// the pre-existing problem) are the two things that separate a genuinely
+// useful persona from the generic "young professional, wants
+// convenience" output most AI persona generators produce.
+async function generateUserPersonas(idea, pathSummary, marketIntel, syntheticPanel){
+  const forumChatter = marketIntel?.forumChatter || [];
+  const panelPersonas = syntheticPanel?.personas || [];
+
+  const systemPrompt = `You are a persona-development specialist for ThinkMaps. Generate exactly 3 detailed, specific, named fictional people representing real segments of this idea's target audience — built from the actual audience and path details below, never generic demographics.
+
+For EACH persona, exactly this structure:
+- name, age, occupation: SPECIFIC, not "young professional" — something like "Amara, 31, ICU nurse, rotating 12-hour shifts."
+- dailyRoutine: a short paragraph about their actual day AS IT RELATES to the problem, using real specifics from the path context below.
+- topFrustrations: exactly 3 specific frustrations with their CURRENT SITUATION — critically, these must be frustrations with the problem/status quo that existed BEFORE any solution, never frustrations about an imagined product. This is the single most common mistake in AI-generated personas — do not make it.
+- alreadyTried: what they've already tried to solve this, and specifically why it failed them.
+- wouldPayIf: one specific sentence — not "a great product" but something concrete and mechanistic.
+- quote: one first-person line in their own voice.
+
+These personas should feel like deeper, more specific versions of the synthetic panel reactions already gathered below — not contradictions of them.
+
+Real forum chatter about this exact problem (use this specific language where it fits naturally): ${JSON.stringify(forumChatter)}
+
+Synthetic panel already gathered: ${JSON.stringify(panelPersonas)}
+
+Idea: ${JSON.stringify(idea)}
+
+Respond ONLY with valid JSON: {"personas": [{"name": string, "age": number, "occupation": string, "dailyRoutine": string, "topFrustrations": [string, string, string], "alreadyTried": string, "wouldPayIf": string, "quote": string}, ...]} with exactly 3 entries.`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Full path: ${pathSummary}` }
+  ], 1100);
+}
+
+// =====================================================================
+// FEATURE: "IDEA ALREADY EXISTS?" PRE-CHECK
+// =====================================================================
+// Deliberately cheap and fast (2 Serper calls max, capped tokens on the
+// synthesis) — this runs at a moment (right after the very first canvas
+// click) where the person is still deciding whether to keep exploring
+// a niche at all, so it needs to feel instant, not like another heavy
+// generation step. Explicitly framed in the prompt as "context, not
+// verdict" so the synthesis line doesn't read as a rejection.
+async function runIdeaPreCheck(nicheLabel, firstOptionText){
+  const [appResults, problemResults] = await Promise.all([
+    withTimeout(webSearchForSimilarProducts(`best ${nicheLabel} apps`), 3000),
+    withTimeout(webSearchForSimilarProducts(`${firstOptionText} app alternative`), 3000)
+  ]);
+
+  const hasResults = (appResults && appResults.length > 0) || (problemResults && problemResults.length > 0);
+
+  if(!hasResults){
+    return {
+      found: false,
+      products: [],
+      gapSentence: "We couldn't find obvious direct competitors — that could mean a wide open space or a very new idea. Either way, good to know."
+    };
+  }
+
+  const combinedResults = [...(appResults || []), ...(problemResults || [])].slice(0, 8);
+
+  const systemPrompt = `You are a fast pre-check assistant for ThinkMaps. Based on the search results below about the "${nicheLabel}" niche and the specific direction "${firstOptionText}", identify up to 3 REAL existing apps/products that are already doing something close to this. For each: name, a genuinely one-line description, and the URL from the search results (never invent a URL). Then write ONE synthesized sentence in the exact shape "These all solve X but none of them Y" — explicitly naming the gap if a real one is visible in the results, or being honest if the results suggest the space really is crowded with no obvious gap. This is CONTEXT for the founder, not a verdict — don't tell them to stop, just tell them what's already out there.
+
+Search results:
+${combinedResults.map(r => `- ${r.title}: ${r.description} (${r.url})`).join('\n')}
+
+Respond ONLY with valid JSON: {"products": [{"name": string, "description": string, "url": string}, ...] (up to 3), "gapSentence": string}`;
+
+  try {
+    const result = await callMistral([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Generate the pre-check now.' }
+    ], 400);
+    return { found: true, ...result };
+  } catch (err) {
+    // A failed synthesis shouldn't block the canvas — fall back to a
+    // neutral, still-genuinely-useful state rather than an error.
+    return {
+      found: combinedResults.length > 0,
+      products: combinedResults.slice(0, 3).map(r => ({ name: r.title, description: r.description, url: r.url })),
+      gapSentence: "Here's what's already out there in this space — worth a quick look before you dive in."
+    };
+  }
+}
+
+// =====================================================================
+// FEATURE: LAUNCH CHECKLIST
+// =====================================================================
+// Always exactly 4 weeks, always this shape — the structure itself
+// (Validate -> Build Smallest Version -> Get 10 Users -> Measure and
+// Decide) is fixed in the prompt rather than left to the model, so the
+// output is reliably the same scaffold every time, just filled in
+// specifically for this idea. The Week 4 -> Pivot Generator connection
+// is enforced by requiring metric thresholds phrased so the frontend
+// can literally surface "run the Pivot Generator" as a follow-up action.
+async function generateLaunchChecklist(idea, buildBrief, personas){
+  const personaNames = (personas?.personas || []).map(p => p.name).filter(Boolean);
+
+  const systemPrompt = `You are a launch-planning engine for ThinkMaps. Generate a week-by-week pre-launch checklist for the idea below — specific to THIS idea, THIS audience, and whatever the build brief reveals about the founder's stated skills/tools. Never generic startup advice.
+
+Always exactly 4 weeks, always this shape:
+
+WEEK 1 — Validate the Problem: 3-5 specific numbered tasks tailored to how this founder would realistically find their audience (based on the idea's audience description — Reddit communities? Gym visits? LinkedIn? Pick what's actually plausible). Each task has a concrete pass/fail criterion referencing the personas by name where relevant (e.g. "talk to 5 people who match ${personaNames[0] || 'the target persona'} — if fewer than 3 say this is their #1 frustration, stop and rethink").
+
+WEEK 2 — Build the Smallest Possible Version: specific to the tech stack/tools mentioned in the build brief, if any. Not "build an MVP" — name the SINGLE core mechanic from the build brief and say "build only that, using [their actual tools]. Nothing else."
+
+WEEK 3 — Get 10 Real Users: distribution tactics pulled specifically from where this idea's audience actually lives. Specific channels, specific messaging hooks.
+
+WEEK 4 — Measure and Decide: exactly 3 metrics specific to this idea type, each with a numeric threshold and an explicit decision rule in the shape "if [metric] hits [number] by day 28, double down. If not, it's worth running the Pivot Generator to explore other directions."
+
+Idea: ${JSON.stringify(idea)}
+
+Build brief: ${JSON.stringify(buildBrief || {})}
+
+Personas: ${JSON.stringify(personas?.personas || [])}
+
+Respond ONLY with valid JSON: {"weeks": [{"weekNumber": 1, "title": "Validate the Problem", "tasks": [{"task": string, "passFailCriterion": string}, ...]}, {"weekNumber": 2, "title": "Build the Smallest Possible Version", "tasks": [{"task": string, "passFailCriterion": string}, ...]}, {"weekNumber": 3, "title": "Get 10 Real Users", "tasks": [{"task": string, "passFailCriterion": string}, ...]}, {"weekNumber": 4, "title": "Measure and Decide", "tasks": [{"task": string, "passFailCriterion": string}, ...], "metrics": [{"metric": string, "threshold": string, "decisionRule": string}, ...]}]}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Generate the launch checklist now.' }
+  ], 1400);
+}
+
+// =====================================================================
+// FEATURE: RED TEAM MODE ("Challenge This Idea")
+// =====================================================================
+// The prompt explicitly bans hedging language ("however", "on the other
+// hand", "that said") because this mode's entire value is that it does
+// NOT balance the positive case the founder already saw — it attacks.
+// Framing Mistral as "a VC who has passed on ideas just like this
+// before" rather than "a helpful assistant trying to be balanced" is
+// what actually produces sharp criticism instead of diplomatic hedging.
+async function generateRedTeamChallenge(idea, pathSummary, buildBrief){
+  const systemPrompt = `You are a world-class venture capitalist who has passed on ideas just like this one before — not a helpful assistant, not trying to be balanced or encouraging. The founder has already seen the positive case for this idea. Your entire job here is to attack it, specifically and sharply, across exactly 5 angles. This is the counterweight to the optimism they've already gotten elsewhere in this tool.
+
+STRICT ban: never use "however," "on the other hand," "that said," or any other hedging/balancing language. Do not soften criticism. Do not end on a positive note.
+
+Exactly these 5 angles, in this exact order:
+1. MARKET RISK — is the market real, reachable, and willing to pay? What's the bear case, stated plainly?
+2. TECHNICAL TRAP — what's the hardest technical problem hiding inside this idea that the build brief glosses over or underestimates?
+3. DISTRIBUTION BLIND SPOT — how does the first 100 users actually happen? Is the assumed channel realistic, or wishful thinking?
+4. TIMING RISK — why hasn't this been built already, or why might this specifically be too early or too late?
+5. FOUNDER-IDEA FIT RISK — based on what this specific founder revealed about themselves in their path, what's the MOST LIKELY way THEY SPECIFICALLY fail at this — not a generic founder failure mode, something grounded in what their actual path revealed.
+
+For each angle: 2-3 sentences of genuinely sharp, specific criticism, and one pointed question the founder should be able to answer before proceeding.
+
+Idea: ${JSON.stringify(idea)}
+
+Build brief: ${JSON.stringify(buildBrief || {})}
+
+Full path (mine this for founder-specific details for angle 5): ${pathSummary}
+
+Respond ONLY with valid JSON: {"angles": [{"angle": "market_risk"|"technical_trap"|"distribution_blind_spot"|"timing_risk"|"founder_idea_fit_risk", "label": string, "critique": string, "pointedQuestion": string}, ...]} with exactly 5 entries in the order listed above.`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Attack this idea now. Do not go easy on it.' }
+  ], 1100);
+}
+
+// Follow-up exchange after a founder writes a rebuttal to one specific
+// Red Team angle — genuinely checks whether it's a real answer or a
+// dodge, rather than just accepting whatever's typed. One exchange only
+// (no back-and-forth loop), which is enough to force real engagement
+// without turning this into an open-ended argument with the model.
+async function evaluateRedTeamRebuttal(angleLabel, critique, rebuttal){
+  const systemPrompt = `You are the same sharp, unbalanced venture capitalist persona from the Red Team critique — not a helpful assistant. The founder has written a rebuttal to your critique below. Evaluate it in 2-3 sentences: is this a real, substantive answer, or is it dodging the actual concern? Be honest and direct either way — if it's a genuinely good answer, say so plainly and specifically why; if it's dodging, say exactly what it's avoiding. Never use "however" or "that said."
+
+Original critique (${angleLabel}): ${critique}
+
+Founder's rebuttal: ${rebuttal}
+
+Respond ONLY with valid JSON: {"verdict": "solid"|"partial"|"dodge", "response": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Evaluate the rebuttal now.' }
+  ], 300);
+}
+
+// =====================================================================
+// FEATURE: COMPETITOR DEEP DIVE ("Spy Mode")
+// =====================================================================
+// Capped at 3 competitors (more is noise, per spec) and up to 9 Serper
+// calls total (3 per competitor) — genuinely expensive in search quota,
+// which is exactly why the result gets cached on the session row and
+// this function is never called twice for the same session without an
+// explicit regenerate flag from the route layer.
+async function runCompetitorDeepDive(competitors){
+  const targets = (competitors || []).slice(0, 3);
+
+  const profiles = await Promise.all(targets.map(async (competitor) => {
+    const name = competitor.name;
+
+    const [complaintResults, alternativeResults, pricingResults] = await Promise.all([
+      withTimeout(webSearchForSimilarProducts(`"${name}" reviews complaints site:reddit.com`), 3000),
+      withTimeout(webSearchForSimilarProducts(`"${name}" alternatives OR "better than ${name}"`), 3000),
+      withTimeout(webSearchForSimilarProducts(`"${name}" pricing`), 3000)
+    ]);
+
+    const groundingBlock = [
+      complaintResults ? `Complaint/review search:\n${complaintResults.map(r => `- ${r.title}: ${r.description}`).join('\n')}` : 'Complaint/review search: no results found',
+      alternativeResults ? `Alternatives search:\n${alternativeResults.map(r => `- ${r.title}: ${r.description}`).join('\n')}` : 'Alternatives search: no results found',
+      pricingResults ? `Pricing search:\n${pricingResults.map(r => `- ${r.title}: ${r.description}`).join('\n')}` : 'Pricing search: no results found'
+    ].join('\n\n');
+
+    const systemPrompt = `You are a competitive intelligence analyst for ThinkMaps, profiling "${name}" based on the real search results below. Produce a full profile: what they're genuinely good at (from positive patterns in the results, not assumed), where users consistently complain (from the complaint/review search specifically), their apparent pricing (marked clearly as an estimate if the search wasn't conclusive — never presented as confirmed current fact), their positioning gap in one sentence ("They're going after X audience with Y angle — nobody is serving Z"), and the single most specific, concrete attack vector for beating them at the margin that matters (grounded in an ACTUAL complaint pattern found in the results, not a generic weakness).
+
+${groundingBlock}
+
+Respond ONLY with valid JSON: {"whatTheyreGoodAt": string, "whereUsersComplain": string, "apparentPricing": string, "positioningGap": string, "attackVector": string}`;
+
+    try {
+      const profile = await callMistral([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: 'Generate the profile now.' }
+      ], 500);
+      return { name, ...profile, lastConfirmed: new Date().toISOString() };
+    } catch (err) {
+      return {
+        name,
+        whatTheyreGoodAt: 'Not enough search data to determine this confidently.',
+        whereUsersComplain: 'Not enough search data to determine this confidently.',
+        apparentPricing: 'Unknown — insufficient search data.',
+        positioningGap: 'Not enough search data to determine this confidently.',
+        attackVector: 'Not enough search data to determine this confidently.',
+        lastConfirmed: new Date().toISOString()
+      };
+    }
+  }));
+
+  return { competitors: profiles };
+}
+
+// =====================================================================
+// FEATURE: MARKDOWN EXPORT
+// =====================================================================
+// Pure string assembly, no Mistral call — everything here was already
+// generated by other features; this just formats what's already on the
+// session row into one clean document. Sections that haven't been
+// generated yet (e.g. the founder never ran Spy Mode) are simply
+// omitted rather than left as empty headers.
+function buildMarkdownExport(session){
+  const idea = session.rewritten_idea || session.result;
+  const lines = [];
+
+  lines.push(`# ${idea.name || 'Untitled Idea'}`);
+  lines.push('');
+  lines.push(`*${idea.oneLiner || ''}*`);
+  lines.push('');
+  lines.push('## Core Problem');
+  lines.push(idea.coreProblem || '');
+  lines.push('');
+
+  if(session.personas?.personas?.length){
+    lines.push('## Target Audience');
+    session.personas.personas.forEach(p => {
+      lines.push(`- **${p.name}**, ${p.age}, ${p.occupation} — ${p.dailyRoutine}`);
+    });
+    lines.push('');
+  } else if(idea.targetAudience){
+    lines.push('## Target Audience');
+    lines.push(idea.targetAudience);
+    lines.push('');
+  }
+
+  if(idea.competitors?.length){
+    lines.push('## Competitive Landscape');
+    idea.competitors.forEach(c => {
+      lines.push(`### ${c.name}`);
+      if(c.pros?.length) lines.push(`**Works well:** ${c.pros.join('; ')}`);
+      if(c.cons?.length) lines.push(`**Falls short:** ${c.cons.join('; ')}`);
+      lines.push('');
+    });
+  }
+
+  if(idea.competitiveEdge){
+    lines.push('## How This Idea Wins');
+    lines.push(idea.competitiveEdge);
+    lines.push('');
+  }
+
+  if(session.build_brief){
+    lines.push('## Build Brief');
+    const bb = session.build_brief;
+    if(bb.overview) lines.push(bb.overview);
+    lines.push('');
+    if(bb.mvpScope?.length){
+      lines.push('**MVP scope:**');
+      bb.mvpScope.forEach((item, i) => lines.push(`${i + 1}. **${item.title}** — ${item.description}`));
+      lines.push('');
+    }
+    if(bb.suggestedTechStack){
+      const stack = bb.suggestedTechStack;
+      const stackLines = [
+        stack.frontend ? `Frontend: ${stack.frontend}` : null,
+        stack.backend ? `Backend: ${stack.backend}` : null,
+        stack.database ? `Database: ${stack.database}` : null,
+        stack.aiServices ? `AI services: ${stack.aiServices}` : null
+      ].filter(Boolean);
+      if(stackLines.length){
+        lines.push(`**Suggested stack:** ${stackLines.join(' · ')}`);
+        lines.push('');
+      }
+    }
+    if(bb.keyFlows?.length){
+      lines.push('**Key flows to build first:**');
+      bb.keyFlows.forEach(f => lines.push(`- ${f}`));
+      lines.push('');
+    }
+    if(bb.stolenFromSpyMode?.length){
+      lines.push('**Competitive edges (from Spy Mode):**');
+      bb.stolenFromSpyMode.forEach(s => lines.push(`- ${s.text} *(vs ${s.fromCompetitor})*`));
+      lines.push('');
+    }
+  }
+
+  if(session.strength_score){
+    lines.push('## Idea Strength Score');
+    const s = session.strength_score;
+    [
+      ['Market Clarity', s.marketClarity],
+      ['Competitive Gap', s.competitiveGap],
+      ['Personal Fit', s.personalFit],
+      ['Technical Feasibility', s.technicalFeasibility]
+    ].forEach(([label, dim]) => {
+      if(dim) lines.push(`**${label}: ${dim.score}/10** — ${dim.explanation}`);
+    });
+    lines.push('');
+  }
+
+  if(session.landing_copy){
+    lines.push('## Landing Page Copy');
+    const lc = session.landing_copy;
+    lines.push(`### ${lc.heroHeadline || ''}`);
+    lines.push(lc.subHeadline || '');
+    lines.push('');
+    (lc.featureBullets || []).forEach(b => lines.push(`- ${b}`));
+    lines.push('');
+    if(lc.ctaOptions) lines.push(`**Call to action:** ${lc.ctaOptions.medium || ''}`);
+    lines.push('');
+  }
+
+  if(session.launch_checklist?.weeks?.length){
+    lines.push('## Launch Checklist');
+    session.launch_checklist.weeks.forEach(w => {
+      lines.push(`### Week ${w.weekNumber} — ${w.title}`);
+      (w.tasks || []).forEach(t => lines.push(`- [ ] ${t.task} *(${t.passFailCriterion})*`));
+      lines.push('');
+    });
+  }
+
+  lines.push('---');
+  lines.push(`*Generated with ThinkMaps on ${new Date().toISOString().slice(0, 10)}*`);
+
+  return lines.join('\n');
+}
+
 // Turns a hardened (and possibly rewritten) idea into a structured spec
 // meant to be pasted straight into Claude Code or a similar AI coding
 // tool — MVP scope, a suggested tech stack, a rough data model, the key
@@ -6375,7 +6850,14 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
         deeperAnalysisFixes: existingSession.deeper_analysis_fixes || null,
         buildBrief: existingSession.build_brief || null,
         shareToken: existingSession.share_token || null,
-        pendingRevision: existingSession.pending_revision || null
+        pendingRevision: existingSession.pending_revision || null,
+        pivots: existingSession.pivots || null,
+        landingCopy: existingSession.landing_copy || null,
+        strengthScore: existingSession.strength_score || null,
+        personas: existingSession.personas || null,
+        launchChecklist: existingSession.launch_checklist || null,
+        redTeam: existingSession.red_team || null,
+        spyMode: existingSession.spy_mode || null
       });
     }
 
@@ -6794,6 +7276,534 @@ app.post('/confirm/:sessionId/share', requireAuth, async (req, res) => {
     res.status(200).json({ shareToken });
   } catch (err) {
     res.status(500).json({ error: 'Could not create a shareable link.', detail: err.message });
+  }
+});
+
+// =====================================================================
+// FEATURE ROUTES — Pivot Generator, Landing Copy, Strength Score,
+// Personas, Pre-Check, Launch Checklist, Red Team, Spy Mode, Export.
+// Every one of these follows the exact same shape as deeper-analysis/
+// build-brief above: look up the session, verify ownership via
+// getOwnedBlueprint, require the idea to actually be hardened first,
+// return a cached result if one already exists, otherwise generate and
+// cache. Pro-gated the same way build-brief and deeper-analysis are,
+// since every one of these is a substantial Mistral (and in some cases
+// Serper) cost per generation.
+// =====================================================================
+
+// ---------- Pivot Generator ----------
+app.post('/confirm/:sessionId/pivots', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before pivots can be generated.' });
+    }
+
+    if(session.pivots){
+      return res.status(200).json({ pivots: session.pivots });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const pivotsResult = await generatePivots(currentIdea, session.path_summary, session.result);
+    const pivots = pivotsResult.pivots || [];
+
+    await supabase.from('confirmation_sessions').update({ pivots }).eq('id', session.id);
+
+    res.status(200).json({ pivots });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not generate pivots.', detail: err.message });
+  }
+});
+
+// "Build This Instead" — creates a NEW blueprint carrying forward the
+// pivot's audience and problem statement, plus a pivot_context flag the
+// canvas's own generation reads (see the canvas prompt-building code)
+// so it knows not to just repeat the original idea's ground.
+app.post('/blueprints/:id/pivot-into', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { pivot } = req.body;
+    if(!pivot || !pivot.renamedConcept){
+      return res.status(400).json({ error: 'A pivot is required.' });
+    }
+
+    const sourceBlueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!sourceBlueprint) return res.status(403).json({ error: 'Not your blueprint.' });
+
+    const { data: newBlueprint, error } = await supabase
+      .from('blueprints')
+      .insert({
+        user_id: req.user.id,
+        title: pivot.renamedConcept.name || `${sourceBlueprint.title} (pivot)`,
+        pivot_context: {
+          fromBlueprintId: sourceBlueprint.id,
+          pivotType: pivot.type,
+          direction: pivot.direction,
+          audience: pivot.renamedConcept.oneLiner
+        }
+      })
+      .select()
+      .single();
+
+    if(error) throw error;
+
+    res.status(201).json({ blueprint: newBlueprint });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not start a new blueprint from this pivot.', detail: err.message });
+  }
+});
+
+// ---------- Landing Page Copy Generator ----------
+app.post('/confirm/:sessionId/landing-copy', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before landing copy can be generated.' });
+    }
+
+    if(session.landing_copy){
+      return res.status(200).json({ landingCopy: session.landing_copy });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    // deeper_analysis.marketIntel holds the forum chatter this copy
+    // gets grounded in — genuinely better raw material than anything
+    // Mistral would invent, but only available once Market Intel has
+    // actually been run. Falls back gracefully to idea-only grounding.
+    const marketIntel = session.deeper_analysis?.marketIntel || null;
+    const landingCopy = await generateLandingPageCopy(currentIdea, marketIntel);
+
+    await supabase.from('confirmation_sessions').update({ landing_copy: landingCopy }).eq('id', session.id);
+
+    res.status(200).json({ landingCopy });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not generate landing page copy.', detail: err.message });
+  }
+});
+
+// ---------- Idea Strength Score ----------
+app.post('/confirm/:sessionId/strength-score', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be scored.' });
+    }
+
+    if(session.strength_score){
+      return res.status(200).json({ strengthScore: session.strength_score });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const marketIntel = session.deeper_analysis?.marketIntel || null;
+    const strengthScore = await generateIdeaStrengthScore(currentIdea, session.path_summary, session.result, marketIntel);
+
+    await supabase.from('confirmation_sessions').update({ strength_score: strengthScore }).eq('id', session.id);
+
+    res.status(200).json({ strengthScore });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not score this idea.', detail: err.message });
+  }
+});
+
+// ---------- User Persona Cards ----------
+app.post('/confirm/:sessionId/personas', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before personas can be generated.' });
+    }
+
+    if(session.personas){
+      return res.status(200).json({ personas: session.personas });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const marketIntel = session.deeper_analysis?.marketIntel || null;
+    const syntheticPanel = session.deeper_analysis?.syntheticPanel || null;
+    const personas = await generateUserPersonas(currentIdea, session.path_summary, marketIntel, syntheticPanel);
+
+    await supabase.from('confirmation_sessions').update({ personas }).eq('id', session.id);
+
+    res.status(200).json({ personas });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not generate personas.', detail: err.message });
+  }
+});
+
+// ---------- "Idea Already Exists?" Pre-Check ----------
+// Keyed to the BLUEPRINT (not a confirmation session — this runs long
+// before one exists, right after the first canvas click), cached on
+// blueprints.precheck_result so it only ever runs once per blueprint.
+app.post('/blueprints/:id/precheck', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { nicheLabel, firstOptionText } = req.body;
+    if(!nicheLabel || !firstOptionText){
+      return res.status(400).json({ error: 'nicheLabel and firstOptionText are required.' });
+    }
+
+    const { data: blueprint, error: fetchError } = await supabase
+      .from('blueprints')
+      .select('id, user_id, precheck_result')
+      .eq('id', req.params.id)
+      .single();
+
+    if(fetchError || !blueprint || blueprint.user_id !== req.user.id){
+      return res.status(403).json({ error: 'Not your blueprint.' });
+    }
+
+    if(blueprint.precheck_result){
+      return res.status(200).json({ precheck: blueprint.precheck_result });
+    }
+
+    const precheck = await runIdeaPreCheck(nicheLabel, firstOptionText);
+
+    await supabase.from('blueprints').update({ precheck_result: precheck }).eq('id', blueprint.id);
+
+    res.status(200).json({ precheck });
+  } catch (err) {
+    // Pre-check failing outright should never block canvas exploration —
+    // hand back a neutral result instead of a 500 the frontend would
+    // have to specially handle.
+    res.status(200).json({
+      precheck: {
+        found: false,
+        products: [],
+        gapSentence: "We couldn't check this right now — that's fine, keep exploring."
+      }
+    });
+  }
+});
+
+// ---------- Launch Checklist ----------
+app.post('/confirm/:sessionId/launch-checklist', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.build_brief){
+      return res.status(400).json({ error: 'Generate the Build Brief first — the launch checklist is built from it.' });
+    }
+
+    if(session.launch_checklist){
+      return res.status(200).json({ launchChecklist: session.launch_checklist });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const launchChecklist = await generateLaunchChecklist(currentIdea, session.build_brief, session.personas);
+
+    await supabase.from('confirmation_sessions').update({ launch_checklist: launchChecklist }).eq('id', session.id);
+
+    res.status(200).json({ launchChecklist });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not generate the launch checklist.', detail: err.message });
+  }
+});
+
+// ---------- Red Team Mode ("Challenge This Idea") ----------
+app.post('/confirm/:sessionId/red-team', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be challenged.' });
+    }
+
+    if(session.red_team){
+      return res.status(200).json({ redTeam: session.red_team });
+    }
+
+    const currentIdea = session.rewritten_idea || session.result;
+    const redTeamResult = await generateRedTeamChallenge(currentIdea, session.path_summary, session.build_brief);
+    const redTeam = { angles: redTeamResult.angles || [], rebuttals: {} };
+
+    await supabase.from('confirmation_sessions').update({ red_team: redTeam }).eq('id', session.id);
+
+    res.status(200).json({ redTeam });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not challenge this idea.', detail: err.message });
+  }
+});
+
+// One rebuttal exchange per angle — evaluates whether the founder's
+// written response is a real answer or a dodge, then stores the
+// exchange on the session's red_team.rebuttals map keyed by angle, so
+// it persists across reloads instead of vanishing the moment the page
+// refreshes.
+app.post('/confirm/:sessionId/red-team/respond', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { angle, rebuttal } = req.body;
+    if(!angle || !rebuttal || !rebuttal.trim()){
+      return res.status(400).json({ error: 'An angle and a rebuttal are both required.' });
+    }
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.red_team){
+      return res.status(400).json({ error: 'Run the Red Team challenge first.' });
+    }
+
+    const angleData = session.red_team.angles.find(a => a.angle === angle);
+    if(!angleData){
+      return res.status(400).json({ error: 'Unknown angle.' });
+    }
+
+    const evaluation = await evaluateRedTeamRebuttal(angleData.label, angleData.critique, rebuttal.trim());
+
+    const updatedRedTeam = {
+      ...session.red_team,
+      rebuttals: {
+        ...(session.red_team.rebuttals || {}),
+        [angle]: { rebuttal: rebuttal.trim(), ...evaluation }
+      }
+    };
+
+    await supabase.from('confirmation_sessions').update({ red_team: updatedRedTeam }).eq('id', session.id);
+
+    res.status(200).json({ redTeam: updatedRedTeam });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not evaluate your rebuttal.', detail: err.message });
+  }
+});
+
+// ---------- Competitor Deep Dive ("Spy Mode") ----------
+app.post('/confirm/:sessionId/spy-mode', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    const currentIdea = session.rewritten_idea || session.result;
+    if(!currentIdea?.competitors?.length){
+      return res.status(400).json({ error: 'No competitors were found for this idea to profile.' });
+    }
+
+    if(session.spy_mode){
+      return res.status(200).json({ spyMode: session.spy_mode });
+    }
+
+    const spyMode = await runCompetitorDeepDive(currentIdea.competitors);
+
+    await supabase.from('confirmation_sessions').update({ spy_mode: spyMode }).eq('id', session.id);
+
+    res.status(200).json({ spyMode });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not run the competitor deep dive.', detail: err.message });
+  }
+});
+
+// "Steal This" — appends a Spy Mode attack vector onto the build brief's
+// competitive positioning, tagged so the founder remembers where it came
+// from. Requires a build brief to already exist (nothing to append to
+// otherwise) and re-saves the whole build_brief object with the addition.
+app.post('/confirm/:sessionId/spy-mode/steal', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { competitorName, attackVector } = req.body;
+    if(!competitorName || !attackVector){
+      return res.status(400).json({ error: 'competitorName and attackVector are required.' });
+    }
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.build_brief){
+      return res.status(400).json({ error: "Generate the Build Brief first — there's nothing to append this to yet." });
+    }
+
+    const stolenEntry = {
+      text: `Competitive edge: ${attackVector}`,
+      fromCompetitor: competitorName,
+      source: 'spy_mode',
+      addedAt: new Date().toISOString()
+    };
+
+    const existingStolen = session.build_brief.stolenFromSpyMode || [];
+    const updatedBuildBrief = {
+      ...session.build_brief,
+      stolenFromSpyMode: [...existingStolen, stolenEntry]
+    };
+
+    await supabase.from('confirmation_sessions').update({ build_brief: updatedBuildBrief }).eq('id', session.id);
+
+    res.status(200).json({ buildBrief: updatedBuildBrief });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not add this to the build brief.', detail: err.message });
+  }
+});
+
+// ---------- Export: Markdown ----------
+// Real server-generated .md file — pure string assembly from whatever
+// is already on the session row, no Mistral call. See buildMarkdownExport.
+app.get('/confirm/:sessionId/export/markdown', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be exported.' });
+    }
+
+    const markdown = buildMarkdownExport(session);
+    const idea = session.rewritten_idea || session.result;
+    const filename = `${(idea.name || 'thinkmaps-idea').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.md`;
+
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(markdown);
+  } catch (err) {
+    res.status(500).json({ error: 'Could not export this idea.', detail: err.message });
+  }
+});
+
+// ---------- Export: data for the print-to-PDF page ----------
+// PDF export is deliberately NOT server-rendered — Puppeteer needs a
+// bundled headless Chromium (~300MB+) and system dependencies Render's
+// free tier isn't provisioned for, and would put the whole service at
+// risk for a single feature. Instead this hands back the same assembled
+// data as a JSON payload, and export.html (a dedicated, print-styled
+// page) renders it and calls window.print() — same "real file via the
+// browser's own Save as PDF" pattern share.html already uses.
+app.get('/confirm/:sessionId/export/data', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { data: session } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
+
+    if(!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
+    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+
+    if(!session.result){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before it can be exported.' });
+    }
+
+    res.status(200).json({
+      idea: session.rewritten_idea || session.result,
+      buildBrief: session.build_brief || null,
+      strengthScore: session.strength_score || null,
+      landingCopy: session.landing_copy || null,
+      launchChecklist: session.launch_checklist || null,
+      personas: session.personas || null,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load export data.', detail: err.message });
   }
 });
 
