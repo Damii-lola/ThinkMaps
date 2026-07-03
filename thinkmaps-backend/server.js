@@ -91,50 +91,6 @@ oauth2Client.setCredentials({ refresh_token: GMAIL_OAUTH_REFRESH_TOKEN });
 
 const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
 
-// ============================================================
-// SECOND GMAIL IDENTITY — for READING, not sending.
-//
-// Gmail API access is scoped per-account: one refresh token only ever
-// grants access to whichever single inbox it was authorized against.
-// Selar's seller sale-notification emails land in a DIFFERENT inbox
-// than GMAIL_USER (the sending identity above) — so
-// checkForNewSelarPayments below needs its own, separate reader
-// credentials pointed at THAT inbox specifically, rather than trying to
-// make one identity do both jobs.
-//
-// Setup — same process as the sender identity's OAuth Playground steps
-// above, just done a SECOND time against the inbox that actually
-// receives Selar's notifications:
-//   1. developers.google.com/oauthplayground -> gear icon -> "Use your
-//      own OAuth credentials" -> paste the SAME Client ID/Secret as
-//      before (same Google Cloud project, reused — no need for a new one).
-//   2. Gmail API v1 -> select ONLY gmail.readonly this time (no send
-//      access needed for this identity at all).
-//   3. Authorize APIs -> sign in with the Gmail account that actually
-//      RECEIVES Selar's "you made a sale" notifications (not
-//      necessarily the same account GMAIL_USER sends from).
-//   4. Exchange authorization code for tokens -> copy the refresh token.
-//   5. Set as Render env vars: GMAIL_READER_USER (that inbox's address)
-//      and GMAIL_READER_OAUTH_REFRESH_TOKEN.
-// If these aren't set, checkForNewSelarPayments below falls back to
-// polling GMAIL_USER's own inbox instead (the original assumption),
-// so nothing breaks for anyone who genuinely does get notifications
-// in the same inbox as the sender identity.
-// ============================================================
-const GMAIL_READER_USER = process.env.GMAIL_READER_USER || GMAIL_USER;
-const GMAIL_READER_OAUTH_REFRESH_TOKEN = process.env.GMAIL_READER_OAUTH_REFRESH_TOKEN;
-
-const gmailReaderOAuthClient = new google.auth.OAuth2(
-  GMAIL_OAUTH_CLIENT_ID,
-  GMAIL_OAUTH_CLIENT_SECRET,
-  'https://developers.google.com/oauthplayground'
-);
-gmailReaderOAuthClient.setCredentials({
-  refresh_token: GMAIL_READER_OAUTH_REFRESH_TOKEN || GMAIL_OAUTH_REFRESH_TOKEN
-});
-
-const gmailReaderApi = google.gmail({ version: 'v1', auth: gmailReaderOAuthClient });
-
 // Gmail API sends raw RFC 2822 messages, base64url-encoded — this
 // builds the minimal plain-text version of that by hand rather than
 // pulling in a full MIME-building library for a one-field email.
@@ -1137,8 +1093,8 @@ function extractBuyerEmailFromText(text){
 }
 
 async function checkForNewSelarPayments(){
-  if(!GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET){
-    return; // Gmail OAuth isn't configured at all — nothing to check
+  if(!GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
+    return; // Gmail isn't configured at all — nothing to check
   }
 
   try {
@@ -1146,7 +1102,7 @@ async function checkForNewSelarPayments(){
     // subject, last 2 days (generous overlap window, since
     // isPaymentEmailProcessed already guarantees no email is ever
     // double-processed regardless of how many times it's re-seen here).
-    const listRes = await gmailReaderApi.users.messages.list({
+    const listRes = await gmailApi.users.messages.list({
       userId: 'me',
       q: 'selar newer_than:2d',
       maxResults: 20
@@ -1159,7 +1115,7 @@ async function checkForNewSelarPayments(){
       const alreadyProcessed = await isPaymentEmailProcessed(msgRef.id);
       if(alreadyProcessed) continue;
 
-      const fullMessage = await gmailReaderApi.users.messages.get({
+      const fullMessage = await gmailApi.users.messages.get({
         userId: 'me',
         id: msgRef.id,
         format: 'full'
@@ -1442,7 +1398,11 @@ const MISTRAL_API_KEYS = [
   process.env.MISTRAL_API_KEY_5,
   process.env.MISTRAL_API_KEY_6,
   process.env.MISTRAL_API_KEY_7,
-  process.env.MISTRAL_API_KEY_8
+  process.env.MISTRAL_API_KEY_8,
+  process.env.MISTRAL_API_KEY_9,
+  process.env.MISTRAL_API_KEY_10,
+  process.env.MISTRAL_API_KEY_11,
+  process.env.MISTRAL_API_KEY_12
 ].filter(Boolean);
 
 function getMistralApiKey(){
