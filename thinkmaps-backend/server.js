@@ -399,7 +399,14 @@ function decryptPayload(packed){
 }
 
 async function setPendingAuth(email, type, payload, codeHash){
-  const encrypted_payload = encryptPayload(payload);
+  let encrypted_payload;
+  try {
+    encrypted_payload = encryptPayload(payload);
+  } catch (err) {
+    console.error('[ThinkMaps] AUTH FAILURE: could not encrypt pending auth state. This almost always means ENCRYPTION_KEY is missing or malformed in Render\'s environment variables. Original error:', err.message);
+    throw err;
+  }
+
   const expires_at = new Date(Date.now() + OTP_PENDING_TTL_MS).toISOString();
 
   // Upsert on (email, type) — resending a code overwrites whatever was
@@ -409,7 +416,10 @@ async function setPendingAuth(email, type, payload, codeHash){
     .from('pending_auth')
     .upsert({ email, type, encrypted_payload, code_hash: codeHash, attempts: 0, expires_at }, { onConflict: 'email,type' });
 
-  if(error) throw error;
+  if(error){
+    console.error('[ThinkMaps] AUTH FAILURE: could not write to the pending_auth table. This almost always means the security_and_otp_migration.sql migration was never run against this Supabase project (the table or its (email,type) primary key doesn\'t exist yet). Original error:', error.message);
+    throw error;
+  }
 }
 
 async function getPendingAuth(email, type){
