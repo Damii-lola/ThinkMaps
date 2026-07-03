@@ -96,9 +96,18 @@
         </div>
 
         <form id="passwordForm" class="settings-inline-form" style="display:none;">
-          <input type="password" id="currentPasswordInput" placeholder="Current password" autocomplete="current-password" required />
-          <input type="password" id="newPasswordInput" placeholder="New password (min 8 characters)" autocomplete="new-password" minlength="8" required />
-          <input type="password" id="confirmPasswordInput" placeholder="Confirm new password" autocomplete="new-password" minlength="8" required />
+          <div class="password-field-wrap">
+            <input type="password" id="currentPasswordInput" class="password-toggle-input" placeholder="Current password" autocomplete="current-password" required />
+            <button type="button" class="password-toggle-btn" data-target="currentPasswordInput" aria-label="Show password">👁</button>
+          </div>
+          <div class="password-field-wrap">
+            <input type="password" id="newPasswordInput" class="password-toggle-input" placeholder="New password (min 8 characters)" autocomplete="new-password" minlength="8" required />
+            <button type="button" class="password-toggle-btn" data-target="newPasswordInput" aria-label="Show password">👁</button>
+          </div>
+          <div class="password-field-wrap">
+            <input type="password" id="confirmPasswordInput" class="password-toggle-input" placeholder="Confirm new password" autocomplete="new-password" minlength="8" required />
+            <button type="button" class="password-toggle-btn" data-target="confirmPasswordInput" aria-label="Show password">👁</button>
+          </div>
           <div class="settings-inline-actions">
             <button type="button" class="btn btn-ghost" id="cancelPasswordBtn">Cancel</button>
             <button type="submit" class="btn btn-primary">Update password</button>
