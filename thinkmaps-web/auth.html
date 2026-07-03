@@ -53,7 +53,10 @@
       <input type="text" id="signinIdentifier" autocomplete="username" required />
 
       <label for="signinPassword">Password</label>
-      <input type="password" id="signinPassword" autocomplete="current-password" required />
+      <div class="password-field-wrap">
+        <input type="password" id="signinPassword" class="password-toggle-input" autocomplete="current-password" required />
+        <button type="button" class="password-toggle-btn" data-target="signinPassword" aria-label="Show password">👁</button>
+      </div>
 
       <p class="auth-error" id="signinError"></p>
 
@@ -72,10 +75,16 @@
       <input type="text" id="signupUsername" autocomplete="username" required />
 
       <label for="signupPassword">Password</label>
-      <input type="password" id="signupPassword" autocomplete="new-password" required minlength="8" />
+      <div class="password-field-wrap">
+        <input type="password" id="signupPassword" class="password-toggle-input" autocomplete="new-password" required minlength="8" />
+        <button type="button" class="password-toggle-btn" data-target="signupPassword" aria-label="Show password">👁</button>
+      </div>
 
       <label for="signupPasswordConfirm">Confirm password</label>
-      <input type="password" id="signupPasswordConfirm" autocomplete="new-password" required minlength="8" />
+      <div class="password-field-wrap">
+        <input type="password" id="signupPasswordConfirm" class="password-toggle-input" autocomplete="new-password" required minlength="8" />
+        <button type="button" class="password-toggle-btn" data-target="signupPasswordConfirm" aria-label="Show password">👁</button>
+      </div>
 
       <p class="auth-error" id="signupError"></p>
 
