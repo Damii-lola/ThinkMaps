@@ -2191,8 +2191,10 @@ function findDeepestLiveOptionId(){
   return deepestOptionId;
 }
 
-// Must match PATH_DEPTH_CAP in server.js exactly.
-const PATH_DEPTH_CAP = 7;
+// Must match getPathDepthCap in server.js exactly.
+function getPathDepthCap(){
+  return canvasState.isPro ? 10 : 7;
+}
 
 // Drives the progress bar added between the header and the canvas — the
 // breadcrumb trail and the "{depth} of 7" counter, both built from
@@ -2231,7 +2233,7 @@ function renderPathProgress(){
   // where the window starts, every time this updates.
   breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
 
-  countEl.innerHTML = `<span>${depth} of ${PATH_DEPTH_CAP}</span>`;
+  countEl.innerHTML = `<span>${depth} of ${getPathDepthCap()}</span>`;
 }
 
 // The "look what you built" moment — fires exactly once per terminal
@@ -3784,8 +3786,12 @@ async function handleRetrySpawned(optionId){
       alert(body.error || 'Could not retry the spawned groups.');
       return;
     }
+    const body = await res.json();
     canvasState.lastActivatedOptionId = optionId;
     await loadGraph();
+    if(body.skippedForRetryLimit > 0){
+      showToast(`${body.skippedForRetryLimit} group${body.skippedForRetryLimit === 1 ? '' : 's'} already hit the free-tier retry limit — upgrade to Pro for unlimited retries.`);
+    }
   } catch (err){
     alert('Something went wrong retrying the spawned groups.');
   } finally {
