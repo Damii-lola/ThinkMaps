@@ -2226,7 +2226,12 @@ const BLOCKS_BEFORE_IDEA_CHECKPOINT = IDEATION_BLOCK_NAMES.slice(0, 6);
 
 // Hard cap on path depth — see GENERATE_IDEAS_BLOCK_NAME below for what
 // happens once a single continuous path reaches this many picks deep.
-const PATH_DEPTH_CAP = 7;
+// Pro gets a deeper exploration before hardening kicks in.
+const PATH_DEPTH_CAP_FREE = 7;
+const PATH_DEPTH_CAP_PRO = 10;
+function getPathDepthCap(isPro){
+  return isPro ? PATH_DEPTH_CAP_PRO : PATH_DEPTH_CAP_FREE;
+}
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
 // A group of this block_name never gets AI-generated content — it's a
@@ -3046,7 +3051,7 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
   }
 
   let generated;
-  if(pathContext.length >= PATH_DEPTH_CAP){
+  if(pathContext.length >= getPathDepthCap(isPro)){
     // This path is deep enough now — stop generating more exploration
     // and hand back exactly one terminal group: a button, not a list of
     // options to click into. No AI call needed; there's nothing left to
@@ -6707,7 +6712,7 @@ async function synthesizeBasicIdea(nicheLabel, answers){
 // ============================================================
 
 const CONFIRMATION_QUESTION_COUNT_FREE = 4;
-const CONFIRMATION_QUESTION_COUNT_PRO = 10;
+const CONFIRMATION_QUESTION_COUNT_PRO = 7;
 
 // Each of these confirmation questions has a distinct, deliberate job —
 // not "ask N more things about the person," but pressure-test the
@@ -7800,22 +7805,25 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
 
     const pathContext = await buildPathContextFromOption(sourceOptionId);
 
-    // The frontend only ever shows the "Generate Ideas" button once a path
-    // hits PATH_DEPTH_CAP (15) — but that's a client-side fact, not a
-    // server-side guarantee. Enforcing it here too means calling this
-    // endpoint directly can't skip ahead of a path that hasn't actually
-    // earned it yet.
-    if(pathContext.length < PATH_DEPTH_CAP){
-      return res.status(400).json({ error: `This path needs to be ${PATH_DEPTH_CAP} nodes deep before an idea can be hardened — it's currently ${pathContext.length}.` });
+    // Fixed here (not re-derived later) so the same isPro value governs
+    // both the depth requirement below and total_questions further down
+    // — a session shouldn't be judged against one tier's rules for its
+    // depth and another's for its question count just because Pro status
+    // happened to be checked twice.
+    const isPro = await isUserPro(req.user.id);
+    const requiredDepth = getPathDepthCap(isPro);
+
+    // The frontend only ever shows the "Generate Ideas" button once a
+    // path hits the depth cap for the person's tier — but that's a
+    // client-side fact, not a server-side guarantee. Enforcing it here
+    // too means calling this endpoint directly can't skip ahead of a
+    // path that hasn't actually earned it yet.
+    if(pathContext.length < requiredDepth){
+      return res.status(400).json({ error: `This path needs to be ${requiredDepth} nodes deep before an idea can be hardened — it's currently ${pathContext.length}.` });
     }
 
     const pathSummary = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
 
-    // Fixed at creation time, not re-derived on every later request —
-    // a session shouldn't change length mid-flight just because the
-    // person's Pro status happens to change while they're partway
-    // through answering it.
-    const isPro = await isUserPro(req.user.id);
     const totalQuestions = isPro ? CONFIRMATION_QUESTION_COUNT_PRO : CONFIRMATION_QUESTION_COUNT_FREE;
 
     const ideaDraft = await synthesizeIdeaDraftFromPath(pathSummary);
