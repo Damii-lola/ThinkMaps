@@ -585,11 +585,93 @@ async function initNavAuthState(){
 // (or, if already pro, downgrades — same toggle endpoint both
 // directions) right there on the page, never sending anyone to the
 // dashboard first.
+function closeProFeaturesModal(){
+  const overlay = document.getElementById('proFeaturesModal');
+  if(overlay) overlay.remove();
+}
+
+// The pricing card itself only ever shows a short, digestible summary
+// — this is the actual complete list, every Pro feature that exists in
+// the app right now, grouped by what part of the workflow it touches.
+// Kept in one place specifically so it's the one spot that needs
+// updating when a new Pro feature ships, rather than this list quietly
+// drifting out of sync with the pricing card's shorter version.
+function showProFeaturesModal(){
+  closeProFeaturesModal();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'proFeaturesModal';
+  overlay.innerHTML = `
+    <div class="modal-card pro-features-modal-card">
+      <span class="ptag">Pro — $12/month</span>
+      <h3>Everything Pro includes</h3>
+
+      <div class="pro-features-group">
+        <div class="pro-features-group-label">Blueprints</div>
+        <ul>
+          <li>Unlimited blueprints, no edit lock, never deleted</li>
+          <li>Delete your own blueprints anytime</li>
+          <li>Combine multiple selections into one fused idea</li>
+        </ul>
+      </div>
+
+      <div class="pro-features-group">
+        <div class="pro-features-group-label">A better canvas</div>
+        <ul>
+          <li>Richer AI generation — more options per click, plus a "why this fits" hint on each one</li>
+          <li>Blueprint Snapshots — save and restore named checkpoints of your whole graph</li>
+          <li>A premium visual theme for the canvas itself</li>
+          <li>"Idea Already Exists?" pre-check, right from your first click</li>
+        </ul>
+      </div>
+
+      <div class="pro-features-group">
+        <div class="pro-features-group-label">Hardening your idea</div>
+        <ul>
+          <li>Market Intel &amp; Risk Analysis</li>
+          <li>AI-found fixes for surfaced risks</li>
+          <li>Detailed Build Brief for your MVP</li>
+          <li>Suggest Changes — revise with your own feedback</li>
+        </ul>
+      </div>
+
+      <div class="pro-features-group">
+        <div class="pro-features-group-label">The full idea toolkit</div>
+        <ul>
+          <li>Idea Strength Score — four honest, specific dimensions</li>
+          <li>Pivot Generator — three genuinely different directions</li>
+          <li>User Persona Cards</li>
+          <li>Landing Page Copy Generator</li>
+          <li>Challenge This Idea — a sharp, unbalanced Red Team critique</li>
+          <li>Competitor Deep Dive (Spy Mode)</li>
+          <li>Launch Checklist — week by week, specific to your idea</li>
+        </ul>
+      </div>
+
+      <div class="modal-actions pro-features-modal-actions">
+        <button class="btn btn-ghost" id="closeProFeaturesModalBtn" type="button">Close</button>
+        <a href="auth.html" class="btn btn-primary">Go Pro</a>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', (e) => { if(e.target === overlay) closeProFeaturesModal(); });
+  document.getElementById('closeProFeaturesModalBtn')?.addEventListener('click', closeProFeaturesModal);
+}
+
 async function initPricingSection(){
   const grid = document.getElementById('pricingGrid');
   const freeCard = document.getElementById('freePlanCard');
   const goProBtn = document.getElementById('proPlanGoProBtn');
   if(!grid || !freeCard || !goProBtn) return;
+
+  // Wired here, before the session check below — this is purely
+  // informational and should work for a logged-out visitor just
+  // browsing pricing, not only for someone already signed in.
+  const moreBtn = document.getElementById('proPlanMoreBtn');
+  if(moreBtn) moreBtn.addEventListener('click', showProFeaturesModal);
 
   const session = await getActiveSession();
   if(!session) return;
@@ -1184,17 +1266,30 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
     const createdLabel = new Date(bp.created_at).toLocaleDateString();
     let statusLabel;
     if(bp.isLocked){
-      statusLabel = bp.daysUntilDeletion != null
-        ? `Locked — read-only · deletes in ${bp.daysUntilDeletion} day(s)`
-        : 'Locked — read-only';
+      if(bp.lockReason === 'pro_required'){
+        statusLabel = 'Locked — created on Pro, upgrade to access it again';
+      } else {
+        statusLabel = bp.daysUntilDeletion != null
+          ? `Locked — read-only · deletes in ${bp.daysUntilDeletion} day(s)`
+          : 'Locked — read-only';
+      }
     } else if(bp.minutesRemaining != null){
       statusLabel = `${bp.minutesRemaining} minute(s) left to edit on free tier`;
     } else {
       statusLabel = 'Active';
     }
 
+    // Delete is Pro-only (matches the backend's DELETE /blueprints/:id
+    // gate) — free-tier blueprints already self-delete on their own
+    // timer, so a manual delete button there would just be a confusing
+    // extra control for something that already happens automatically.
+    const deleteButton = dashboardState.isPro
+      ? `<button type="button" class="btn-delete-blueprint" data-id="${bp.id}" data-title="${escapeHtml(bp.title)}" title="Delete blueprint" aria-label="Delete blueprint">✕</button>`
+      : '';
+
     return `
       <div class="blueprint-card ${bp.isLocked ? 'locked' : ''}">
+        ${deleteButton}
         <h3>${bp.title}</h3>
         <p class="muted">Created ${createdLabel}</p>
         <p class="status-label">${statusLabel}</p>
@@ -1213,6 +1308,33 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
 
   const newBtn = document.getElementById('newBlueprintBtn');
   if(newBtn) newBtn.addEventListener('click', openNewBlueprintModal);
+
+  container.querySelectorAll('.btn-delete-blueprint').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault(); // sits inside the card, which itself isn't a link, but stop just in case markup changes later
+      deleteBlueprint(btn.dataset.id, btn.dataset.title);
+    });
+  });
+}
+
+// Pro-only (matches the DELETE /blueprints/:id gate on the backend).
+// Genuinely destructive — confirm dialog first, no undo after this.
+async function deleteBlueprint(blueprintId, title){
+  if(!confirm(`Delete "${title}"? This permanently deletes the whole blueprint and everything in it — this can't be undone.`)) return;
+
+  try {
+    const res = await authedFetch(`/blueprints/${blueprintId}`, { method: 'DELETE' });
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || 'Could not delete this blueprint.');
+      return;
+    }
+    showToast('Blueprint deleted.');
+    await loadDashboard();
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+  }
 }
 
 // ---------- NEW BLUEPRINT MODAL ----------
@@ -1422,8 +1544,16 @@ function renderProGatedButton(container, label, onActivate){
   if(!container) return;
 
   if(confirmState.isPro){
-    container.innerHTML = `<button class="btn btn-secondary" id="proGateBtn" type="button">${escapeHtml(label)}</button>`;
-    const btn = document.getElementById('proGateBtn');
+    container.innerHTML = `<button class="btn btn-secondary pro-gate-activate-btn" type="button">${escapeHtml(label)}</button>`;
+    // Scoped to THIS container, not a document-wide ID lookup — every
+    // toolkit card (strength score, pivots, personas, landing copy, red
+    // team, spy mode, launch checklist) calls this same function, and a
+    // hardcoded id="proGateBtn" meant document.getElementById always
+    // returned the FIRST one in the whole page regardless of which
+    // container had just been filled — every card after the first
+    // silently wired its click listener onto the wrong button entirely,
+    // which is exactly why most of these did nothing when clicked.
+    const btn = container.querySelector('.pro-gate-activate-btn');
     if(btn) btn.addEventListener('click', onActivate);
     return;
   }
@@ -4397,17 +4527,66 @@ async function runDeeperAnalysis(){
   deeperEl.innerHTML = `
     <div class="confirm-researching">
       <div class="confirm-spinner"></div>
-      <p>Pulling competitor pricing, real chatter about the problem, and running a simulated reaction panel — this takes longer than the steps before it.</p>
+      <p id="deeperAnalysisProgressMsg">Pulling competitor pricing, real chatter about the problem, and running a simulated reaction panel — this takes longer than the steps before it.</p>
     </div>
   `;
 
   try {
-    const res = await authedFetch(`/confirm/${confirmState.sessionId}/deeper-analysis`, {
+    const session = await getActiveSession();
+    if(!session){ window.location.href = 'auth.html'; return; }
+
+    const res = await fetch(`${API_BASE_URL}/confirm/${confirmState.sessionId}/deeper-analysis`, {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`
+      },
       body: JSON.stringify({})
     });
-    if(!res) return;
 
+    const contentType = res.headers.get('content-type') || '';
+
+    if(contentType.includes('text/event-stream')){
+      // The actual generation pipeline — genuinely slow (20-40+ seconds),
+      // which is exactly why this is SSE with a heartbeat now instead of
+      // a plain POST: a regular request has no way to survive Render's
+      // ~30-second HTTP timeout, which is almost certainly what "Could
+      // not run deeper analysis" actually was, intermittently.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while(true){
+        const { done, value } = await reader.read();
+        if(done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for(const line of lines){
+          if(line.startsWith(': ')) continue; // heartbeat comment — ignore
+          if(!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.slice(6)); } catch(e){ continue; }
+
+          if(event.type === 'progress'){
+            const msgEl = document.getElementById('deeperAnalysisProgressMsg');
+            if(msgEl) msgEl.textContent = event.message;
+          } else if(event.type === 'done'){
+            confirmState.deeperAnalysis = event.deeperAnalysis;
+            renderDeeperAnalysis(event.deeperAnalysis);
+          } else if(event.type === 'error'){
+            deeperEl.innerHTML = `<p class="confirm-error">${escapeHtml(event.error || 'Could not run deeper analysis.')}</p>`;
+          }
+        }
+      }
+      return;
+    }
+
+    // Non-SSE path — only ever hit if the session already had cached
+    // deeper_analysis (the route's early-return, still plain JSON since
+    // there's no slow work to survive a timeout for in that case).
     const body = await res.json();
     if(!res.ok){
       deeperEl.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not run deeper analysis.')}</p>`;
