@@ -55,7 +55,28 @@ document.addEventListener('DOMContentLoaded', () => {
   initIdeatePage();
   initConfirmPage();
   initSettingsPage();
+  initPasswordToggles();
 });
+
+// ---------- Show/hide password toggle ----------
+// Event delegation on document, not per-button listeners — works
+// identically whether the button exists at page load (auth.html,
+// settings.html) or gets added later dynamically, with zero extra wiring
+// needed anywhere a new password field shows up in the future.
+function initPasswordToggles(){
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.password-toggle-btn');
+    if(!btn) return;
+
+    const input = document.getElementById(btn.dataset.target);
+    if(!input) return;
+
+    const isHidden = input.type === 'password';
+    input.type = isHidden ? 'text' : 'password';
+    btn.textContent = isHidden ? '🙈' : '👁';
+    btn.setAttribute('aria-label', isHidden ? 'Hide password' : 'Show password');
+  });
+}
 
 // ---------- BACKEND CONNECTION ----------
 // Pings the Render API on load and reflects the result in the footer status pill.
@@ -346,6 +367,24 @@ async function handleSignInStart(e){
 
     if(!res.ok){
       errorEl.textContent = body.error || 'Could not sign in.';
+      return;
+    }
+
+    if(body.graceLogin){
+      // Account created less than 10 minutes ago — server already
+      // decided OTP isn't needed this once, hands back a real session
+      // directly instead of the "sent" acknowledgment that would
+      // normally trigger the OTP screen.
+      const sb = await getSupabaseClient();
+      const { error: setError } = await sb.auth.setSession({
+        access_token: body.accessToken,
+        refresh_token: body.refreshToken
+      });
+      if(setError){
+        errorEl.textContent = 'Could not start your session. Try signing in again.';
+        return;
+      }
+      window.location.href = 'dashboard.html';
       return;
     }
 
@@ -1411,9 +1450,49 @@ function getEventPoint(e){
   return { clientX: e.clientX, clientY: e.clientY };
 }
 
+// Click-to-expand for truncated canvas text — group titles and option
+// labels both use -webkit-line-clamp:2 to keep cards a predictable size,
+// but that means anything longer than 2 lines was previously just
+// silently cut off with no way to read the rest. Event delegation on
+// canvasWorld (not per-element listeners) since canvas content re-renders
+// constantly — this only ever needs wiring up once, regardless of how
+// many times renderGroups repaints the DOM underneath it.
+function setupTruncatedTextExpansion(){
+  const world = document.getElementById('canvasWorld');
+  if(!world || world.dataset.expansionWired) return;
+  world.dataset.expansionWired = '1';
+
+  world.addEventListener('click', (e) => {
+    const titleSpan = e.target.closest('.canvas-group-title span');
+    const optLabel = e.target.closest('.opt-label');
+    const target = titleSpan || optLabel;
+    if(!target) return;
+
+    // scrollHeight > clientHeight is the reliable signal that
+    // -webkit-line-clamp actually clipped something — clicking short
+    // text that was never truncated in the first place should just do
+    // nothing (and, for option labels, fall through to the normal
+    // activate-on-click behavior instead of eating the click).
+    const isTruncated = target.scrollHeight > target.clientHeight + 1; // +1px tolerance for sub-pixel rounding
+    const isExpanded = target.classList.contains('text-expanded');
+
+    if(!isTruncated && !isExpanded) return; // nothing to expand, let the click do whatever it normally does
+
+    e.preventDefault();
+    e.stopPropagation(); // don't also trigger option activation / group drag on this same click
+
+    target.classList.toggle('text-expanded');
+    const card = target.closest('.canvas-group');
+    if(card) card.classList.toggle('card-popped', target.classList.contains('text-expanded'));
+  }, true); // capture phase — needs to intercept BEFORE the option's own activate-on-click listener sees it
+}
+
+
 async function initAppPage(){
   const worldEl = document.getElementById('canvasWorld');
   if(!worldEl) return;
+
+  setupTruncatedTextExpansion();
 
   const session = await getActiveSession();
   if(!session){
@@ -2700,6 +2779,33 @@ function applyWorldTransform(){
   world.style.transform = `translate(${panX}px, ${panY}px) scale3d(${canvasState.zoom}, ${canvasState.zoom}, 1)`;
 }
 
+// The actual zoom fix: every zoom entry point (wheel, pinch, +/- buttons)
+// used to only change canvasState.zoom and reapply the transform, with
+// no adjustment to pan at all. Since the transform is
+// `translate(pan) scale(zoom)`, everything scales around canvasWorld's
+// own fixed local origin (0,0) — without compensating the pan, the
+// content visibly drifts away from wherever you were actually looking
+// every time the zoom level changes, worse the further zoomed in you are.
+// This keeps one specific SCREEN point (sx, sy) — the cursor for wheel
+// zoom, the pinch midpoint for touch, the viewport center for the
+// buttons — anchored in place: whatever world-space point was under
+// that screen point before the zoom change is still under it after.
+function zoomAtPoint(sx, sy, newZoom){
+  const clampedZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
+  const oldZoom = canvasState.zoom;
+
+  const worldX = (sx - canvasState.pan.x) / oldZoom;
+  const worldY = (sy - canvasState.pan.y) / oldZoom;
+
+  canvasState.zoom = clampedZoom;
+  canvasState.pan = {
+    x: sx - worldX * clampedZoom,
+    y: sy - worldY * clampedZoom
+  };
+
+  applyWorldTransform();
+}
+
 function centerCanvasOnRoot(){
   const viewport = document.getElementById('canvasViewport');
   if(!viewport) return;
@@ -2910,8 +3016,8 @@ function setupCanvasInteractions(){
   viewport.addEventListener('wheel', (e) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    canvasState.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, canvasState.zoom + delta));
-    applyWorldTransform();
+    const rect = viewport.getBoundingClientRect();
+    zoomAtPoint(e.clientX - rect.left, e.clientY - rect.top, canvasState.zoom + delta);
   }, { passive: false });
 
   // ---- touch — one finger does whatever mouse would (pan / drag a group /
@@ -2945,8 +3051,10 @@ function setupCanvasInteractions(){
     if(e.touches.length === 2 && pinchStartDistance){
       e.preventDefault();
       const newDistance = touchDistance(e.touches);
-      canvasState.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pinchStartZoom * (newDistance / pinchStartDistance)));
-      applyWorldTransform();
+      const rect = viewport.getBoundingClientRect();
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+      zoomAtPoint(midX, midY, pinchStartZoom * (newDistance / pinchStartDistance));
       return;
     }
     if(e.touches.length !== 1) return;
@@ -2966,12 +3074,10 @@ function setupCanvasInteractions(){
   });
 
   document.getElementById('zoomInBtn')?.addEventListener('click', () => {
-    canvasState.zoom = Math.min(ZOOM_MAX, canvasState.zoom + 0.1);
-    applyWorldTransform();
+    zoomAtPoint(viewport.clientWidth / 2, viewport.clientHeight / 2, canvasState.zoom + 0.1);
   });
   document.getElementById('zoomOutBtn')?.addEventListener('click', () => {
-    canvasState.zoom = Math.max(ZOOM_MIN, canvasState.zoom - 0.1);
-    applyWorldTransform();
+    zoomAtPoint(viewport.clientWidth / 2, viewport.clientHeight / 2, canvasState.zoom - 0.1);
   });
   document.getElementById('zoomResetBtn')?.addEventListener('click', () => {
     canvasState.zoom = 1;
@@ -5578,24 +5684,11 @@ function renderExportSection(){
   const el = document.getElementById('exportCard');
   if(!el) return;
 
-  el.innerHTML = `<div class="toolkit-card-head"><h4>Export This Idea</h4><p class="muted">A complete, properly formatted package — everything generated so far.</p></div>`;
-
-  if(confirmState.isPro){
-    el.innerHTML += `
-      <div class="toolkit-card-actions">
-        <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-secondary" download>Download Markdown</a>
-        <a href="export.html?session=${confirmState.sessionId}" target="_blank" class="btn btn-primary">Export as PDF</a>
-      </div>
-    `;
-    return;
-  }
-
-  el.innerHTML += `
-    <div class="pro-gate">
-      <button class="btn btn-secondary" type="button" disabled>Download Markdown</button>
-      <button class="btn btn-primary" type="button" disabled>Export as PDF</button>
-      <span class="pro-gate-badge">PRO</span>
-      <a href="index.html#pricing" class="pro-gate-link">Upgrade to unlock</a>
+  el.innerHTML = `
+    <div class="toolkit-card-head"><h4>Export This Idea</h4><p class="muted">A complete, properly formatted package — everything generated so far.</p></div>
+    <div class="toolkit-card-actions">
+      <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-secondary" download>Download Markdown</a>
+      <a href="export.html?session=${confirmState.sessionId}" target="_blank" class="btn btn-primary">Export as PDF</a>
     </div>
   `;
 }
