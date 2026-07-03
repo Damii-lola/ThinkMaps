@@ -1606,7 +1606,6 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
   -webkit-line-clamp:unset; display:block; overflow:visible;
 }
 /* The card containing an expanded label needs to render ABOVE its
-   siblings — otherwise the now-taller content just gets visually
    clipped by whatever neighboring card happens to overlap it, which
    would make "click to see the full text" not actually show the full
    text. A stronger shadow also helps it read as "temporarily lifted
