@@ -5665,10 +5665,12 @@ function renderLaunchChecklist(launchChecklist){
       `).join('')}
     </div>
     <div class="toolkit-card-actions">
-      <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-ghost" id="exportChecklistMdLink">Export to Markdown</a>
+      <button type="button" class="btn btn-ghost" id="exportChecklistMdLink">Export to Markdown</button>
     </div>
   `;
   el.classList.add('result-section-enter');
+
+  document.getElementById('exportChecklistMdLink')?.addEventListener('click', downloadMarkdownExport);
 
   el.querySelectorAll('.checklist-task input[type="checkbox"]').forEach(cb => {
     cb.addEventListener('change', () => {
@@ -5687,8 +5689,49 @@ function renderExportSection(){
   el.innerHTML = `
     <div class="toolkit-card-head"><h4>Export This Idea</h4><p class="muted">A complete, properly formatted package — everything generated so far.</p></div>
     <div class="toolkit-card-actions">
-      <a href="${API_BASE_URL}/confirm/${confirmState.sessionId}/export/markdown" class="btn btn-secondary" download>Download Markdown</a>
+      <button type="button" class="btn btn-secondary" id="downloadMarkdownBtn">Download Markdown</button>
       <a href="export.html?session=${confirmState.sessionId}" target="_blank" class="btn btn-primary">Export as PDF</a>
     </div>
   `;
+
+  document.getElementById('downloadMarkdownBtn')?.addEventListener('click', downloadMarkdownExport);
+}
+
+// A plain <a href> to this route can't carry the Authorization header
+// requireAuth needs — browsers never attach custom headers to a normal
+// link navigation, only fetch() can. This fetches the file authenticated,
+// then triggers the actual browser download itself via a Blob object URL,
+// which is the standard way to download an authenticated file without
+// exposing the access token in a URL (which query-string auth would do).
+async function downloadMarkdownExport(){
+  const btn = document.getElementById('downloadMarkdownBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Downloading…'; }
+
+  try {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/export/markdown`);
+    if(!res) return; // authedFetch already redirected to auth.html if no session
+
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || 'Could not download this export.');
+      return;
+    }
+
+    const blob = await res.blob();
+    const filename = (confirmState.rewrittenIdea?.name || confirmState.result?.name || 'thinkmaps-idea')
+      .replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.md';
+
+    const objectUrl = URL.createObjectURL(blob);
+    const tempLink = document.createElement('a');
+    tempLink.href = objectUrl;
+    tempLink.download = filename;
+    document.body.appendChild(tempLink);
+    tempLink.click();
+    tempLink.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    showToast('Could not reach the server. Try again.');
+  } finally {
+    if(btn){ btn.disabled = false; btn.textContent = 'Download Markdown'; }
+  }
 }
