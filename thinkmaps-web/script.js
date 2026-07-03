@@ -4,12 +4,12 @@
 // All backend calls go through API_BASE_URL, pointed at the Render service.
 
 const API_BASE_URL = 'https://thinkmaps.onrender.com';
-// Real Pro upgrade path — the actual payment happens on Selar, and the
-// upgrade itself is applied by the SELAR_WEBHOOK_SECRET-gated webhook in
-// server.js once a payment completes, matched back to a ThinkMaps
-// account by email. This link is the only thing the frontend needs to
-// know about payment at all.
-const SELAR_PAYMENT_URL = 'https://selar.com/130n178z3r';
+// Real Pro upgrade path — the actual payment happens on Coachli, and the
+// upgrade itself is applied by the PAYMENT_WEBHOOK_SECRET-gated inbox
+// check in server.js once a payment completes, matched back to a
+// ThinkMaps account by email. This link is the only thing the frontend
+// needs to know about payment at all.
+const PAYMENT_URL = 'https://coachli.co/damiiii/SS-afcb4446d3';
 
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
@@ -690,24 +690,24 @@ async function initPricingSection(){
   goProBtn.addEventListener('click', (e) => {
     e.preventDefault();
     if(isPro) return; // button is disabled in this state, but guard anyway
-    openSelarCheckout(session);
+    openPaymentCheckout(session);
   });
 }
 
-// Opens the real Selar payment page. The webhook that actually applies
-// the upgrade (see /webhooks/selar/:secret in server.js) matches the
-// payment back to a ThinkMaps account by EMAIL — so the one thing that
-// genuinely matters here is the person using the same email at Selar
-// checkout as their ThinkMaps account. Surfaced as a plain confirm
-// dialog rather than silently hoping they notice, since a mismatched
-// email means a real payment with no automatic upgrade to show for it.
-function openSelarCheckout(session){
+// Opens the real Coachli payment page. The inbox check that actually
+// applies the upgrade matches the payment back to a ThinkMaps account
+// by EMAIL — so the one thing that genuinely matters here is the person
+// using the same email at Coachli checkout as their ThinkMaps account.
+// Surfaced as a plain confirm dialog rather than silently hoping they
+// notice, since a mismatched email means a real payment with no
+// automatic upgrade to show for it.
+function openPaymentCheckout(session){
   const accountEmail = session?.user?.email;
   const message = accountEmail
     ? `Use this exact email at checkout so we can match your payment to your account: ${accountEmail}`
     : 'Use the same email at checkout as your ThinkMaps account, so we can match your payment to it.';
   alert(message);
-  window.open(SELAR_PAYMENT_URL, '_blank', 'noopener');
+  window.open(PAYMENT_URL, '_blank', 'noopener');
 }
 
 // Shared between initPricingSection above and the dashboard's "Go Pro"
@@ -850,7 +850,7 @@ function showProPlanModal(){
   if(goProBtn && !isPro){
     goProBtn.addEventListener('click', async () => {
       const session = await getActiveSession();
-      openSelarCheckout(session);
+      openPaymentCheckout(session);
     });
   }
 }
