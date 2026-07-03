@@ -339,7 +339,7 @@ async function handleSignUpStart(e){
     const body = await res.json();
 
     if(!res.ok){
-      errorEl.textContent = body.error || 'Could not start signup.';
+      errorEl.textContent = body.detail ? `${body.error} (${body.detail})` : (body.error || 'Could not start signup.');
       return;
     }
 
@@ -366,7 +366,7 @@ async function handleSignInStart(e){
     const body = await res.json();
 
     if(!res.ok){
-      errorEl.textContent = body.error || 'Could not sign in.';
+      errorEl.textContent = body.detail ? `${body.error} (${body.detail})` : (body.error || 'Could not sign in.');
       return;
     }
 
