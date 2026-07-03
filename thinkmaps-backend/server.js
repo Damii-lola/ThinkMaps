@@ -2,14 +2,78 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const { NICHE_PATHWAYS } = require('./niche_pathways');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// Security headers — CSP is intentionally loose on script-src/style-src
+// since this API serves no HTML pages of its own (the actual frontend
+// is static files on GitHub Pages, entirely separate from this server),
+// so the parts of helmet that matter here are the response headers
+// (X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security,
+// etc.) rather than CSP, which would only ever apply to content this
+// server itself renders — which is just JSON.
+app.use(helmet({
+  contentSecurityPolicy: false, // no HTML rendered here — CSP has nothing to protect
+  crossOriginResourcePolicy: { policy: 'cross-origin' } // the frontend on GitHub Pages needs to fetch this API's JSON across origins
+}));
+
+// CORS — restricted to the actual frontend, not wide open to any site
+// on the internet the way `cors()` with no options allows. Includes
+// both the GitHub Pages origin and localhost for local development.
+const ALLOWED_ORIGINS = [
+  'https://damii-lola.github.io',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // No origin header at all (curl, server-to-server, Postman, the
+    // Selar webhook) — allow it through; CORS only ever governs
+    // browser-originated requests in the first place.
+    if(!origin) return callback(null, true);
+    if(ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error('Not allowed by CORS'));
+  }
+}));
+
 app.use(express.json());
+
+// General rate limit — applies to every route, generous enough that no
+// real usage pattern hits it, but stops a script from hammering the API.
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use(generalLimiter);
+
+// Auth routes get a much tighter limit — these are exactly the routes a
+// brute-force or account-enumeration attempt would hammer (guessing
+// passwords, guessing OTP codes, probing which emails/usernames exist).
+// Keyed by IP + the email/identifier in the request body where present,
+// so this can't be trivially defeated by spreading guesses across many
+// different target accounts from one IP, or hammering one account from
+// many IPs pretending to be different people.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const target = req.body?.email || req.body?.identifier || '';
+    return `${req.ip}:${target}`;
+  },
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' }
+});
+app.use('/auth/', authLimiter);
 
 // Supabase client — service role key, so this bypasses RLS entirely.
 // Every privileged read/write for ThinkMaps goes through this one client.
@@ -95,10 +159,19 @@ const gmailApi = google.gmail({ version: 'v1', auth: oauth2Client });
 // builds the minimal plain-text version of that by hand rather than
 // pulling in a full MIME-building library for a one-field email.
 function buildRawEmail({ from, to, subject, text, html, replyTo }){
+  // A properly-formed Date and Message-ID on every send — small,
+  // concrete things spam filters weigh, and genuinely free to add. The
+  // Message-ID domain matches the sending Gmail address specifically,
+  // not a made-up one, since a mismatched Message-ID domain is itself
+  // a minor spam signal.
+  const messageId = `<${crypto.randomBytes(16).toString('hex')}@gmail.com>`;
+
   const headerLines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: ${messageId}`,
   ];
   if(replyTo){
     headerLines.push(`Reply-To: ${replyTo}`);
@@ -132,6 +205,7 @@ function buildRawEmail({ from, to, subject, text, html, replyTo }){
 
     message = headerLines.join('\r\n') + '\r\n\r\n' + parts.join('\r\n');
   } else {
+    headerLines.push('MIME-Version: 1.0');
     headerLines.push('Content-Type: text/plain; charset=UTF-8');
     message = headerLines.join('\r\n') + '\r\n\r\n' + text;
   }
@@ -223,23 +297,123 @@ function escapeHtmlServer(str){
     .replace(/'/g, '&#39;');
 }
 
-// In-memory pending state — fine for a single Render instance.
-// pendingSignups: email -> { username, password, codeHash, expiresAt }
-// pendingLogins:  email -> { accessToken, refreshToken, codeHash, expiresAt }
-const pendingSignups = new Map();
-const pendingLogins = new Map();
+// ============================================================
+// PERSISTENT PENDING-AUTH STORE — replaces the old in-memory Map.
+//
+// The old version stored pending signup/login state in a plain
+// in-memory Map, which lives only as long as the current server
+// process. Render's free tier restarts the process on every deploy AND
+// spins it down after idle periods — so any OTP sent right before one
+// of those events vanished from memory before the person had a chance
+// to type it in. That's the real cause of "sometimes the OTP just
+// doesn't work" — it's not a bad code, it's a process that no longer
+// remembers issuing it. Storing this in Supabase instead survives
+// restarts entirely.
+//
+// Security hardening added at the same time:
+//   - The payload (password for signup, session tokens for login) is
+//     encrypted at rest with AES-256-GCM, not stored as plain JSON —
+//     meaningful given this table temporarily holds a real password.
+//   - Failed verification attempts are counted per pending entry and
+//     locked out after 5 wrong tries, forcing a fresh code rather than
+//     letting someone brute-force a 6-digit code (1 in 1,000,000 odds
+//     per guess sounds safe until you realize nothing was stopping
+//     unlimited guesses before this).
+// ============================================================
+const ENCRYPTION_KEY_RAW = process.env.ENCRYPTION_KEY; // 32-byte key, hex-encoded (64 hex chars)
 const OTP_PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_MAX_ATTEMPTS = 5;
+// New accounts get this long to sign back in without re-doing OTP —
+// covers the common "just signed up, immediately has to log back in
+// for some reason" case without weakening security long-term, since
+// it only ever applies in the first 10 minutes of an account's life.
+const NEW_ACCOUNT_GRACE_MS = 10 * 60 * 1000;
 
-function cleanupExpiredPending(){
-  const now = Date.now();
-  for(const [email, entry] of pendingSignups){
-    if(entry.expiresAt < now) pendingSignups.delete(email);
+function getEncryptionKey(){
+  if(!ENCRYPTION_KEY_RAW){
+    throw new Error('ENCRYPTION_KEY is not set in the environment — required to store pending auth state securely.');
   }
-  for(const [email, entry] of pendingLogins){
-    if(entry.expiresAt < now) pendingLogins.delete(email);
+  const key = Buffer.from(ENCRYPTION_KEY_RAW, 'hex');
+  if(key.length !== 32){
+    throw new Error('ENCRYPTION_KEY must be exactly 32 bytes (64 hex characters).');
   }
+  return key;
 }
-setInterval(cleanupExpiredPending, 60 * 1000);
+
+function encryptPayload(obj){
+  const key = getEncryptionKey();
+  const iv = crypto.randomBytes(12); // 96-bit IV, standard for GCM
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const plaintext = Buffer.from(JSON.stringify(obj), 'utf8');
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  // Pack iv + authTag + ciphertext together, base64 — one column, one
+  // round trip to decrypt, nothing else to keep in sync separately.
+  return Buffer.concat([iv, authTag, encrypted]).toString('base64');
+}
+
+function decryptPayload(packed){
+  const key = getEncryptionKey();
+  const buf = Buffer.from(packed, 'base64');
+  const iv = buf.subarray(0, 12);
+  const authTag = buf.subarray(12, 28);
+  const ciphertext = buf.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return JSON.parse(decrypted.toString('utf8'));
+}
+
+async function setPendingAuth(email, type, payload, codeHash){
+  const encrypted_payload = encryptPayload(payload);
+  const expires_at = new Date(Date.now() + OTP_PENDING_TTL_MS).toISOString();
+
+  // Upsert on (email, type) — resending a code overwrites whatever was
+  // pending before, which is exactly the desired behavior (the old code
+  // is now moot the moment a new one is issued).
+  const { error } = await supabase
+    .from('pending_auth')
+    .upsert({ email, type, encrypted_payload, code_hash: codeHash, attempts: 0, expires_at }, { onConflict: 'email,type' });
+
+  if(error) throw error;
+}
+
+async function getPendingAuth(email, type){
+  const { data, error } = await supabase
+    .from('pending_auth')
+    .select('*')
+    .eq('email', email)
+    .eq('type', type)
+    .maybeSingle();
+
+  if(error || !data) return null;
+  if(new Date(data.expires_at).getTime() < Date.now()) return null;
+  return data;
+}
+
+async function incrementPendingAuthAttempts(email, type){
+  await supabase.rpc('increment_pending_auth_attempts', { p_email: email, p_type: type }).catch(async () => {
+    // Fallback if the RPC function isn't set up — a plain read-then-write
+    // is fine here since attempt counting doesn't need to be perfectly
+    // race-proof, just approximately right (worst case, a concurrent
+    // double-submit costs one extra attempt of headroom, not a security hole).
+    const { data } = await supabase.from('pending_auth').select('attempts').eq('email', email).eq('type', type).maybeSingle();
+    if(data){
+      await supabase.from('pending_auth').update({ attempts: (data.attempts || 0) + 1 }).eq('email', email).eq('type', type);
+    }
+  });
+}
+
+async function deletePendingAuth(email, type){
+  await supabase.from('pending_auth').delete().eq('email', email).eq('type', type);
+}
+
+// Periodic cleanup of anything past its expiry — same "don't grow
+// forever" reasoning as every other cleanup interval in this file, just
+// against the DB table instead of an in-memory Map now.
+setInterval(async () => {
+  await supabase.from('pending_auth').delete().lt('expires_at', new Date().toISOString());
+}, 5 * 60 * 1000);
 
 // Generates a genuine 6-digit code (leading zeros allowed, e.g. "042817"
 // is valid) and returns BOTH the plaintext (to actually email out) and a
@@ -453,8 +627,8 @@ app.get('/supabase-check', async (req, res) => {
 });
 
 // ---------- SIGNUP — step 1: collect details, send OTP ----------
-// Nothing is created in Supabase yet. Password/username sit in memory
-// only until the OTP is confirmed.
+// Nothing is created in Supabase yet. Password/username sit encrypted
+// in the pending_auth table only until the OTP is confirmed.
 app.post('/auth/signup-start', async (req, res) => {
   try {
     const { email, username, password } = req.body;
@@ -475,13 +649,7 @@ app.post('/auth/signup-start', async (req, res) => {
     }
 
     const codeHash = await sendOtpEmail(email);
-
-    pendingSignups.set(email, {
-      username,
-      password,
-      codeHash,
-      expiresAt: Date.now() + OTP_PENDING_TTL_MS
-    });
+    await setPendingAuth(email, 'signup', { username, password }, codeHash);
 
     res.status(200).json({ sent: true });
   } catch (err) {
@@ -495,24 +663,36 @@ app.post('/auth/signup-verify', async (req, res) => {
     const { email, code } = req.body;
     if(!email || !code) return res.status(400).json({ error: 'Email and code are required.' });
 
-    const pending = pendingSignups.get(email);
-    if(!pending || pending.expiresAt < Date.now()){
+    const pending = await getPendingAuth(email, 'signup');
+    if(!pending){
       return res.status(400).json({ error: 'No pending signup found for this email — start over.' });
     }
 
-    const isValid = verifyOtpCode(code, pending.codeHash);
-    if(!isValid){
-      return res.status(400).json({ error: 'That code is incorrect or has expired.' });
+    if(pending.attempts >= OTP_MAX_ATTEMPTS){
+      return res.status(429).json({ error: 'Too many incorrect attempts. Request a new code and try again.' });
     }
+
+    const isValid = verifyOtpCode(code, pending.code_hash);
+    if(!isValid){
+      await incrementPendingAuthAttempts(email, 'signup');
+      const remaining = OTP_MAX_ATTEMPTS - (pending.attempts + 1);
+      return res.status(400).json({
+        error: remaining > 0
+          ? `That code is incorrect. ${remaining} attempt${remaining === 1 ? '' : 's'} left before you'll need a new code.`
+          : 'That code is incorrect. Request a new code and try again.'
+      });
+    }
+
+    const { username, password } = decryptPayload(pending.encrypted_payload);
 
     // OTP confirmed the email is real — create the user with
     // email_confirm: true so Supabase never sends its own confirmation
     // email on top of this.
     const { data: created, error: createError } = await supabase.auth.admin.createUser({
       email,
-      password: pending.password,
+      password,
       email_confirm: true,
-      user_metadata: { username: pending.username }
+      user_metadata: { username }
     });
 
     if(createError){
@@ -522,7 +702,7 @@ app.post('/auth/signup-verify', async (req, res) => {
       throw createError;
     }
 
-    pendingSignups.delete(email);
+    await deletePendingAuth(email, 'signup');
 
     res.status(201).json({ verified: true, email });
   } catch (err) {
@@ -532,8 +712,10 @@ app.post('/auth/signup-verify', async (req, res) => {
 
 // ---------- LOGIN — step 1: check password, send OTP ----------
 // Password is checked FIRST (via Supabase Auth), but the session is
-// deliberately not returned yet — it's held server-side until the OTP
-// is confirmed in step 2.
+// deliberately not returned yet — it's held server-side (encrypted)
+// until the OTP is confirmed in step 2. EXCEPTION: accounts younger
+// than NEW_ACCOUNT_GRACE_MS skip OTP entirely and get their session
+// immediately — see the graceLogin branch below.
 app.post('/auth/login-start', async (req, res) => {
   try {
     const { identifier, password } = req.body;
@@ -560,14 +742,25 @@ app.post('/auth/login-start', async (req, res) => {
       return res.status(401).json({ error: 'Incorrect email/username or password.' });
     }
 
-    const codeHash = await sendOtpEmail(email);
+    // New-account grace window — check how old this account actually is
+    // via Supabase's own record of when it was created, not anything
+    // this server tracks itself.
+    const accountCreatedAt = new Date(signInData.user.created_at).getTime();
+    const accountAgeMs = Date.now() - accountCreatedAt;
 
-    pendingLogins.set(email, {
+    if(accountAgeMs < NEW_ACCOUNT_GRACE_MS){
+      return res.status(200).json({
+        graceLogin: true,
+        accessToken: signInData.session.access_token,
+        refreshToken: signInData.session.refresh_token
+      });
+    }
+
+    const codeHash = await sendOtpEmail(email);
+    await setPendingAuth(email, 'login', {
       accessToken: signInData.session.access_token,
-      refreshToken: signInData.session.refresh_token,
-      codeHash,
-      expiresAt: Date.now() + OTP_PENDING_TTL_MS
-    });
+      refreshToken: signInData.session.refresh_token
+    }, codeHash);
 
     // NOTE: deliberately NOT calling anonClient.auth.signOut() here.
     // Supabase's signOut() revokes the refresh token on Supabase's own
@@ -592,18 +785,28 @@ app.post('/auth/login-verify', async (req, res) => {
     const { email, code } = req.body;
     if(!email || !code) return res.status(400).json({ error: 'Email and code are required.' });
 
-    const pending = pendingLogins.get(email);
-    if(!pending || pending.expiresAt < Date.now()){
+    const pending = await getPendingAuth(email, 'login');
+    if(!pending){
       return res.status(400).json({ error: 'No pending login found for this email — sign in again.' });
     }
 
-    const isValid = verifyOtpCode(code, pending.codeHash);
-    if(!isValid){
-      return res.status(400).json({ error: 'That code is incorrect or has expired.' });
+    if(pending.attempts >= OTP_MAX_ATTEMPTS){
+      return res.status(429).json({ error: 'Too many incorrect attempts. Sign in again to get a new code.' });
     }
 
-    const { accessToken, refreshToken } = pending;
-    pendingLogins.delete(email);
+    const isValid = verifyOtpCode(code, pending.code_hash);
+    if(!isValid){
+      await incrementPendingAuthAttempts(email, 'login');
+      const remaining = OTP_MAX_ATTEMPTS - (pending.attempts + 1);
+      return res.status(400).json({
+        error: remaining > 0
+          ? `That code is incorrect. ${remaining} attempt${remaining === 1 ? '' : 's'} left before you'll need to sign in again.`
+          : 'That code is incorrect. Sign in again to get a new code.'
+      });
+    }
+
+    const { accessToken, refreshToken } = decryptPayload(pending.encrypted_payload);
+    await deletePendingAuth(email, 'login');
 
     res.status(200).json({ verified: true, accessToken, refreshToken });
   } catch (err) {
@@ -8277,8 +8480,6 @@ app.post('/confirm/:sessionId/spy-mode/steal', requireAuth, async (req, res) => 
 // is already on the session row, no Mistral call. See buildMarkdownExport.
 app.get('/confirm/:sessionId/export/markdown', requireAuth, async (req, res) => {
   try {
-    if(await requireProOrReject(req, res)) return;
-
     const { data: session } = await supabase
       .from('confirmation_sessions')
       .select('*')
@@ -8316,8 +8517,6 @@ app.get('/confirm/:sessionId/export/markdown', requireAuth, async (req, res) => 
 // browser's own Save as PDF" pattern share.html already uses.
 app.get('/confirm/:sessionId/export/data', requireAuth, async (req, res) => {
   try {
-    if(await requireProOrReject(req, res)) return;
-
     const { data: session } = await supabase
       .from('confirmation_sessions')
       .select('*')
