@@ -44,7 +44,7 @@ const ALLOWED_ORIGINS = [
 app.use(cors({
   origin: (origin, callback) => {
     // No origin header at all (curl, server-to-server, Postman, the
-    // Selar webhook) — allow it through; CORS only ever governs
+    // payment webhook) — allow it through; CORS only ever governs
     // browser-originated requests in the first place.
     if(!origin) return callback(null, true);
     if(ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
@@ -167,11 +167,11 @@ const GMAIL_OAUTH_REFRESH_TOKEN = process.env.GMAIL_OAUTH_REFRESH_TOKEN;
 //   5. In the left panel, find "Gmail API v1" -> select BOTH
 //      https://www.googleapis.com/auth/gmail.send AND
 //      https://www.googleapis.com/auth/gmail.readonly (the second one is
-//      required for checkForNewSelarPayments below, which reads this
-//      inbox for Selar sale notifications — send-only is no longer
+//      required for checkForNewPayments below, which reads this
+//      inbox for payment gateway sale notifications — send-only is no longer
 //      enough once this feature exists) -> Authorize APIs -> sign in
 //      with the SAME Gmail account this should send from AND that
-//      receives Selar's seller sale-notification emails -> Exchange
+//      receives your payment gateway's seller sale-notification emails -> Exchange
 //      authorization code for tokens.
 //   6. Copy the Refresh token shown there. If you already have a
 //      send-only refresh token from before this feature existed, you
@@ -1152,7 +1152,7 @@ app.delete('/profile', requireAuth, async (req, res) => {
 // toggle a client can call at will.
 // =====================================================================
 // TEST-ONLY toggle — kept for local development and manual support
-// overrides, but the actual Pro upgrade path is now the Selar webhook
+// overrides, but the actual Pro upgrade path is now the payment webhook/inbox check
 // below. Nothing in the frontend calls this route anymore as of the
 // Selar integration; it's just not deleted, since it's still genuinely
 // useful for testing without a real payment.
@@ -1178,14 +1178,13 @@ app.post('/profile/go-pro', requireAuth, async (req, res) => {
 // SELAR PAYMENT WEBHOOK — the real Pro upgrade path.
 //
 // IMPORTANT — read this before assuming this route is fully correct:
-// Selar does not publish a public API/webhook reference documenting
-// their exact JSON payload field names anywhere I could verify (only
-// third-party Zapier integration listings exist, which don't show the
-// raw payload shape). Rather than invent field names and risk this
-// silently failing to match real payloads, this route:
+// Neither Selar nor Coachli publishes a public API/webhook reference
+// documenting an exact JSON payload shape anywhere I could verify.
+// Rather than invent field names and risk this silently failing to
+// match real payloads, this route:
 //   1. Logs the ENTIRE raw payload on every single call, unconditionally
-//      — check Render's logs after your first real (or test) Selar sale
-//      and you'll see exactly what Selar actually sends.
+//      — check Render's logs after your first real (or test) sale and
+//      you'll see exactly what the gateway actually sends.
 //   2. Tries several plausible field-name variants for the buyer's email
 //      and the payment status, covering the naming conventions most
 //      payment platforms use, so it has the best real chance of working
@@ -1195,33 +1194,38 @@ app.post('/profile/go-pro', requireAuth, async (req, res) => {
 //      failing — that log output is exactly what to send back for a
 //      one-line fix to the field names below.
 //
-// Security: Selar's exact webhook-signing scheme also isn't publicly
+// This route is kept even though Coachli's webhook support (if any)
+// isn't confirmed either — if a webhook destination field ever does
+// turn up in Coachli's dashboard, this is ready for it with zero
+// changes needed. Until then, the actual reliable path is the inbox
+// check below, same as it ended up being for Selar.
+//
+// Security: neither gateway's exact webhook-signing scheme is publicly
 // documented, so this uses a URL-embedded shared secret instead (a
-// long random token as part of the URL path itself, configured in
-// Selar's dashboard as the webhook destination) — a standard, secure
-// pattern when a provider's signature scheme isn't confirmed. Anyone
-// who doesn't know the exact URL (including the secret) can't call this
-// route meaningfully.
+// long random token as part of the URL path itself) — a standard,
+// secure pattern when a provider's signature scheme isn't confirmed.
+// Anyone who doesn't know the exact URL (including the secret) can't
+// call this route meaningfully.
 // =====================================================================
-app.post('/webhooks/selar/:secret', async (req, res) => {
+app.post('/webhooks/payment/:secret', async (req, res) => {
   // Always log the full raw payload first, before anything else — this
   // is the single most useful line in this whole route for getting the
   // field-name matching below exactly right on the first real sale.
-  console.log('[ThinkMaps] Selar webhook received:', JSON.stringify(req.body));
+  console.log('[ThinkMaps] Payment webhook received:', JSON.stringify(req.body));
 
   // Acknowledge fast regardless of outcome — webhook senders generally
   // retry on non-2xx responses, and a slow/failing ack here shouldn't
-  // cause Selar to hammer this endpoint with retries for something that
-  // isn't actually a delivery problem on their end.
+  // cause the gateway to hammer this endpoint with retries for
+  // something that isn't actually a delivery problem on their end.
   res.status(200).json({ received: true });
 
   try {
     if(!process.env.SELAR_WEBHOOK_SECRET){
-      console.error('[ThinkMaps] Selar webhook called but SELAR_WEBHOOK_SECRET is not set in the environment — rejecting.');
+      console.error('[ThinkMaps] Payment webhook called but SELAR_WEBHOOK_SECRET is not set in the environment — rejecting.');
       return;
     }
     if(req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
-      console.error('[ThinkMaps] Selar webhook called with a wrong/missing secret — ignoring.');
+      console.error('[ThinkMaps] Payment webhook called with a wrong/missing secret — ignoring.');
       return;
     }
 
@@ -1250,12 +1254,12 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
     // far more likely explanation than a failed one for why it fired.
 
     if(!buyerEmail){
-      console.error('[ThinkMaps] Selar webhook: could not find a buyer email in the payload using any known field name. Raw payload logged above — check it and tell Claude the actual field name so this can be fixed in one line.');
+      console.error('[ThinkMaps] Payment webhook: could not find a buyer email in the payload using any known field name. Raw payload logged above — check it and tell Claude the actual field name so this can be fixed in one line.');
       return;
     }
 
     if(!looksSuccessful){
-      console.log(`[ThinkMaps] Selar webhook for ${buyerEmail}: status "${statusValue}" doesn't look like a completed payment — not upgrading.`);
+      console.log(`[ThinkMaps] Payment webhook for ${buyerEmail}: status "${statusValue}" doesn't look like a completed payment — not upgrading.`);
       return;
     }
 
@@ -1266,12 +1270,12 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
       .maybeSingle();
 
     if(lookupError || !profile){
-      console.error(`[ThinkMaps] Selar webhook: no ThinkMaps account found for email "${buyerEmail}" — payment received but could not be matched to an account. This person needs manual follow-up.`);
+      console.error(`[ThinkMaps] Payment webhook: no ThinkMaps account found for email "${buyerEmail}" — payment received but could not be matched to an account. This person needs manual follow-up.`);
       return;
     }
 
     if(profile.pro_status){
-      console.log(`[ThinkMaps] Selar webhook for ${buyerEmail}: already Pro — nothing to do.`);
+      console.log(`[ThinkMaps] Payment webhook for ${buyerEmail}: already Pro — nothing to do.`);
       return;
     }
 
@@ -1281,11 +1285,11 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
       .eq('id', profile.id);
 
     if(updateError){
-      console.error('[ThinkMaps] Selar webhook: found the account but failed to update pro_status:', updateError.message);
+      console.error('[ThinkMaps] Payment webhook: found the account but failed to update pro_status:', updateError.message);
       return;
     }
 
-    console.log(`[ThinkMaps] Selar webhook: upgraded ${buyerEmail} to Pro successfully.`);
+    console.log(`[ThinkMaps] Payment webhook: upgraded ${buyerEmail} to Pro successfully.`);
 
     // Best-effort confirmation email — a failure here shouldn't undo the
     // upgrade that already succeeded above.
@@ -1302,10 +1306,10 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
         html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
       });
     } catch (emailErr) {
-      console.error('[ThinkMaps] Selar webhook: upgrade succeeded but confirmation email failed:', emailErr.message);
+      console.error('[ThinkMaps] Payment webhook: upgrade succeeded but confirmation email failed:', emailErr.message);
     }
   } catch (err) {
-    console.error('[ThinkMaps] Selar webhook: unexpected error:', err.message);
+    console.error('[ThinkMaps] Payment webhook: unexpected error:', err.message);
   }
 });
 
@@ -1320,11 +1324,11 @@ app.post('/webhooks/selar/:secret', async (req, res) => {
 // fight. Requires the gmail.readonly scope added to the OAuth setup
 // above.
 //
-// IMPORTANT — this only works if Selar's SELLER sale-notification
+// IMPORTANT — this only works if the payment gateway's SELLER sale-notification
 // emails (not the buyer's own receipt, a separate email sent to the
-// BUYER) land in the SAME inbox GMAIL_USER points to. If your Selar
+// BUYER) land in the SAME inbox GMAIL_USER points to. If your gateway's
 // seller account's contact/notification email isn't already
-// GMAIL_USER's address, either change it in Selar's account settings,
+// GMAIL_USER's address, either change it in the gateway's account settings,
 // or set up a Gmail forwarding filter from wherever it currently goes
 // to this inbox.
 // =====================================================================
@@ -1348,7 +1352,7 @@ async function markPaymentEmailProcessed(messageId){
 
 // Gmail's API returns message bodies as base64url — this walks the
 // (possibly multipart) payload structure to find and decode the
-// text/plain or text/html part, whichever is present, since Selar's
+// text/plain or text/html part, whichever is present, since neither gateway's
 // exact email structure isn't something I could verify in advance any
 // more than their webhook payload was.
 function extractGmailMessageText(payload){
@@ -1390,19 +1394,23 @@ function extractBuyerEmailFromText(text){
   return anyEmailMatch ? anyEmailMatch[0] : null;
 }
 
-async function checkForNewSelarPayments(){
+async function checkForNewPayments(){
   if(!GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
     return; // Gmail isn't configured at all — nothing to check
   }
 
   try {
-    // Broad search on purpose — "selar" anywhere in the sender or
-    // subject, last 2 days (generous overlap window, since
+    // Broad search on purpose — "coachli" or "selar" anywhere in the
+    // sender or subject, last 2 days (generous overlap window, since
     // isPaymentEmailProcessed already guarantees no email is ever
     // double-processed regardless of how many times it's re-seen here).
+    // Selar stays in the query harmlessly in case anything from the old
+    // gateway is still mid-transit during the switch — it costs nothing
+    // to keep matching it, and can be dropped later once that's certain
+    // to be moot.
     const listRes = await gmailApi.users.messages.list({
       userId: 'me',
-      q: 'selar newer_than:2d',
+      q: '(coachli OR selar) newer_than:2d',
       maxResults: 20
     });
 
@@ -1423,12 +1431,12 @@ async function checkForNewSelarPayments(){
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
       const bodyText = extractGmailMessageText(fullMessage.data.payload) || fullMessage.data.snippet || '';
 
-      console.log(`[ThinkMaps] Selar inbox check: examining message "${subject}"`);
+      console.log(`[ThinkMaps] Payment inbox check: examining message "${subject}"`);
 
       const buyerEmail = extractBuyerEmailFromText(bodyText);
 
       if(!buyerEmail){
-        console.error(`[ThinkMaps] Selar inbox check: could not find any email address in message "${subject}" — skipping. Marking as processed either way to avoid re-checking it forever.`);
+        console.error(`[ThinkMaps] Payment inbox check: could not find any email address in message "${subject}" — skipping. Marking as processed either way to avoid re-checking it forever.`);
         await markPaymentEmailProcessed(msgRef.id);
         continue;
       }
@@ -1440,13 +1448,13 @@ async function checkForNewSelarPayments(){
         .maybeSingle();
 
       if(!profile){
-        console.log(`[ThinkMaps] Selar inbox check: found email "${buyerEmail}" in message "${subject}" but no matching ThinkMaps account — likely someone else's Selar email in this inbox, or an unrelated message. Skipping.`);
+        console.log(`[ThinkMaps] Payment inbox check: found email "${buyerEmail}" in message "${subject}" but no matching ThinkMaps account — likely someone else's payment email in this inbox, or an unrelated message. Skipping.`);
         await markPaymentEmailProcessed(msgRef.id);
         continue;
       }
 
       if(profile.pro_status){
-        console.log(`[ThinkMaps] Selar inbox check: ${buyerEmail} is already Pro — nothing to do.`);
+        console.log(`[ThinkMaps] Payment inbox check: ${buyerEmail} is already Pro — nothing to do.`);
         await markPaymentEmailProcessed(msgRef.id);
         continue;
       }
@@ -1457,11 +1465,11 @@ async function checkForNewSelarPayments(){
         .eq('id', profile.id);
 
       if(updateError){
-        console.error(`[ThinkMaps] Selar inbox check: found account for ${buyerEmail} but failed to update pro_status:`, updateError.message);
+        console.error(`[ThinkMaps] Payment inbox check: found account for ${buyerEmail} but failed to update pro_status:`, updateError.message);
         continue; // don't mark processed — worth retrying next poll
       }
 
-      console.log(`[ThinkMaps] Selar inbox check: upgraded ${buyerEmail} to Pro from message "${subject}".`);
+      console.log(`[ThinkMaps] Payment inbox check: upgraded ${buyerEmail} to Pro from message "${subject}".`);
       await markPaymentEmailProcessed(msgRef.id);
 
       try {
@@ -1477,11 +1485,11 @@ async function checkForNewSelarPayments(){
           html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
         });
       } catch (emailErr) {
-        console.error('[ThinkMaps] Selar inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
+        console.error('[ThinkMaps] Payment inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
       }
     }
   } catch (err) {
-    console.error('[ThinkMaps] Selar inbox check: failed:', err.message);
+    console.error('[ThinkMaps] Payment inbox check: failed:', err.message);
   }
 }
 
@@ -1490,19 +1498,19 @@ async function checkForNewSelarPayments(){
 // first), so a payment made while the server was between deploys or a
 // free-tier cold-start gets caught quickly instead of waiting a full
 // 5 minutes.
-setTimeout(checkForNewSelarPayments, 30 * 1000);
-setInterval(checkForNewSelarPayments, 5 * 60 * 1000);
+setTimeout(checkForNewPayments, 30 * 1000);
+setInterval(checkForNewPayments, 5 * 60 * 1000);
 
 // Manual trigger — same secret-in-URL pattern as the webhook route
 // above, since this is also unauthenticated (no ThinkMaps user session
 // makes sense for "check my email for payments"). Useful for testing
 // right after a real purchase instead of waiting up to 5 minutes for
 // the next automatic poll.
-app.post('/admin/check-selar-payments/:secret', async (req, res) => {
+app.post('/admin/check-new-payments/:secret', async (req, res) => {
   if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
     return res.status(403).json({ error: 'Invalid secret.' });
   }
-  await checkForNewSelarPayments();
+  await checkForNewPayments();
   res.status(200).json({ checked: true });
 });
 
