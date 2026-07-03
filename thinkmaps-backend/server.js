@@ -10,6 +10,15 @@ const { NICHE_PATHWAYS } = require('./niche_pathways');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render sits behind a reverse proxy — without this, req.ip (and every
+// rate limiter keyed on it below) sees Render's internal proxy address
+// for every single request rather than the real visitor's IP, which
+// would silently bundle every user under one shared rate-limit identity
+// instead of limiting each person individually. `1` trusts exactly one
+// hop of proxy (Render's own), not an arbitrary chain, which is the
+// correct setting for this hosting setup specifically.
+app.set('trust proxy', 1);
+
 // Security headers — CSP is intentionally loose on script-src/style-src
 // since this API serves no HTML pages of its own (the actual frontend
 // is static files on GitHub Pages, entirely separate from this server),
@@ -43,7 +52,12 @@ app.use(cors({
   }
 }));
 
-app.use(express.json());
+// Explicit size cap — the largest legitimate payload this API ever
+// receives is a full blueprint snapshot restore, which is still well
+// under 1mb even for a deep, heavily-branched graph. Capping here means
+// an oversized payload gets rejected immediately by Express itself,
+// before it ever reaches a route handler or ties up memory processing it.
+app.use(express.json({ limit: '2mb' }));
 
 // General rate limit — applies to every route, generous enough that no
 // real usage pattern hits it, but stops a script from hammering the API.
@@ -74,6 +88,26 @@ const authLimiter = rateLimit({
   message: { error: 'Too many attempts. Please wait a few minutes and try again.' }
 });
 app.use('/auth/', authLimiter);
+
+// Every canvas activation and every toolkit feature (build brief,
+// deeper analysis, pivots, personas, strength score, red team, spy
+// mode, launch checklist, landing copy) calls Mistral — real API cost
+// per request, not free. Without a limit here, a compromised account or
+// a scripted abuse attempt could run up a large bill fast. /options/
+// and /confirm/ together cover essentially every Mistral-calling route
+// in this file, so this single rule protects nearly all of them at
+// once rather than needing a bespoke limiter bolted onto each handler
+// individually. Generous enough that no real usage pattern — even an
+// enthusiastic user rapidly exploring a blueprint — hits it.
+const generationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests in a short time. Please wait a few minutes and try again.' }
+});
+app.use('/options/', generationLimiter);
+app.use('/confirm/', generationLimiter);
 
 // Supabase client — service role key, so this bypasses RLS entirely.
 // Every privileged read/write for ThinkMaps goes through this one client.
@@ -636,20 +670,50 @@ app.post('/auth/signup-start', async (req, res) => {
       return res.status(400).json({ error: 'Email, username, and password are all required.' });
     }
 
-    // Reject early if the email or username is already taken —
-    // avoids sending an OTP for a signup that can never complete.
-    const { data: existing } = await supabase
+    // Same validation rules as the settings username-change route —
+    // signup previously had NONE of this, which meant an arbitrary,
+    // unvalidated string was being interpolated directly into a
+    // Supabase .or() filter query string below (a real filter-injection
+    // risk via PostgREST's own filter syntax — commas and dots in a
+    // malicious username could manipulate the filter itself, not
+    // classic SQL injection but the same category of problem).
+    const trimmedUsername = username.trim();
+    if(trimmedUsername.length < 3 || trimmedUsername.length > 30){
+      return res.status(400).json({ error: 'Username must be between 3 and 30 characters.' });
+    }
+    if(!/^[a-zA-Z0-9_]+$/.test(trimmedUsername)){
+      return res.status(400).json({ error: 'Username can only contain letters, numbers, and underscores.' });
+    }
+    if(password.length < 8){
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    const basicEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if(!basicEmailPattern.test(email)){
+      return res.status(400).json({ error: 'Enter a valid email address.' });
+    }
+
+    // Two separate, safely-parameterized queries instead of one
+    // string-interpolated .or() filter — closes the injection surface
+    // entirely rather than just relying on the validation above to
+    // catch every possible malicious input.
+    const { data: existingByEmail } = await supabase
       .from('profiles')
       .select('id')
-      .or(`email.eq.${email},username.eq.${username}`)
+      .eq('email', email)
       .maybeSingle();
 
-    if(existing){
+    const { data: existingByUsername } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('username', trimmedUsername)
+      .maybeSingle();
+
+    if(existingByEmail || existingByUsername){
       return res.status(400).json({ error: 'That email or username is already taken.' });
     }
 
     const codeHash = await sendOtpEmail(email);
-    await setPendingAuth(email, 'signup', { username, password }, codeHash);
+    await setPendingAuth(email, 'signup', { username: trimmedUsername, password }, codeHash);
 
     res.status(200).json({ sent: true });
   } catch (err) {
@@ -850,7 +914,7 @@ app.get('/dashboard', requireAuth, async (req, res) => {
 
     const { data: blueprints, error: blueprintsError } = await supabase
       .from('blueprints')
-      .select('id, title, created_at, updated_at')
+      .select('id, title, created_at, updated_at, created_as_pro')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
@@ -859,22 +923,43 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     const now = Date.now();
 
     const enrichedBlueprints = blueprints.map(bp => {
+      // A currently-Pro user is never locked out of anything, full
+      // stop — regardless of which tier a given blueprint was
+      // originally created on. This is also the actual fix for the bug
+      // where Pro users kept seeing "X minutes left to edit on free
+      // tier": minutesRemaining/daysUntilDeletion were previously being
+      // computed and sent unconditionally, only ever zeroed (not
+      // nulled) when locked — for a Pro user isLocked was always false,
+      // so the real countdown number went out regardless, and the
+      // frontend's own "show the free-tier label if minutesRemaining
+      // isn't null" check had no way to know it should suppress it.
+      if(profile.pro_status){
+        return { ...bp, isLocked: false, lockReason: null, minutesRemaining: null, daysUntilDeletion: null };
+      }
+
+      // Not pro right now. A blueprint created WHILE this user had Pro
+      // locks outright, independent of the free-tier timer — it was
+      // never on that timer to begin with, so downgrading doesn't put
+      // it on one either. Only blueprints actually created on the free
+      // tier are governed by FREE_TIER_LOCK_MS/FREE_TIER_DELETE_MS.
+      if(bp.created_as_pro){
+        return { ...bp, isLocked: true, lockReason: 'pro_required', minutesRemaining: null, daysUntilDeletion: null };
+      }
+
       const ageMs = now - new Date(bp.created_at).getTime();
-      const isLocked = !profile.pro_status && ageMs > FREE_TIER_LOCK_MS;
+      const isLocked = ageMs > FREE_TIER_LOCK_MS;
       // Minutes, not hours — at a 30-minute window, "hours remaining"
       // would round to a misleading 0 or 1 for nearly this entire
       // window, which is exactly the kind of unit choice that LOOKS
       // fine until the actual numbers involved make it useless.
-      const minutesRemaining = Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 1000)));
+      const minutesRemaining = isLocked ? null : Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 1000)));
       // Separately: how long until this blueprint is permanently
       // deleted, regardless of whether it's already locked — locking and
       // deleting are different moments on the free tier (see
       // FREE_TIER_DELETE_MS above), so this is its own field, not
       // derived from isLocked/minutesRemaining.
-      const daysUntilDeletion = profile.pro_status
-        ? null
-        : Math.max(0, Math.ceil((FREE_TIER_DELETE_MS - ageMs) / (24 * 60 * 60 * 1000)));
-      return { ...bp, isLocked, minutesRemaining: isLocked ? 0 : minutesRemaining, daysUntilDeletion };
+      const daysUntilDeletion = Math.max(0, Math.ceil((FREE_TIER_DELETE_MS - ageMs) / (24 * 60 * 60 * 1000)));
+      return { ...bp, isLocked, lockReason: isLocked ? 'free_tier_expired' : null, minutesRemaining, daysUntilDeletion };
     });
 
     res.status(200).json({
@@ -1534,11 +1619,11 @@ app.post('/blueprints', requireAuth, async (req, res) => {
       }
     }
 
-    const title = (req.body && req.body.title) || 'Untitled Blueprint';
+    const title = ((req.body && req.body.title) || 'Untitled Blueprint').toString().trim().slice(0, 80) || 'Untitled Blueprint';
 
     const { data: newBlueprint, error: insertError } = await supabase
       .from('blueprints')
-      .insert({ user_id: userId, title })
+      .insert({ user_id: userId, title, created_as_pro: profile.pro_status })
       .select()
       .single();
 
@@ -1566,7 +1651,7 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
 
     const { data: updated, error } = await supabase
       .from('blueprints')
-      .update({ title: title.trim() })
+      .update({ title: title.trim().slice(0, 80) })
       .eq('id', req.params.id)
       .select()
       .single();
@@ -1576,6 +1661,33 @@ app.patch('/blueprints/:id', requireAuth, async (req, res) => {
     res.status(200).json({ blueprint: updated });
   } catch (err) {
     res.status(500).json({ error: 'Could not rename blueprint.', detail: err.message });
+  }
+});
+
+// Pro-only — free-tier blueprints already self-delete on their own
+// timer (see cleanupExpiredFreeBlueprints), so a manual delete for that
+// tier would just be redundant. Relies on the same ON DELETE CASCADE
+// from blueprints downward that cleanupExpiredFreeBlueprints and the
+// snapshot-restore wipe both already depend on — deleting the blueprint
+// row here is enough, its groups/group_versions/options/confirmation_
+// sessions/blueprint_snapshots all cascade with it.
+app.delete('/blueprints/:id', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    const { error } = await supabase
+      .from('blueprints')
+      .delete()
+      .eq('id', req.params.id);
+
+    if(error) throw error;
+
+    res.status(200).json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not delete this blueprint.', detail: err.message });
   }
 });
 
@@ -1605,7 +1717,8 @@ const MISTRAL_API_KEYS = [
   process.env.MISTRAL_API_KEY_9,
   process.env.MISTRAL_API_KEY_10,
   process.env.MISTRAL_API_KEY_11,
-  process.env.MISTRAL_API_KEY_12
+  process.env.MISTRAL_API_KEY_12,
+  process.env.MISTRAL_API_KEY_13
 ].filter(Boolean);
 
 function getMistralApiKey(){
@@ -2633,7 +2746,7 @@ async function getBlueprintIdForGroup(groupId){
 async function getOwnedBlueprint(blueprintId, userId){
   const { data: blueprint, error } = await supabase
     .from('blueprints')
-    .select('id, user_id, title, created_at, pivot_context')
+    .select('id, user_id, title, created_at, pivot_context, created_as_pro')
     .eq('id', blueprintId)
     .single();
 
@@ -2667,10 +2780,28 @@ async function requireProOrReject(req, res){
   return false;
 }
 
-async function checkIsLocked(userId, blueprintCreatedAt){
+// Two independent reasons a blueprint can be locked now, not one:
+//   1. It was created on the free tier and has aged past the free-tier
+//      edit window (the original rule).
+//   2. It was created WHILE the user had Pro (createdAsPro), and the
+//      user is no longer Pro right now — Pro blueprints were never
+//      governed by the free-tier timer at all, so downgrading doesn't
+//      put them on that timer either; they just lock outright until
+//      Pro comes back. This is what makes "created in Pro" a real,
+//      meaningful distinction rather than a label with no effect.
+// A currently-Pro user is never locked out of anything, full stop,
+// regardless of which tier a given blueprint was originally created on.
+async function checkIsLocked(userId, blueprint){
   const pro = await isUserPro(userId);
-  const ageMs = Date.now() - new Date(blueprintCreatedAt).getTime();
-  return !pro && ageMs > FREE_TIER_LOCK_MS;
+  if(pro) return { isLocked: false, lockReason: null };
+
+  if(blueprint.created_as_pro){
+    return { isLocked: true, lockReason: 'pro_required' };
+  }
+
+  const ageMs = Date.now() - new Date(blueprint.created_at).getTime();
+  const isLocked = ageMs > FREE_TIER_LOCK_MS;
+  return { isLocked, lockReason: isLocked ? 'free_tier_expired' : null };
 }
 
 // Permanently deletes any of THIS user's free-tier blueprints older than
@@ -2737,8 +2868,14 @@ async function verifyOptionOwnershipAndLock(optionId, userId){
   const blueprint = await getOwnedBlueprint(group.blueprint_id, userId);
   if(!blueprint) return { error: 'Not your blueprint.', status: 403 };
 
-  if(await checkIsLocked(userId, blueprint.created_at)){
-    return { error: 'This blueprint is read-only on the free tier.', status: 403 };
+  const { isLocked, lockReason } = await checkIsLocked(userId, blueprint);
+  if(isLocked){
+    return {
+      error: lockReason === 'pro_required'
+        ? 'This blueprint was created on Pro and is read-only until you upgrade again.'
+        : 'This blueprint is read-only on the free tier.',
+      status: 403
+    };
   }
 
   // blueprintId returned so callers can use it without re-fetching the same
@@ -2754,8 +2891,16 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
   const blueprint = await getOwnedBlueprint(group.blueprint_id, userId);
   if(!blueprint) return { error: 'Not your blueprint.', status: 403 };
 
-  if(!allowWhenLocked && await checkIsLocked(userId, blueprint.created_at)){
-    return { error: 'This blueprint is read-only on the free tier.', status: 403 };
+  if(!allowWhenLocked){
+    const { isLocked, lockReason } = await checkIsLocked(userId, blueprint);
+    if(isLocked){
+      return {
+        error: lockReason === 'pro_required'
+          ? 'This blueprint was created on Pro and is read-only until you upgrade again.'
+          : 'This blueprint is read-only on the free tier.',
+        status: 403
+      };
+    }
   }
 
   return { ok: true, group, blueprint };
@@ -3131,7 +3276,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
     if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
 
-    const isLocked = await checkIsLocked(req.user.id, blueprint.created_at);
+    const { isLocked, lockReason } = await checkIsLocked(req.user.id, blueprint);
     // Fetched once here so the frontend can gate pro-only canvas
     // features (currently: ctrl+click multi-select combining) without a
     // separate round trip — checkIsLocked above already does its own
@@ -3186,7 +3331,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
       : { data: [] };
 
     res.status(200).json({
-      blueprint: { id: blueprint.id, title: blueprint.title, isLocked, isPro },
+      blueprint: { id: blueprint.id, title: blueprint.title, isLocked, lockReason, isPro },
       groups,
       groupVersions: groupVersions || [],
       options: allOptions || []
@@ -7876,27 +8021,70 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
       return res.status(200).json({ deeperAnalysis: session.deeper_analysis });
     }
 
-    // marketIntel and syntheticPanel are genuinely independent of each
-    // other — neither's input depends on the other's output, both only
-    // ever take session.result/path_summary. Running them sequentially
-    // was paying for the SUM of both calls' latency for no real reason;
-    // Promise.all here means this step only ever takes as long as the
-    // slower of the two, not both added together. riskPlan still runs
-    // after, since it genuinely depends on what both of these found —
-    // that dependency is real and can't be removed the same way.
-    const [marketIntel, syntheticPanel] = await Promise.all([
-      gatherDeeperMarketIntel(session.result),
-      generateSyntheticPanel(session.result, session.path_summary)
-    ]);
-    const riskPlan = await generateRiskPrioritizedPlan(session.result, marketIntel, syntheticPanel);
+    // This is genuinely the slow path: 2 parallel Mistral calls (each
+    // also running up to 3 web searches internally) followed by a 3rd
+    // sequential Mistral call — 20-40+ seconds total, the same order of
+    // magnitude as the confirmation Q4 pipeline that specifically
+    // needed SSE+heartbeat to survive Render's ~30-second HTTP request
+    // timeout. This route was plain JSON before, which is almost
+    // certainly the real cause of "sometimes it just errors" — a
+    // regular POST has no way to stay alive past that timeout the way
+    // an SSE connection with periodic heartbeats does.
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
 
-    const deeperAnalysis = { marketIntel, syntheticPanel, riskPlan };
+    function sendProgress(message){
+      if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'progress', message })}\n\n`);
+    }
+    function sendDone(payload){
+      if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'done', ...payload })}\n\n`);
+    }
+    function sendError(error){
+      if(!res.writableEnded) res.write(`data: ${JSON.stringify({ type: 'error', error })}\n\n`);
+    }
 
-    await supabase.from('confirmation_sessions').update({ deeper_analysis: deeperAnalysis }).eq('id', session.id);
+    const heartbeat = setInterval(() => {
+      if(!res.writableEnded) res.write(': heartbeat\n\n');
+    }, 10000);
 
-    res.status(200).json({ deeperAnalysis });
+    try {
+      sendProgress('Researching competitor pricing and real chatter about the problem…');
+      // marketIntel and syntheticPanel are genuinely independent of each
+      // other — neither's input depends on the other's output, both only
+      // ever take session.result/path_summary. Promise.all here means
+      // this step only ever takes as long as the slower of the two, not
+      // both added together.
+      const [marketIntel, syntheticPanel] = await Promise.all([
+        gatherDeeperMarketIntel(session.result),
+        generateSyntheticPanel(session.result, session.path_summary)
+      ]);
+
+      sendProgress('Running a simulated reaction panel and prioritizing risks…');
+      const riskPlan = await generateRiskPrioritizedPlan(session.result, marketIntel, syntheticPanel);
+
+      const deeperAnalysis = { marketIntel, syntheticPanel, riskPlan };
+
+      await supabase.from('confirmation_sessions').update({ deeper_analysis: deeperAnalysis }).eq('id', session.id);
+
+      sendDone({ deeperAnalysis });
+      res.end();
+    } catch (pipelineErr) {
+      sendError('Could not run deeper analysis. ' + pipelineErr.message);
+      res.end();
+    } finally {
+      clearInterval(heartbeat);
+    }
   } catch (err) {
-    res.status(500).json({ error: 'Could not run deeper analysis.', detail: err.message });
+    // Only reachable if something fails BEFORE the SSE headers are sent
+    // (session lookup, ownership check, etc.) — once flushHeaders() has
+    // run, a plain JSON error response here would be invalid on top of
+    // an already-started event stream.
+    if(!res.headersSent){
+      res.status(500).json({ error: 'Could not run deeper analysis.', detail: err.message });
+    }
   }
 });
 
@@ -8091,6 +8279,7 @@ app.post('/blueprints/:id/pivot-into', requireAuth, async (req, res) => {
       .insert({
         user_id: req.user.id,
         title: pivot.renamedConcept.name || `${sourceBlueprint.title} (pivot)`,
+        created_as_pro: true,
         pivot_context: {
           fromBlueprintId: sourceBlueprint.id,
           pivotType: pivot.type,
