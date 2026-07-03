@@ -1718,7 +1718,8 @@ const MISTRAL_API_KEYS = [
   process.env.MISTRAL_API_KEY_10,
   process.env.MISTRAL_API_KEY_11,
   process.env.MISTRAL_API_KEY_12,
-  process.env.MISTRAL_API_KEY_13
+  process.env.MISTRAL_API_KEY_13,
+  process.env.MISTRAL_API_KEY_14
 ].filter(Boolean);
 
 function getMistralApiKey(){
@@ -3074,11 +3075,11 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
     if(!ideaCheckpointAlreadyShown && remainingBeforeCheckpoint.length === 0){
       generated = await generateIdeaSynthesisCheckpoint(pathContext, existingLabels, onToken);
     } else if(!ideaCheckpointAlreadyShown){
-      const batchSize = Math.min(3, remainingBeforeCheckpoint.length);
+      const batchSize = Math.min(isPro ? 5 : 3, remainingBeforeCheckpoint.length);
       const assignedBlocks = remainingBeforeCheckpoint.slice(0, batchSize);
       generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken, isPro);
     } else {
-      const assignedBlocks = pickNextBlocks(usedBlocks, 3);
+      const assignedBlocks = pickNextBlocks(usedBlocks, isPro ? 5 : 3);
       generated = await generateCandidateBatch(pathContext, assignedBlocks, existingLabels, onToken, isPro);
     }
   }
@@ -3673,6 +3674,8 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
+    const isPro = await isUserPro(req.user.id);
+
     const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id, block_name').eq('id', req.params.id).single();
     const isRoot = !groupRow?.spawned_from_option_id;
     const pathContext = groupRow?.spawned_from_option_id
@@ -3700,6 +3703,17 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
       .limit(1);
 
     const nextVersionNumber = (existingVersions?.[0]?.version_number || 0) + 1;
+
+    // version 1 is the original — free tier gets 3 retries on top of
+    // that (versions 2, 3, 4), so version 5 (a 4th retry) is where the
+    // free-tier cap kicks in. Pro is unlimited, same as it's always been.
+    const FREE_TIER_MAX_RETRIES = 3;
+    if(!isPro && nextVersionNumber > FREE_TIER_MAX_RETRIES + 1){
+      return res.status(403).json({
+        error: `Free tier allows up to ${FREE_TIER_MAX_RETRIES} retries per group. Upgrade to Pro for unlimited retries.`,
+        requiresPro: true
+      });
+    }
 
     const { data: newVersion, error: versionError } = await supabase
       .from('group_versions')
@@ -3839,6 +3853,9 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
+    const isPro = await isUserPro(req.user.id);
+    const FREE_TIER_MAX_RETRIES = 3;
+
     const { data: spawnedGroups } = await supabase
       .from('groups')
       .select('id, block_name')
@@ -3853,19 +3870,13 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
     const existingLabels = await getAllExistingOptionLabelsInNiche(nicheOptionId);
 
     const retried = [];
+    let skippedForRetryLimit = 0;
 
     for(const group of spawnedGroups){
       // Custom-idea groups (blank text-box slates) never had AI content
       // to regenerate — retrying one wouldn't mean anything, so it's
       // skipped rather than overwriting whatever the person typed in.
       if(group.block_name === CUSTOM_IDEA_BLOCK_NAME) continue;
-
-      const generated = await generateGroupOptions(pathContext, {
-        isRetry: true,
-        isRoot: false,
-        blockName: group.block_name || null,
-        existingLabels
-      });
 
       const { data: existingVersions } = await supabase
         .from('group_versions')
@@ -3875,6 +3886,23 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
         .limit(1);
 
       const nextVersionNumber = (existingVersions?.[0]?.version_number || 0) + 1;
+
+      // Same cap as the single-group retry route — version 1 is the
+      // original, free tier gets 3 retries on top of that. Skipped
+      // rather than failing the whole batch, same reasoning as the
+      // custom-idea skip right above: one maxed-out sibling shouldn't
+      // block retrying the others that still have room.
+      if(!isPro && nextVersionNumber > FREE_TIER_MAX_RETRIES + 1){
+        skippedForRetryLimit++;
+        continue;
+      }
+
+      const generated = await generateGroupOptions(pathContext, {
+        isRetry: true,
+        isRoot: false,
+        blockName: group.block_name || null,
+        existingLabels
+      });
 
       const { data: newVersion, error: versionError } = await supabase
         .from('group_versions')
@@ -3902,7 +3930,7 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
       retried.push({ groupId: group.id, versionNumber: nextVersionNumber, options: insertedOptions });
     }
 
-    res.status(200).json({ retried });
+    res.status(200).json({ retried, skippedForRetryLimit });
   } catch (err) {
     res.status(500).json({ error: 'Could not retry the spawned groups.', detail: err.message });
   }
@@ -6678,23 +6706,34 @@ async function synthesizeBasicIdea(nicheLabel, answers){
 // research, not 45 generic intake questions.
 // ============================================================
 
-const CONFIRMATION_QUESTION_COUNT = 4;
+const CONFIRMATION_QUESTION_COUNT_FREE = 4;
+const CONFIRMATION_QUESTION_COUNT_PRO = 10;
 
-// Each of these 4 confirmation questions has a distinct, deliberate job —
-// not "ask 4 more things about the person," but pressure-test the
+// Each of these confirmation questions has a distinct, deliberate job —
+// not "ask N more things about the person," but pressure-test the
 // load-bearing parts of the idea that just got synthesized from their
-// path: the problem itself, the solution approach, who it's for, and
-// what makes it genuinely different. No monetization question — the
-// idea draft (shown to the person above every question, see
-// renderIdeaDraftContext in script.js) still proposes a monetization
-// approach as part of the idea itself, the model doing that work same as
-// everywhere else, but the person is never asked to pick or confirm a
-// monetization model via a dedicated question.
+// path. The first 4 (problem, solution approach, audience,
+// differentiation) are what every session gets on the free tier. Pro
+// sessions continue through all 10 — distribution, timing, technical
+// feasibility given the founder's own constraints, retention, and
+// failure-mode awareness — genuinely different angles, not padding.
+// No monetization question anywhere in this list — the idea draft
+// (shown to the person above every question, see renderIdeaDraftContext
+// in script.js) still proposes a monetization approach as part of the
+// idea itself, the model doing that work same as everywhere else, but
+// the person is never asked to pick or confirm a monetization model via
+// a dedicated question.
 const CONFIRMATION_INTENTS = [
   'Confirm whether the core problem this idea is built around is genuinely the right one to solve — or surface a sharper, more specific version of it worth considering instead.',
   'Confirm whether the proposed core feature or solution approach is actually the strongest way to solve that problem — or surface a stronger alternative angle.',
   'Confirm whether the target audience genuinely fits this idea — or surface a different, better-fitting group of people this should actually be built for instead.',
-  'Confirm whether what supposedly makes this idea different from what already exists is actually sharp and defensible — or surface a stronger, more specific point of differentiation.'
+  'Confirm whether what supposedly makes this idea different from what already exists is actually sharp and defensible — or surface a stronger, more specific point of differentiation.',
+  'Confirm how this idea would actually reach its first real users — pressure-test whether the assumed distribution channel is realistic, or surface a channel that genuinely fits this specific audience better.',
+  'Confirm whether now is actually the right time for this idea — surface whether it depends on a trend, technology, or shift that is genuinely happening now, or whether it would have made just as much sense five years ago (a sign the "why now" is weak).',
+  'Confirm whether the core mechanic is realistically buildable given what a solo or small-team founder could actually build first — surface whether the true starting scope should be narrower than what has been described so far.',
+  'Confirm what would actually make someone come back and use this a second and third time, not just try it once — surface the real habit or trigger that would drive that, or admit if one genuinely does not exist yet.',
+  'Confirm the single most likely way this specific idea fails — not a generic startup risk, but the failure mode most specific to this exact concept — and surface whether that risk is one worth designing around from day one.',
+  'Confirm whether anything about this idea has shifted after everything confirmed so far — give one last honest "this all still sounds right" option alongside any real adjustment worth making now that the fuller picture is in view.'
 ];
 
 // Synthesizes a working idea draft from a FULL 7-node canvas path — far
@@ -7731,7 +7770,7 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
       return res.status(200).json({
         sessionId: existingSession.id,
         status: 'completed',
-        progress: { current: existingSession.answers.length, total: CONFIRMATION_QUESTION_COUNT },
+        progress: { current: existingSession.answers.length, total: existingSession.total_questions || CONFIRMATION_QUESTION_COUNT_FREE },
         result: existingSession.result,
         deeperAnalysis: existingSession.deeper_analysis || null,
         rewrittenIdea: existingSession.rewritten_idea || null,
@@ -7753,7 +7792,7 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
       return res.status(200).json({
         sessionId: existingSession.id,
         status: 'in_progress',
-        progress: { current: existingSession.answers.length + 1, total: CONFIRMATION_QUESTION_COUNT },
+        progress: { current: existingSession.answers.length + 1, total: existingSession.total_questions || CONFIRMATION_QUESTION_COUNT_FREE },
         question: existingSession.pending_question,
         ideaDraft: existingSession.idea_draft || null
       });
@@ -7772,6 +7811,13 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
 
     const pathSummary = pathContext.map(p => `${p.groupLabel}: ${p.optionLabel}`).join(' → ');
 
+    // Fixed at creation time, not re-derived on every later request —
+    // a session shouldn't change length mid-flight just because the
+    // person's Pro status happens to change while they're partway
+    // through answering it.
+    const isPro = await isUserPro(req.user.id);
+    const totalQuestions = isPro ? CONFIRMATION_QUESTION_COUNT_PRO : CONFIRMATION_QUESTION_COUNT_FREE;
+
     const ideaDraft = await synthesizeIdeaDraftFromPath(pathSummary);
     const firstQuestion = await generateConfirmationQuestion(ideaDraft, pathSummary, []);
 
@@ -7784,7 +7830,8 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
         path_summary: pathSummary,
         answers: [],
         pending_question: firstQuestion,
-        status: 'in_progress'
+        status: 'in_progress',
+        total_questions: totalQuestions
       })
       .select()
       .single();
@@ -7794,7 +7841,7 @@ app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
     res.status(201).json({
       sessionId: session.id,
       status: 'in_progress',
-      progress: { current: 1, total: CONFIRMATION_QUESTION_COUNT },
+      progress: { current: 1, total: totalQuestions },
       question: firstQuestion,
       ideaDraft
     });
@@ -7837,7 +7884,8 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
       selected: selectedOption
     }];
 
-    const isLastAnswer = updatedAnswers.length >= CONFIRMATION_QUESTION_COUNT;
+    const totalQuestions = session.total_questions || CONFIRMATION_QUESTION_COUNT_FREE;
+    const isLastAnswer = updatedAnswers.length >= totalQuestions;
 
     if(isLastAnswer){
       // The final answer kicks off the full competitive research pipeline:
@@ -7892,7 +7940,7 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
 
         sendDone({
           status: 'completed',
-          progress: { current: updatedAnswers.length, total: CONFIRMATION_QUESTION_COUNT },
+          progress: { current: updatedAnswers.length, total: totalQuestions },
           result: finalIdea
         });
         res.end();
@@ -7916,7 +7964,7 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
 
     res.status(200).json({
       status: 'in_progress',
-      progress: { current: updatedAnswers.length + 1, total: CONFIRMATION_QUESTION_COUNT },
+      progress: { current: updatedAnswers.length + 1, total: totalQuestions },
       question: nextQuestion
     });
   } catch (err) {
@@ -7975,7 +8023,7 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
       status: session.status,
       progress: {
         current: session.status === 'completed' ? session.answers.length : session.answers.length + 1,
-        total: CONFIRMATION_QUESTION_COUNT
+        total: session.total_questions || CONFIRMATION_QUESTION_COUNT_FREE
       },
       question: session.pending_question,
       ideaDraft: session.idea_draft || null,
