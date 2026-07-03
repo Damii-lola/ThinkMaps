@@ -18,7 +18,6 @@
   --maxw:1120px;
 }
 
-
 *{ box-sizing:border-box; }
 html{ scroll-behavior:smooth; }
 body{
@@ -654,6 +653,7 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
   padding:6px 14px; border-radius:14px; z-index:6;
   max-width:min(520px, 90%); min-width:120px;
   transition:max-width .3s ease, padding .2s ease;
+  text-align:center;
 }
 
 /* ---------- Streaming label preview (inside canvas-busy-indicator) ---------- */
@@ -923,10 +923,10 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 
 /* ---------- Shareable link ---------- */
 .confirm-final-actions{
-  display:flex; align-items:center; justify-content:space-between; gap:16px;
-  flex-wrap:wrap; margin-top:28px; padding-top:20px; border-top:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center;
+  flex-wrap:wrap; gap:16px; margin-top:28px; padding-top:20px; border-top:1px solid var(--line);
 }
-.share-link-row{ display:flex; gap:8px; align-items:center; max-width:420px; flex:1; }
+.share-link-row{ display:flex; gap:8px; align-items:center; max-width:420px; width:100%; }
 .share-link-input{
   flex:1; min-width:0; font-family:var(--font-mono); font-size:12.5px; color:var(--ink-muted);
   background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:9px 11px;
@@ -1565,4 +1565,52 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
   font-family:var(--font-mono); font-size:9px; font-weight:700; letter-spacing:.06em;
   color:#9A7320; background:rgba(217,163,62,0.16);
   padding:2px 5px; border-radius:4px; margin-left:8px; vertical-align:middle;
+}
+
+
+
+
+
+/* ---------- Show/hide password toggle ---------- */
+.password-field-wrap{ position:relative; display:flex; }
+.password-field-wrap .password-toggle-input{ flex:1; padding-right:44px !important; }
+.password-toggle-btn{
+  position:absolute; right:4px; top:50%; transform:translateY(-50%);
+  background:none; border:none; font-size:16px; line-height:1; cursor:pointer;
+  padding:8px; border-radius:6px; opacity:0.7;
+}
+.password-toggle-btn:hover{ opacity:1; background:var(--surface-2); }
+
+/* ---------- Mobile dashboard header + pro-banner arrangement ---------- */
+@media (max-width:640px){
+  nav.bar{ padding:14px 16px; }
+  .dashboard-main{ padding:32px 0 80px; }
+  .dashboard-main h1{ margin-bottom:18px; font-size:22px; }
+
+  .pro-banner{
+    flex-direction:column; align-items:flex-start; gap:10px;
+    padding:14px 16px; margin-bottom:24px;
+  }
+  .pro-banner .btn{ margin-left:0; width:100%; text-align:center; justify-content:center; }
+}
+
+/* ---------- Click-to-expand truncated canvas text ---------- */
+/* Applied by setupTruncatedTextExpansion in script.js. Removes the
+   2-line clamp entirely and lets the text wrap to however many lines
+   it actually needs. Cursor stays a pointer so it's clear this text is
+   interactive even before the first click. */
+.canvas-group-title span,
+.opt-label{ cursor:pointer; }
+.canvas-group-title span.text-expanded,
+.opt-label.text-expanded{
+  -webkit-line-clamp:unset; display:block; overflow:visible;
+}
+/* The card containing an expanded label needs to render ABOVE its
+   siblings — otherwise the now-taller content just gets visually
+   clipped by whatever neighboring card happens to overlap it, which
+   would make "click to see the full text" not actually show the full
+   text. A stronger shadow also helps it read as "temporarily lifted
+   out," not just a layout glitch. */
+.canvas-group.card-popped{
+  z-index:50; box-shadow:0 10px 28px rgba(0,0,0,0.18);
 }
