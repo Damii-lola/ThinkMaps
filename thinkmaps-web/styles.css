@@ -1648,3 +1648,16 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 .pro-features-group li::before{ content:"—"; position:absolute; left:0; color:var(--accent-deep); }
 .pro-features-modal-actions{ justify-content:space-between; margin-top:22px; }
+
+/* ---------- Checkout confirmation modal (username copy step) ---------- */
+.checkout-confirmation-card{ max-width:440px; }
+.checkout-username-display{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  background:var(--bg); border:1px solid var(--accent); border-radius:10px;
+  padding:14px 16px; margin:14px 0;
+}
+.checkout-username-display span{
+  font-family:var(--font-mono); font-size:16px; font-weight:600; color:var(--accent-deep);
+  word-break:break-all;
+}
+.checkout-email-note{ font-size:12.5px; margin-bottom:6px; }
