@@ -2025,7 +2025,7 @@ function stopTourDemo(){
   removeGhostCursor();
 }
 
-function startTour(tourId, steps){
+function startTour(tourId, steps, { mandatory = false } = {}){
   // Resolve steps at call time, not definition time — mobile-specific
   // wording needs to reflect the actual device the tour is running on.
   const resolvedSteps = steps
@@ -2034,7 +2034,7 @@ function startTour(tourId, steps){
 
   if(resolvedSteps.length === 0) return;
 
-  activeTourState = { tourId, steps: resolvedSteps, index: 0 };
+  activeTourState = { tourId, steps: resolvedSteps, index: 0, mandatory };
   renderTourStep();
 }
 
@@ -2089,12 +2089,14 @@ function renderTourStep(){
   const caption = document.createElement('div');
   caption.id = 'tourCaption';
   caption.className = 'tour-caption' + (target ? '' : ' tour-caption-centered');
+  const isMandatory = !!activeTourState.mandatory;
   caption.innerHTML = `
     <div class="tour-caption-progress">${index + 1} of ${steps.length}</div>
     <h4>${escapeHtml(step.title)}</h4>
     <p>${escapeHtml(step.text)}</p>
+    ${isMandatory && index === 0 ? `<p class="tour-mandatory-note">This first-time walkthrough can't be skipped — you can always replay it later from the "?" button.</p>` : ''}
     <div class="tour-caption-actions">
-      <button type="button" class="tour-skip-btn">Skip tour</button>
+      ${isMandatory ? '<span></span>' : `<button type="button" class="tour-skip-btn">Skip tour</button>`}
       <div class="tour-nav-btns">
         ${index > 0 ? `<button type="button" class="btn btn-ghost tour-back-btn">Back</button>` : ''}
         <button type="button" class="btn btn-primary tour-next-btn">${index + 1 === steps.length ? 'Done' : 'Next'}</button>
@@ -2282,7 +2284,7 @@ async function initAppPage(){
   setupBlueprintTitleEditing();
   await loadGraph();
   renderTourReopenButton();
-  if(!hasSeenTour('canvas')) startTour('canvas', getCanvasTourSteps());
+  if(!hasSeenTour('canvas')) startTour('canvas', getCanvasTourSteps(), { mandatory: true });
 }
 
 // Defined as functions (not a plain array) so mobile-specific wording —
@@ -2292,7 +2294,7 @@ function getCanvasTourSteps(){
   return [
     {
       title: 'Welcome to your Blueprint Graph',
-      text: "This is your canvas — a quick tour of the basics, five steps, skip anytime. Watch the little cursor — it'll show you exactly what to do."
+      text: "This is your canvas — a quick tour of the basics. Watch the little cursor — it'll show you exactly what to do."
     },
     {
       selector: '#canvasViewport',
@@ -2327,7 +2329,22 @@ function getCanvasTourSteps(){
       title: 'Not quite right?',
       text: "Retry regenerates this group's options, Random picks one for you, +Custom lets you type your own idea instead of picking one.",
       demo: 'groupFooter'
-    }
+    },
+    // Function, not a plain object — evaluated fresh every time the
+    // tour starts (same pattern the mobile-wording steps already use),
+    // so this reflects the account's CURRENT Pro status rather than
+    // whatever it was the first time the tour ever ran. Returns null
+    // for free accounts, which startTour's existing
+    // .filter(Boolean) already drops silently — no separate gating
+    // logic needed beyond that.
+    () => canvasState.isPro ? {
+      selector: '.canvas-option',
+      title: 'Select multiple at once (Pro)',
+      text: isCoarsePointer()
+        ? 'Long-press an option, then tap others to select several — combine them into one fused idea.'
+        : 'Hold Ctrl and click multiple options to select several — combine them into one fused idea.',
+      demo: 'combine'
+    } : null
   ];
 }
 
