@@ -7665,57 +7665,6 @@ Respond ONLY with valid JSON: {"personas": [{"name": string, "age": number, "occ
 }
 
 // =====================================================================
-// FEATURE: "IDEA ALREADY EXISTS?" PRE-CHECK
-// =====================================================================
-// Deliberately cheap and fast (2 Serper calls max, capped tokens on the
-// synthesis) — this runs at a moment (right after the very first canvas
-// click) where the person is still deciding whether to keep exploring
-// a niche at all, so it needs to feel instant, not like another heavy
-// generation step. Explicitly framed in the prompt as "context, not
-// verdict" so the synthesis line doesn't read as a rejection.
-async function runIdeaPreCheck(nicheLabel, firstOptionText){
-  const [appResults, problemResults] = await Promise.all([
-    withTimeout(webSearchForSimilarProducts(`best ${nicheLabel} apps`), 3000),
-    withTimeout(webSearchForSimilarProducts(`${firstOptionText} app alternative`), 3000)
-  ]);
-
-  const hasResults = (appResults && appResults.length > 0) || (problemResults && problemResults.length > 0);
-
-  if(!hasResults){
-    return {
-      found: false,
-      products: [],
-      gapSentence: "We couldn't find obvious direct competitors — that could mean a wide open space or a very new idea. Either way, good to know."
-    };
-  }
-
-  const combinedResults = [...(appResults || []), ...(problemResults || [])].slice(0, 8);
-
-  const systemPrompt = `You are a fast pre-check assistant for ThinkMaps. Based on the search results below about the "${nicheLabel}" niche and the specific direction "${firstOptionText}", identify up to 3 REAL existing apps/products that are already doing something close to this. For each: name, a genuinely one-line description, and the URL from the search results (never invent a URL). Then write ONE synthesized sentence in the exact shape "These all solve X but none of them Y" — explicitly naming the gap if a real one is visible in the results, or being honest if the results suggest the space really is crowded with no obvious gap. This is CONTEXT for the founder, not a verdict — don't tell them to stop, just tell them what's already out there.
-
-Search results:
-${combinedResults.map(r => `- ${r.title}: ${r.description} (${r.url})`).join('\n')}
-
-Respond ONLY with valid JSON: {"products": [{"name": string, "description": string, "url": string}, ...] (up to 3), "gapSentence": string}`;
-
-  try {
-    const result = await callMistral([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: 'Generate the pre-check now.' }
-    ], 400);
-    return { found: true, ...result };
-  } catch (err) {
-    // A failed synthesis shouldn't block the canvas — fall back to a
-    // neutral, still-genuinely-useful state rather than an error.
-    return {
-      found: combinedResults.length > 0,
-      products: combinedResults.slice(0, 3).map(r => ({ name: r.title, description: r.description, url: r.url })),
-      gapSentence: "Here's what's already out there in this space — worth a quick look before you dive in."
-    };
-  }
-}
-
-// =====================================================================
 // FEATURE: LAUNCH CHECKLIST
 // =====================================================================
 // Always exactly 4 weeks, always this shape — the structure itself
@@ -8746,7 +8695,7 @@ app.post('/confirm/:sessionId/share', requireAuth, async (req, res) => {
 
 // =====================================================================
 // FEATURE ROUTES — Pivot Generator, Landing Copy, Strength Score,
-// Personas, Pre-Check, Launch Checklist, Red Team, Spy Mode, Export.
+// Personas, Launch Checklist, Red Team, Spy Mode, Export.
 // Every one of these follows the exact same shape as deeper-analysis/
 // build-brief above: look up the session, verify ownership via
 // getOwnedBlueprint, require the idea to actually be hardened first,
@@ -8956,52 +8905,6 @@ app.post('/confirm/:sessionId/personas', requireAuth, async (req, res) => {
     res.status(200).json({ personas });
   } catch (err) {
     res.status(500).json({ error: 'Could not generate personas.', detail: err.message });
-  }
-});
-
-// ---------- "Idea Already Exists?" Pre-Check ----------
-// Keyed to the BLUEPRINT (not a confirmation session — this runs long
-// before one exists, right after the first canvas click), cached on
-// blueprints.precheck_result so it only ever runs once per blueprint.
-app.post('/blueprints/:id/precheck', requireAuth, async (req, res) => {
-  try {
-    if(await requireProOrReject(req, res)) return;
-
-    const { nicheLabel, firstOptionText } = req.body;
-    if(!nicheLabel || !firstOptionText){
-      return res.status(400).json({ error: 'nicheLabel and firstOptionText are required.' });
-    }
-
-    const { data: blueprint, error: fetchError } = await supabase
-      .from('blueprints')
-      .select('id, user_id, precheck_result')
-      .eq('id', req.params.id)
-      .single();
-
-    if(fetchError || !blueprint || blueprint.user_id !== req.user.id){
-      return res.status(403).json({ error: 'Not your blueprint.' });
-    }
-
-    if(blueprint.precheck_result){
-      return res.status(200).json({ precheck: blueprint.precheck_result });
-    }
-
-    const precheck = await runIdeaPreCheck(nicheLabel, firstOptionText);
-
-    await supabase.from('blueprints').update({ precheck_result: precheck }).eq('id', blueprint.id);
-
-    res.status(200).json({ precheck });
-  } catch (err) {
-    // Pre-check failing outright should never block canvas exploration —
-    // hand back a neutral result instead of a 500 the frontend would
-    // have to specially handle.
-    res.status(200).json({
-      precheck: {
-        found: false,
-        products: [],
-        gapSentence: "We couldn't check this right now — that's fine, keep exploring."
-      }
-    });
   }
 });
 
