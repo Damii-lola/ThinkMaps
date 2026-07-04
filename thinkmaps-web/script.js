@@ -693,31 +693,30 @@ async function initPricingSection(){
   });
 }
 
-// Opens the real Selar payment page. Three layers work together now to
-// make a mismatched payment vanishingly rare rather than just
-// recoverable after the fact:
-//   1. The account's email is pre-filled directly into the Selar
-//      checkout URL (Selar officially supports &email=... prefilling) —
-//      removes the "typed the wrong email by accident" failure mode
-//      entirely, since the person never has to type it at all.
-//   2. The ThinkMaps username is shown here, big and copyable, right
-//      before checkout — Selar's "ThinkMaps UserName" custom question
-//      is set to Required, so checkout physically can't complete
-//      without an answer, and this makes it near-impossible to fat-
-//      finger since it's copy-pasted, not retyped from memory.
-//   3. /payment/start-checkout still records intent as the final
-//      safety net for the rare case where someone still manages to
-//      enter something unmatchable.
-// What this deliberately does NOT do: intercept or validate anything on
-// Selar's own payment authorization step. There's no hook into that —
-// Selar is a separate company's checkout, and the only signal available
-// after money moves is the notification email. This is the honest
-// ceiling of what's controllable from this side; everything above is
-// about making the failure mode this ceiling can't reach as rare as
-// possible, not pretending the ceiling isn't there.
+// Opens the real Selar payment page, now with the ENTIRE matching
+// signal auto-filled — no copying, no typing, nothing for the person to
+// get wrong. This works by repurposing two of Selar's CONFIRMED
+// prefillable fields (their own docs only confirm email, fullname,
+// mobile, address — custom checkout questions are NOT confirmed
+// prefillable, so this deliberately doesn't rely on that):
+//   - fullname carries the ThinkMaps username
+//   - address carries the account's actual Supabase user id (a UUID) —
+//     once that's added as the "Profile ID" custom question, this is
+//     the single most bulletproof identifier possible: globally unique,
+//     impossible to typo-collide with someone else's real one.
+// Real tradeoff worth knowing: this means Selar's own dashboard/receipts
+// will show the username and a UUID instead of the person's real name
+// and address, since those fields get repurposed. For a digital
+// subscription product, that's a fair trade for near-zero mismatched
+// payments — but it IS a real tradeoff, not a free lunch.
+// The custom "ThinkMaps UserName" question stays Required as a manual
+// backup, in case the prefilled fullname doesn't make it all the way
+// through to the notification email for some reason — the Copy button
+// there now actually works (see the execCommand fallback below).
 async function openPaymentCheckout(session){
   const accountEmail = session?.user?.email || '';
   let accountUsername = session?.user?.user_metadata?.username || '';
+  const accountId = session?.user?.id || '';
 
   // Fallback to the authoritative source if it's missing from the
   // session's own metadata for any reason — profiles.username is what
@@ -737,26 +736,55 @@ async function openPaymentCheckout(session){
     await authedFetch('/payment/start-checkout', { method: 'POST', body: JSON.stringify({}) });
   } catch (err) {
     // Never block checkout over this — worst case, this specific
-    // payment falls back to needing an exact match via email or
-    // username instead of the timing fallback path.
+    // payment falls back to needing an exact match via email, username,
+    // or profile id instead of the timing fallback path.
   }
 
-  showCheckoutConfirmationModal(accountEmail, accountUsername);
+  showCheckoutConfirmationModal(accountEmail, accountUsername, accountId);
 }
 
-function showCheckoutConfirmationModal(accountEmail, accountUsername){
+// Robust clipboard copy — navigator.clipboard.writeText silently fails
+// in more contexts than it should (insecure focus state, certain
+// browser/extension combinations, some in-app browsers), which is
+// exactly what happened in the screenshot that prompted this fix. The
+// execCommand('copy') fallback below works in almost everything the
+// modern API doesn't, at the cost of being deprecated — perfectly fine
+// here since it's just a fallback path, not the primary one.
+async function copyTextRobustly(text){
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    try {
+      const tempInput = document.createElement('textarea');
+      tempInput.value = text;
+      tempInput.style.position = 'fixed';
+      tempInput.style.opacity = '0';
+      document.body.appendChild(tempInput);
+      tempInput.focus();
+      tempInput.select();
+      const success = document.execCommand('copy');
+      tempInput.remove();
+      return success;
+    } catch (fallbackErr) {
+      return false;
+    }
+  }
+}
+
+function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId){
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'checkoutConfirmationModal';
   overlay.innerHTML = `
     <div class="modal-card checkout-confirmation-card">
-      <h3>One thing before you pay</h3>
-      <p class="muted">Selar will ask for your ThinkMaps username at checkout — it's required. Copy it now so there's zero chance of a typo:</p>
+      <h3>You're all set — nothing to type</h3>
+      <p class="muted">Your email and username are already filled in on the Selar checkout page. If it still asks for your ThinkMaps username, use this (just in case):</p>
       <div class="checkout-username-display">
         <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
         <button type="button" class="btn btn-ghost" id="copyCheckoutUsernameBtn">Copy</button>
       </div>
-      <p class="muted checkout-email-note">Your email (<strong>${escapeHtml(accountEmail)}</strong>) is already filled in for you on the checkout page — no need to type it.</p>
+      <p class="muted checkout-email-note">Email: <strong>${escapeHtml(accountEmail)}</strong> — also already filled in.</p>
       <div class="modal-actions">
         <button class="btn btn-ghost" id="cancelCheckoutBtn" type="button">Cancel</button>
         <button class="btn btn-primary" id="proceedCheckoutBtn" type="button">Continue to Selar</button>
@@ -769,25 +797,24 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername){
   overlay.addEventListener('click', (e) => { if(e.target === overlay) overlay.remove(); });
 
   document.getElementById('copyCheckoutUsernameBtn')?.addEventListener('click', async (e) => {
-    try {
-      await navigator.clipboard.writeText(accountUsername);
-      const btn = e.currentTarget;
-      const original = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = original; }, 1500);
-    } catch (err) {
-      showToast('Could not copy — select the text manually.');
-    }
+    const btn = e.currentTarget;
+    const success = await copyTextRobustly(accountUsername);
+    const original = btn.textContent;
+    btn.textContent = success ? 'Copied!' : 'Select manually';
+    setTimeout(() => { btn.textContent = original; }, 1800);
+    if(!success) showToast('Could not copy automatically — select the text and copy it yourself.');
   });
 
   document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
     overlay.remove();
-    // Selar's confirmed prefill parameters — email lands already filled
-    // in on their checkout page, removing the most common real-world
-    // mismatch (using a different personal email than the ThinkMaps
-    // account) at the source rather than catching it after the fact.
+    // Selar's confirmed prefill parameters. fullname and address are
+    // repurposed here to silently carry the username and account id —
+    // the person never sees this happen, they just land on a checkout
+    // page where everything's already filled in.
     const params = new URLSearchParams();
     if(accountEmail) params.set('email', accountEmail);
+    if(accountUsername) params.set('fullname', accountUsername);
+    if(accountId) params.set('address', accountId);
     params.set('add_to_cart', '1');
     const checkoutUrl = `${PAYMENT_URL}?${params.toString()}`;
     window.open(checkoutUrl, '_blank', 'noopener');
