@@ -1920,7 +1920,13 @@ const TOUR_DEMOS = {
     }
     if(!target) target = options[1];
 
-    const sourceRect = source.getBoundingClientRect();
+    // The real drag genuinely starts from the small colored dot beside
+    // an option's text, not the option row as a whole — anchoring the
+    // demo there instead of the row's general center is what makes this
+    // an accurate demonstration of the actual gesture, not an
+    // approximation of it.
+    const sourceDot = source.querySelector('.opt-dot') || source;
+    const sourceRect = sourceDot.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     const sx = sourceRect.left + sourceRect.width / 2;
     const sy = sourceRect.top + sourceRect.height / 2;
@@ -2043,7 +2049,7 @@ function cleanupTourDOM(){
   stopTourDemo();
   document.getElementById('tourCaption')?.remove();
   document.querySelectorAll('.tour-spotlight').forEach(el => {
-    el.classList.remove('tour-spotlight');
+    el.classList.remove('tour-spotlight', 'tour-needs-position');
     el.style.boxShadow = '';
   });
 }
@@ -2073,6 +2079,9 @@ function renderTourStep(){
 
   if(target){
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if(getComputedStyle(target).position === 'static'){
+      target.classList.add('tour-needs-position');
+    }
     target.classList.add('tour-spotlight');
   }
 
@@ -2095,32 +2104,15 @@ function renderTourStep(){
 
   // Position near the target after a frame, once scrollIntoView has
   // actually settled — positioning against a mid-scroll rect would be wrong.
-  requestAnimationFrame(() => {
-    if(!target){
-      caption.style.top = '50%';
-      caption.style.left = '50%';
-      caption.style.transform = 'translate(-50%, -50%)';
-      return;
-    }
-    const rect = target.getBoundingClientRect();
-    const captionRect = caption.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - rect.bottom;
-    const spaceAbove = rect.top;
-
-    let top;
-    if(spaceBelow > captionRect.height + 24 || spaceBelow > spaceAbove){
-      top = rect.bottom + 16;
-    } else {
-      top = rect.top - captionRect.height - 16;
-    }
-    top = Math.max(12, Math.min(top, window.innerHeight - captionRect.height - 12));
-
-    let left = rect.left + rect.width / 2 - captionRect.width / 2;
-    left = Math.max(12, Math.min(left, window.innerWidth - captionRect.width - 12));
-
-    caption.style.top = `${top}px`;
-    caption.style.left = `${left}px`;
-  });
+  // Fixed anchor, every step, regardless of target — deliberately NOT
+  // computed relative to the target's position. Hugging the target
+  // dynamically is what caused the caption to land directly on top of
+  // the exact thing being demonstrated (a wide button row, a drag path
+  // between two side-by-side cards) — a consistent corner trades away
+  // "near the target" proximity for something more important here:
+  // never blocking the sightline to the actual demo happening on screen.
+  caption.style.top = '24px';
+  caption.style.left = '24px';
 
   caption.querySelector('.tour-skip-btn')?.addEventListener('click', endTour);
   caption.querySelector('.tour-next-btn')?.addEventListener('click', () => {
