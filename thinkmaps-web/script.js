@@ -2284,7 +2284,13 @@ async function initAppPage(){
   setupBlueprintTitleEditing();
   await loadGraph();
   renderTourReopenButton();
-  if(!hasSeenTour('canvas')) startTour('canvas', getCanvasTourSteps(), { mandatory: true });
+  // Tracked per BLUEPRINT, not per account — "seen once, ever, anywhere"
+  // was the actual bug: once dismissed on any one blueprint, a brand
+  // new blueprint would never trigger it again, since the account-wide
+  // flag already said "seen." A new blueprint genuinely being opened
+  // for the first time is what should trigger this, every time.
+  const canvasTourKey = `canvas_${canvasState.blueprintId}`;
+  if(!hasSeenTour(canvasTourKey)) startTour(canvasTourKey, getCanvasTourSteps(), { mandatory: true });
 }
 
 // Defined as functions (not a plain array) so mobile-specific wording —
@@ -2362,7 +2368,7 @@ function renderTourReopenButton(){
   btn.className = 'zoom-btn';
   btn.title = 'Replay the tour';
   btn.innerHTML = '?';
-  btn.addEventListener('click', () => startTour('canvas', getCanvasTourSteps()));
+  btn.addEventListener('click', () => startTour(`canvas_${canvasState.blueprintId}`, getCanvasTourSteps()));
   controls.appendChild(btn);
 }
 
