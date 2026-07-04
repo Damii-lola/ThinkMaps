@@ -2048,6 +2048,7 @@ function endTour(){
 function cleanupTourDOM(){
   stopTourDemo();
   document.getElementById('tourCaption')?.remove();
+  document.getElementById('tourConnectorLine')?.remove();
   document.querySelectorAll('.tour-spotlight').forEach(el => {
     el.classList.remove('tour-spotlight', 'tour-needs-position');
     el.style.boxShadow = '';
@@ -2113,6 +2114,31 @@ function renderTourStep(){
   // never blocking the sightline to the actual demo happening on screen.
   caption.style.top = '24px';
   caption.style.left = '24px';
+
+  if(target){
+    requestAnimationFrame(() => {
+      const captionRect = caption.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const fromX = captionRect.right;
+      const fromY = captionRect.bottom - 20;
+      const toX = targetRect.left + targetRect.width / 2;
+      const toY = targetRect.top + targetRect.height / 2;
+
+      const dx = toX - fromX;
+      const dy = toY - fromY;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+      const line = document.createElement('div');
+      line.className = 'tour-connector-line';
+      line.id = 'tourConnectorLine';
+      line.style.left = `${fromX}px`;
+      line.style.top = `${fromY}px`;
+      line.style.width = `${length}px`;
+      line.style.transform = `rotate(${angle}deg)`;
+      document.body.appendChild(line);
+    });
+  }
 
   caption.querySelector('.tour-skip-btn')?.addEventListener('click', endTour);
   caption.querySelector('.tour-next-btn')?.addEventListener('click', () => {
