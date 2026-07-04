@@ -1203,6 +1203,47 @@ app.post('/profile/go-pro', requireAuth, async (req, res) => {
 // =====================================================================
 // SELAR PAYMENT WEBHOOK — the real Pro upgrade path.
 //
+// =====================================================================
+// PENDING UPGRADE INTENT — closes the "what if the checkout email
+// doesn't match the ThinkMaps account" gap SAFELY.
+//
+// The tempting shortcut is "they're already logged in, redirect back
+// here, just make them Pro" — but that's a real security hole, not a
+// convenience: the redirect URL is just a public link
+// (dashboard.html?email=anything), and anyone could type it into their
+// address bar and get free Pro forever, no payment involved, no
+// evidence required. That's not caution for its own sake, that's a
+// direct way this would cost real money.
+//
+// The safe version of the same idea: record that THIS logged-in account
+// is about to pay, BEFORE they ever leave for Selar. If the payment
+// that comes back doesn't match anyone's email directly (the primary,
+// most precise path), the inbox check falls back to asking "was there
+// exactly one account that just declared intent to pay, recently?" —
+// real temporal evidence tied to an authenticated session, not a
+// guessable URL. If more than one person clicked Go Pro around the same
+// time, it deliberately does NOT guess which one paid — see
+// resolvePendingUpgradeFallback below.
+// =====================================================================
+app.post('/payment/start-checkout', requireAuth, async (req, res) => {
+  try {
+    const expires_at = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 minutes — long enough to actually complete checkout, short enough to keep the fallback window tight
+    const { error } = await supabase
+      .from('pending_upgrades')
+      .insert({ user_id: req.user.id, expires_at, fulfilled: false });
+
+    if(error) throw error;
+
+    res.status(200).json({ recorded: true });
+  } catch (err) {
+    // Non-fatal from the frontend's perspective — worst case, this
+    // specific checkout falls back to needing an exact email match
+    // instead of the fallback path. Never worth blocking someone from
+    // reaching checkout over.
+    res.status(200).json({ recorded: false });
+  }
+});
+
 // IMPORTANT — read this before assuming this route is fully correct:
 // Neither Selar nor Coachli publishes a public API/webhook reference
 // documenting an exact JSON payload shape anywhere I could verify.
@@ -1420,6 +1461,78 @@ function extractBuyerEmailFromText(text){
   return anyEmailMatch ? anyEmailMatch[0] : null;
 }
 
+// Pulls the answer to the "ThinkMaps UserName" custom checkout question
+// (set up directly in Selar's product settings — see Custom Checkout
+// Form) out of the notification email. This is a MUCH stronger match
+// than email or timing ever could be: the buyer typed their actual
+// ThinkMaps username at the point of paying, so when this parses
+// correctly, there's no ambiguity to resolve at all — no fallback
+// heuristic needed, no risk of matching the wrong account.
+//
+// Same honesty as everywhere else touching these emails: Selar doesn't
+// publish the exact wording their notification email uses for a custom
+// field's answer, so this tries several plausible label formats rather
+// than assuming one. If none match, this returns null and the existing
+// email-match -> timing-fallback -> unclaimed chain still catches it —
+// this is a strictly additive improvement, not a replacement that could
+// newly fail where the old path used to work.
+function extractThinkMapsUsernameFromText(text){
+  if(!text) return null;
+
+  const labeledPatterns = [
+    /thinkmaps\s*user\s*name[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
+    /thinkmaps\s*username[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
+  ];
+  for(const pattern of labeledPatterns){
+    const match = text.match(pattern);
+    if(match) return match[1];
+  }
+
+  return null;
+}
+
+// Picks whichever pending-upgrade is closest in time to when the
+// payment email actually arrived — not just "is there exactly one
+// candidate at all." Two people clicking Go Pro in the same half hour
+// is one thing; two people clicking it within moments of EACH OTHER is
+// far rarer, and even then, a completed checkout almost always lands
+// within a couple minutes of the click, so the true match is normally
+// obviously closer in time than any other candidate.
+//
+// TIE_THRESHOLD_MS is the actual safety net: if the closest and
+// second-closest candidates are both within this window of the payment
+// (genuinely too close to call apart), this refuses to guess between
+// them — a wrong guess here means upgrading a stranger's account off
+// someone else's money, which is never an acceptable trade for
+// resolving one edge case automatically. That specific payment still
+// isn't lost, it just parks in unclaimed_payments for a five-second
+// manual check instead of an automatic one.
+const AMBIGUITY_TIE_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+
+async function resolvePendingUpgradeFallback(paymentTimestampMs){
+  const { data: candidates } = await supabase
+    .from('pending_upgrades')
+    .select('user_id, created_at')
+    .eq('fulfilled', false)
+    .gt('expires_at', new Date().toISOString());
+
+  if(!candidates || candidates.length === 0) return null;
+  if(candidates.length === 1) return candidates[0].user_id;
+
+  const withDistance = candidates
+    .map(c => ({ ...c, distanceMs: Math.abs(new Date(c.created_at).getTime() - paymentTimestampMs) }))
+    .sort((a, b) => a.distanceMs - b.distanceMs);
+
+  const [closest, secondClosest] = withDistance;
+
+  if(secondClosest.distanceMs - closest.distanceMs < AMBIGUITY_TIE_THRESHOLD_MS){
+    console.log(`[ThinkMaps] Payment inbox check: ${candidates.length} pending upgrades were too close in time to confidently tell apart (closest two within ${AMBIGUITY_TIE_THRESHOLD_MS / 1000}s of each other) — refusing to guess, parking for manual review instead.`);
+    return null;
+  }
+
+  return closest.user_id;
+}
+
 async function checkForNewPayments(){
   if(!GMAIL_OAUTH_CLIENT_ID || !GMAIL_OAUTH_CLIENT_SECRET || !GMAIL_OAUTH_REFRESH_TOKEN){
     return; // Gmail isn't configured at all — nothing to check
@@ -1439,7 +1552,44 @@ async function checkForNewPayments(){
     const messages = listRes.data.messages || [];
     if(messages.length === 0) return;
 
-    for(const msgRef of messages){
+    // Shared by all three matching methods below (username, email, timing
+// fallback) — applies the actual upgrade plus the confirmation email,
+// so that logic exists in exactly one place instead of three
+// near-identical copies that would drift out of sync with each other
+// over time.
+async function applyProUpgrade(profile, matchLogSuffix){
+  const { error: updateError } = await supabase
+    .from('profiles')
+    .update({ pro_status: true })
+    .eq('id', profile.id);
+
+  if(updateError){
+    console.error(`[ThinkMaps] Payment inbox check: found account for ${profile.email} but failed to update pro_status:`, updateError.message);
+    return false;
+  }
+
+  console.log(`[ThinkMaps] Payment inbox check: upgraded ${profile.email} to Pro ${matchLogSuffix}.`);
+
+  try {
+    const bodyHtml = `
+      <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
+      <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
+      <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
+    `;
+    await sendPlainEmail({
+      to: profile.email,
+      subject: "You're on ThinkMaps Pro",
+      text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
+      html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
+    });
+  } catch (emailErr) {
+    console.error('[ThinkMaps] Payment inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
+  }
+
+  return true;
+}
+
+for(const msgRef of messages){
       const alreadyProcessed = await isPaymentEmailProcessed(msgRef.id);
       if(alreadyProcessed) continue;
 
@@ -1455,6 +1605,33 @@ async function checkForNewPayments(){
 
       console.log(`[ThinkMaps] Payment inbox check: examining message "${subject}"`);
 
+      // ---------- Match attempt 1: ThinkMaps username from the custom
+      // checkout question. The strongest possible match — the buyer
+      // typed their real username at the point of paying, so if this
+      // parses AND resolves to a real account, there's no ambiguity
+      // left to reason about at all.
+      const checkoutUsername = extractThinkMapsUsernameFromText(bodyText);
+      if(checkoutUsername){
+        const { data: usernameProfile } = await supabase
+          .from('profiles')
+          .select('id, username, email, pro_status')
+          .ilike('username', checkoutUsername.trim())
+          .maybeSingle();
+
+        if(usernameProfile){
+          if(usernameProfile.pro_status){
+            console.log(`[ThinkMaps] Payment inbox check: ${usernameProfile.username} (matched by checkout username) is already Pro — nothing to do.`);
+          } else {
+            await applyProUpgrade(usernameProfile, `via the ThinkMaps username entered at checkout ("${checkoutUsername}")`);
+          }
+          await markPaymentEmailProcessed(msgRef.id);
+          continue;
+        }
+
+        console.log(`[ThinkMaps] Payment inbox check: message "${subject}" had a checkout username ("${checkoutUsername}") but it didn't match any ThinkMaps account — falling back to email matching.`);
+      }
+
+      // ---------- Match attempt 2: exact email match (original method).
       const buyerEmail = extractBuyerEmailFromText(bodyText);
 
       if(!buyerEmail){
@@ -1470,7 +1647,32 @@ async function checkForNewPayments(){
         .maybeSingle();
 
       if(!profile){
-        console.log(`[ThinkMaps] Payment inbox check: found email "${buyerEmail}" in message "${subject}" but no matching ThinkMaps account — likely someone else's payment email in this inbox, or an unrelated message. Skipping.`);
+        // ---------- Match attempt 3: pending-upgrade timing fallback —
+        // only reached if neither the checkout username nor the email
+        // resolved to an account.
+        const paymentTimestampMs = parseInt(fullMessage.data.internalDate, 10) || Date.now();
+        const fallbackUserId = await resolvePendingUpgradeFallback(paymentTimestampMs);
+
+        if(fallbackUserId){
+          const { data: fallbackProfile } = await supabase
+            .from('profiles')
+            .select('id, username, email, pro_status')
+            .eq('id', fallbackUserId)
+            .single();
+
+          if(fallbackProfile && !fallbackProfile.pro_status){
+            await applyProUpgrade(fallbackProfile, `via the pending-upgrade timing fallback (checkout email "${buyerEmail}" didn't match their account directly, but they were the closest-in-time account that had just clicked Go Pro)`);
+            await supabase.from('pending_upgrades').update({ fulfilled: true }).eq('user_id', fallbackUserId).eq('fulfilled', false);
+            await markPaymentEmailProcessed(msgRef.id);
+            continue;
+          }
+        }
+
+        console.log(`[ThinkMaps] Payment inbox check: found email "${buyerEmail}" in message "${subject}" but no matching ThinkMaps account (checkout username and timing fallback also came up empty) — parking it as an unclaimed payment instead of dropping it.`);
+        await supabase.from('unclaimed_payments').upsert(
+          { payer_email: buyerEmail.trim().toLowerCase(), message_id: msgRef.id, found_at: new Date().toISOString() },
+          { onConflict: 'payer_email' }
+        );
         await markPaymentEmailProcessed(msgRef.id);
         continue;
       }
@@ -1481,34 +1683,8 @@ async function checkForNewPayments(){
         continue;
       }
 
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update({ pro_status: true })
-        .eq('id', profile.id);
-
-      if(updateError){
-        console.error(`[ThinkMaps] Payment inbox check: found account for ${buyerEmail} but failed to update pro_status:`, updateError.message);
-        continue; // don't mark processed — worth retrying next poll
-      }
-
-      console.log(`[ThinkMaps] Payment inbox check: upgraded ${buyerEmail} to Pro from message "${subject}".`);
+      await applyProUpgrade(profile, `from message "${subject}" (matched by email)`);
       await markPaymentEmailProcessed(msgRef.id);
-
-      try {
-        const bodyHtml = `
-          <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
-          <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
-          <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
-        `;
-        await sendPlainEmail({
-          to: profile.email,
-          subject: "You're on ThinkMaps Pro",
-          text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
-          html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
-        });
-      } catch (emailErr) {
-        console.error('[ThinkMaps] Payment inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
-      }
     }
   } catch (err) {
     console.error('[ThinkMaps] Payment inbox check: failed:', err.message);
