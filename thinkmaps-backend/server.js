@@ -898,6 +898,32 @@ app.get('/config', (req, res) => {
   });
 });
 
+// Lets someone who just paid trigger an immediate check instead of
+// waiting up to 5 minutes for the automatic poll. Deliberately takes NO
+// email or payment info from the client at all — it only force-runs the
+// exact same trusted inbox check that already runs on a timer, then
+// reports back the CALLER'S OWN resulting pro_status (looked up by their
+// authenticated user id, not anything they supplied). This is what
+// keeps it safe: nobody can use this to grant themselves or anyone else
+// Pro by just claiming an email — the inbox check itself is still the
+// only thing that ever actually upgrades an account, this just makes it
+// run sooner.
+app.post('/payment/recheck-now', requireAuth, async (req, res) => {
+  try {
+    await checkForNewPayments();
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('pro_status')
+      .eq('id', req.user.id)
+      .single();
+
+    res.status(200).json({ pro_status: !!profile?.pro_status });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not check for a new payment.', detail: err.message });
+  }
+});
+
 // Dashboard data — profile + every blueprint this user owns, each one
 // annotated with whether it's locked (free tier, 7 days, no Pro) and how
 // many days are left if it isn't. Locked is computed on the fly from
