@@ -693,30 +693,41 @@ async function initPricingSection(){
   });
 }
 
-// Opens the real Selar payment page, now with the ENTIRE matching
-// signal auto-filled — no copying, no typing, nothing for the person to
-// get wrong. This works by repurposing two of Selar's CONFIRMED
-// prefillable fields (their own docs only confirm email, fullname,
-// mobile, address — custom checkout questions are NOT confirmed
-// prefillable, so this deliberately doesn't rely on that):
-//   - fullname carries the ThinkMaps username
-//   - address carries the account's actual Supabase user id (a UUID) —
-//     once that's added as the "Profile ID" custom question, this is
-//     the single most bulletproof identifier possible: globally unique,
-//     impossible to typo-collide with someone else's real one.
-// Real tradeoff worth knowing: this means Selar's own dashboard/receipts
-// will show the username and a UUID instead of the person's real name
-// and address, since those fields get repurposed. For a digital
-// subscription product, that's a fair trade for near-zero mismatched
-// payments — but it IS a real tradeoff, not a free lunch.
-// The custom "ThinkMaps UserName" question stays Required as a manual
-// backup, in case the prefilled fullname doesn't make it all the way
-// through to the notification email for some reason — the Copy button
-// there now actually works (see the execCommand fallback below).
+// Opens the real Selar payment page, with email, username, AND profile
+// id all auto-filled — no copying, no typing required in the normal
+// case. This works by repurposing one of Selar's CONFIRMED prefillable
+// fields (their own docs only confirm email, fullname, mobile, address
+// — custom checkout questions are NOT confirmed prefillable, so this
+// deliberately doesn't rely on that):
+//   - fullname carries "TMUSER <username> <profile_id>" — three
+//     space-separated parts. Selar's own "first and last name"
+//     validation was confirmed (via a real rejected checkout attempt)
+//     to require at least a space in the Name field; it's a reasonable,
+//     standard assumption that a validator checking for "contains a
+//     space" tolerates more than two words, same as it would for
+//     someone with a middle name — but this is genuinely untested
+//     beyond that assumption, so if Selar's checkout rejects three
+//     words specifically, that's the first thing to check.
+// This is what lets a single field carry BOTH signals at once instead
+// of needing an address field this checkout type doesn't have — the
+// profile id (a UUID) is the single strongest possible match: globally
+// unique by construction, so if the backend finds one and it resolves
+// to a real account, there's categorically zero ambiguity left. That
+// matching logic already existed (see extractProfileIdFromText and
+// applyProUpgrade in server.js) — it just had nothing feeding it until
+// now, since the earlier address-field plan turned out not to work.
+// The still-Required "ThinkMaps UserName" custom question remains as a
+// manual backup (Copy button fixed via the execCommand fallback below)
+// for the rare case the prefill doesn't propagate through.
+// Real tradeoff worth knowing: Selar's own dashboard/receipts will show
+// "TMUSER <username> <uuid>" instead of the person's real name, since
+// that field gets fully repurposed. For a digital subscription product,
+// that's a fair trade for reliable automatic matching — but it IS a
+// real tradeoff, not a free lunch.
 async function openPaymentCheckout(session){
   const accountEmail = session?.user?.email || '';
-  let accountUsername = session?.user?.user_metadata?.username || '';
   const accountId = session?.user?.id || '';
+  let accountUsername = session?.user?.user_metadata?.username || '';
 
   // Fallback to the authoritative source if it's missing from the
   // session's own metadata for any reason — profiles.username is what
@@ -779,7 +790,8 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
   overlay.innerHTML = `
     <div class="modal-card checkout-confirmation-card">
       <h3>You're all set — nothing to type</h3>
-      <p class="muted">Your email and username are already filled in on the Selar checkout page. If it still asks for your ThinkMaps username, use this (just in case):</p>
+      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER ${escapeHtml(accountUsername)} ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
+      <p class="muted">If checkout also asks for your ThinkMaps username separately, use this (just in case):</p>
       <div class="checkout-username-display">
         <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
         <button type="button" class="btn btn-ghost" id="copyCheckoutUsernameBtn">Copy</button>
@@ -807,14 +819,24 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
 
   document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
     overlay.remove();
-    // Selar's confirmed prefill parameters. fullname and address are
-    // repurposed here to silently carry the username and account id —
-    // the person never sees this happen, they just land on a checkout
-    // page where everything's already filled in.
+    // Selar's confirmed prefill parameters. fullname now carries BOTH
+    // signals at once — "TMUSER <username> <profile_id>" — since this
+    // checkout type has no address field to split the profile id off
+    // into separately. Selar's Name validation was confirmed (via a
+    // real rejected attempt) to require at least a space; three words
+    // is a reasonable bet to still pass the same "contains a space"
+    // check that two words does, but this specific case (three words,
+    // not two) hasn't been confirmed against a real checkout yet — if
+    // it gets rejected, that's the first thing to check.
+    //
+    // "TMUSER" (not "ThinkMaps") is deliberate — the product name
+    // legitimately appears many other places in the actual notification
+    // email (plan name, footer branding), which would risk the backend
+    // extractor false-matching on one of those instead of the real
+    // encoded value. "TMUSER" doesn't collide with anything.
     const params = new URLSearchParams();
     if(accountEmail) params.set('email', accountEmail);
-    if(accountUsername) params.set('fullname', accountUsername);
-    if(accountId) params.set('address', accountId);
+    if(accountUsername) params.set('fullname', `TMUSER ${accountUsername} ${accountId}`.trim());
     params.set('add_to_cart', '1');
     const checkoutUrl = `${PAYMENT_URL}?${params.toString()}`;
     window.open(checkoutUrl, '_blank', 'noopener');
@@ -1589,12 +1611,27 @@ const CARD_WIDTH = 220;
 // Mirrors the exact same heuristic used on the backend (estimateOptionHeight/
 // estimateHeaderHeight in server.js) — a row/header only "scales" up when its
 // own actual text needs the extra room, not by default for every card.
+// Was previously a binary check that capped at one step up regardless of
+// how much longer the text got past the threshold — under-counted real
+// height for anything wrapping to 3+ lines, which is what let cards spawn
+// overlapping each other. Now scales proportionally with estimated
+// wrapped-line count, matching the server.js fix exactly.
 function estimateOptionHeight(label){
-  return (label || '').length > 26 ? 54 : 38;
+  const text = label || '';
+  const CHARS_PER_LINE = 26;
+  const lines = Math.max(1, Math.ceil(text.length / CHARS_PER_LINE));
+  const BASE_HEIGHT = 38;
+  const EXTRA_LINE_HEIGHT = 18;
+  return BASE_HEIGHT + (lines - 1) * EXTRA_LINE_HEIGHT;
 }
 
 function estimateHeaderHeight(label){
-  return (label || '').length > 22 ? 56 : 40;
+  const text = label || '';
+  const CHARS_PER_LINE = 22;
+  const lines = Math.max(1, Math.ceil(text.length / CHARS_PER_LINE));
+  const BASE_HEIGHT = 40;
+  const EXTRA_LINE_HEIGHT = 18;
+  return BASE_HEIGHT + (lines - 1) * EXTRA_LINE_HEIGHT;
 }
 
 // The vertical center of option row `index` within a group, in world
@@ -5144,6 +5181,21 @@ function renderBuildBrief(buildBrief){
     </div>
   `).join('');
 
+  // Anything pulled in via Spy Mode's "Steal This" button — the backend
+  // was already storing this correctly, it just never had anywhere to
+  // actually show up in the rendered brief, which is exactly why
+  // clicking it looked like it did nothing.
+  const stolenHtml = (buildBrief.stolenFromSpyMode || []).length
+    ? `<div class="idea-block stolen-edges-block">
+        <div class="lbl">Competitive edges</div>
+        <ul class="stolen-edges-list">
+          ${buildBrief.stolenFromSpyMode.map(s => `
+            <li>${escapeHtml(s.text)} <span class="stolen-edge-source">— pulled from Spy Mode, vs ${escapeHtml(s.fromCompetitor)}</span></li>
+          `).join('')}
+        </ul>
+      </div>`
+    : '';
+
   el.innerHTML = `
     <h3 class="confirm-section-title">Build brief</h3>
     <p class="idea-block-p">${escapeHtml(buildBrief.overview)}</p>
@@ -5155,6 +5207,7 @@ function renderBuildBrief(buildBrief){
 
     <div class="idea-block"><div class="lbl">Key flows to build first</div>${listHtml(buildBrief.keyFlows)}</div>
     <div class="idea-block"><div class="lbl">Still open</div>${listHtml(buildBrief.openQuestions)}</div>
+    ${stolenHtml}
 
     <div class="build-brief-actions">
       <button class="btn btn-ghost" id="copyBuildBriefBtn" type="button">Copy as Markdown</button>
@@ -5364,6 +5417,18 @@ function scoreColor(score){
   return '#5C8A5C';
 }
 
+// A light, color-matched background for the overall score circle —
+// pairing dark, saturated text with a pale tint of the SAME color reads
+// as far more legible in practice than the same text sitting on a
+// generic cream card background, even when the text-alone contrast
+// ratio technically passes. This is what actually fixes "hard to see
+// the rating" rather than just nudging the font size up.
+function scoreBgTint(score){
+  if(score <= 4) return 'rgba(194,74,61,0.14)';
+  if(score <= 7) return 'rgba(217,163,62,0.18)';
+  return 'rgba(92,138,92,0.14)';
+}
+
 // Hand-rolled SVG radar chart — no charting library exists anywhere in
 // this codebase, and pulling one in for a single 4-axis chart isn't
 // worth the dependency. 4 axes at 90-degree spacing starting from the
@@ -5421,14 +5486,14 @@ function renderStrengthScore(strengthScore){
     <div class="strength-score-layout">
       <div class="strength-radar-wrap">
         ${buildRadarChartSvg(dims)}
-        <div class="strength-overall" style="color:${scoreColor(overall)};">${overall}<span>/10</span></div>
+        <div class="strength-overall" style="color:${scoreColor(overall)}; --strength-overall-bg:${scoreBgTint(overall)};">${overall}<span>/10</span></div>
       </div>
       <div class="strength-dims-list">
         ${dims.map(d => `
           <div class="strength-dim-row">
             <div class="strength-dim-header">
               <span class="strength-dim-label">${escapeHtml(d.label)}</span>
-              <span class="strength-dim-score" style="color:${scoreColor(d.score)};">${d.score}/10</span>
+              <span class="strength-dim-score" style="color:${scoreColor(d.score)}; background:${scoreBgTint(d.score)};">${d.score}/10</span>
             </div>
             <p class="strength-dim-explanation">${escapeHtml(d.explanation || '')}</p>
             ${d.topAction ? `<p class="strength-dim-action"><strong>Do this:</strong> ${escapeHtml(d.topAction)}</p>` : ''}
@@ -5637,11 +5702,21 @@ function landingCopyAsMarkdown(lc){
     '',
     lc.subHeadline,
     '',
+    lc.problemAgitation || '',
+    '',
+    '## Why it works',
     ...(lc.featureBullets || []).map(b => `- ${b}`),
     '',
-    `**CTA options:** ${lc.ctaOptions?.cautious} / ${lc.ctaOptions?.medium} / ${lc.ctaOptions?.aggressive}`,
+    '## How it works',
+    ...(lc.howItWorks || []).map((s, i) => `${i + 1}. ${s}`),
     '',
-    `_${lc.socialProofPlaceholder}_`
+    '## Common questions',
+    ...(lc.objectionHandling || []).map(qa => `**${qa.question}**\n${qa.answer}\n`),
+    `_${lc.socialProofPlaceholder}_`,
+    '',
+    `**${lc.footerCta || ''}**`,
+    '',
+    `Buttons: ${lc.ctaOptions?.cautious} / ${lc.ctaOptions?.medium} / ${lc.ctaOptions?.aggressive}`
   ].join('\n');
 }
 
@@ -5650,11 +5725,47 @@ function renderLandingCopy(lc){
   if(!el) return;
 
   el.innerHTML = `
-    <div class="toolkit-card-head"><h4>Landing Page Copy</h4></div>
+    <div class="toolkit-card-head"><h4>Landing Page Copy</h4><p class="muted">A full page of copy, top to bottom — paste it into whatever page builder you're already using.</p></div>
     <div class="landing-copy-preview">
-      <div class="lc-section"><div class="lbl">Hero headline</div><p class="lc-hero">${escapeHtml(lc.heroHeadline)}</p></div>
-      <div class="lc-section"><div class="lbl">Sub-headline</div><p>${escapeHtml(lc.subHeadline)}</p></div>
-      <div class="lc-section"><div class="lbl">Feature bullets</div><ul>${(lc.featureBullets || []).map(b => `<li>${escapeHtml(b)}</li>`).join('')}</ul></div>
+      <div class="lc-section">
+        <div class="lc-section-head"><div class="lbl">Hero headline</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml(lc.heroHeadline)}">Copy</button></div>
+        <p class="lc-hero">${escapeHtml(lc.heroHeadline)}</p>
+      </div>
+      <div class="lc-section">
+        <div class="lc-section-head"><div class="lbl">Sub-headline</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml(lc.subHeadline)}">Copy</button></div>
+        <p>${escapeHtml(lc.subHeadline)}</p>
+      </div>
+      ${lc.problemAgitation ? `
+        <div class="lc-section">
+          <div class="lc-section-head"><div class="lbl">Problem (agitate before the pitch)</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml(lc.problemAgitation)}">Copy</button></div>
+          <p>${escapeHtml(lc.problemAgitation)}</p>
+        </div>
+      ` : ''}
+      <div class="lc-section">
+        <div class="lc-section-head"><div class="lbl">Feature bullets</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml((lc.featureBullets || []).join('\n'))}">Copy</button></div>
+        <ul>${(lc.featureBullets || []).map(b => `<li>${escapeHtml(b)}</li>`).join('')}</ul>
+      </div>
+      ${lc.howItWorks?.length ? `
+        <div class="lc-section">
+          <div class="lc-section-head"><div class="lbl">How it works</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml(lc.howItWorks.map((s,i)=>`${i+1}. ${s}`).join('\n'))}">Copy</button></div>
+          <ol class="lc-how-it-works">${lc.howItWorks.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
+        </div>
+      ` : ''}
+      ${lc.objectionHandling?.length ? `
+        <div class="lc-section">
+          <div class="lc-section-head"><div class="lbl">Common questions (objection handling)</div><button class="lc-copy-btn" type="button" data-copy="${escapeHtml(lc.objectionHandling.map(qa=>`${qa.question}\n${qa.answer}`).join('\n\n'))}">Copy</button></div>
+          <div class="lc-faq">
+            ${lc.objectionHandling.map(qa => `
+              <div class="lc-faq-item">
+                <p class="lc-faq-question">${escapeHtml(qa.question)}</p>
+                <p class="lc-faq-answer">${escapeHtml(qa.answer)}</p>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+      <div class="lc-section"><div class="lbl">Social proof placeholder</div><p class="muted">${escapeHtml(lc.socialProofPlaceholder || '')}</p></div>
+      ${lc.footerCta ? `<div class="lc-section"><div class="lbl">Footer closing line</div><p class="lc-footer-cta">${escapeHtml(lc.footerCta)}</p></div>` : ''}
       <div class="lc-section">
         <div class="lbl">CTA button text</div>
         <div class="lc-cta-options">
@@ -5663,25 +5774,32 @@ function renderLandingCopy(lc){
           <span class="lc-cta-pill">Aggressive: ${escapeHtml(lc.ctaOptions?.aggressive || '')}</span>
         </div>
       </div>
-      <div class="lc-section"><div class="lbl">Social proof placeholder</div><p class="muted">${escapeHtml(lc.socialProofPlaceholder || '')}</p></div>
     </div>
     <div class="toolkit-card-actions">
       <button class="btn btn-secondary" id="copyLandingCopyBtn" type="button">Copy All</button>
-      <a href="https://carrd.co" target="_blank" rel="noopener" class="btn btn-ghost" title="Paste this in — you can launch today">Open Carrd →</a>
+      <a href="https://carrd.co" target="_blank" rel="noopener" class="btn btn-ghost">Open Carrd</a>
     </div>
+    <p class="muted lc-carrd-explainer">Carrd is a free, no-code, one-page website builder — paste this copy straight into it and you'll have a real, live landing page in about 20 minutes, no coding or design work needed. It's what a lot of solo founders use to launch fast before building the actual product.</p>
   `;
   el.classList.add('result-section-enter');
 
+  el.querySelectorAll('.lc-copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const success = await copyTextRobustly(btn.dataset.copy);
+      const original = btn.textContent;
+      btn.textContent = success ? 'Copied!' : 'Select manually';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+      if(!success) showToast('Could not copy automatically — select the text and copy it yourself.');
+    });
+  });
+
   const copyBtn = document.getElementById('copyLandingCopyBtn');
   if(copyBtn) copyBtn.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(landingCopyAsMarkdown(lc));
-      const original = copyBtn.textContent;
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => { copyBtn.textContent = original; }, 1800);
-    } catch (err) {
-      showToast('Could not copy — try selecting the text manually.');
-    }
+    const success = await copyTextRobustly(landingCopyAsMarkdown(lc));
+    const original = copyBtn.textContent;
+    copyBtn.textContent = success ? 'Copied!' : 'Select manually';
+    setTimeout(() => { copyBtn.textContent = original; }, 1800);
+    if(!success) showToast('Could not copy automatically — select the text and copy it yourself.');
   });
 }
 
@@ -5879,6 +5997,16 @@ async function stealFromSpyMode(competitorName, attackVector, btn){
     renderBuildBrief(body.buildBrief);
     if(btn){ btn.textContent = 'Added to Build Brief ✓'; }
     showToast('Added to your build brief — pulled from Spy Mode.');
+
+    // The Build Brief section lives well above Spy Mode on the page —
+    // without this, the addition happens correctly but off-screen, which
+    // is exactly why it looked like nothing happened at all.
+    const buildBriefEl = document.getElementById('buildBriefSection');
+    if(buildBriefEl){
+      buildBriefEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      buildBriefEl.classList.add('flash-highlight');
+      setTimeout(() => buildBriefEl.classList.remove('flash-highlight'), 2000);
+    }
   } catch (err) {
     showToast('Could not reach the server. Try again.');
     if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; }
