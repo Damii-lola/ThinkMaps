@@ -4,12 +4,11 @@
 // All backend calls go through API_BASE_URL, pointed at the Render service.
 
 const API_BASE_URL = 'https://thinkmaps.onrender.com';
-// Real Pro upgrade path — the actual payment happens on Coachli, and the
-// upgrade itself is applied by the PAYMENT_WEBHOOK_SECRET-gated inbox
-// check in server.js once a payment completes, matched back to a
-// ThinkMaps account by email. This link is the only thing the frontend
-// needs to know about payment at all.
-const PAYMENT_URL = 'https://coachli.co/damiiii/SS-afcb4446d3';
+// Real Pro upgrade path — the actual payment happens on Selar, and the
+// upgrade itself is applied by the inbox check in server.js once a
+// payment completes, matched back to a ThinkMaps account by email. This
+// link is the only thing the frontend needs to know about payment at all.
+const PAYMENT_URL = 'https://selar.com/130n178z3r';
 
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
