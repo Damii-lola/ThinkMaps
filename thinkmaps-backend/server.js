@@ -10,6 +10,7 @@ const { NICHE_PATHWAYS } = require('./niche_pathways');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render sits behind a reverse proxy — without this, req.ip (and every
 // rate limiter keyed on it below) sees Render's internal proxy address
 // for every single request rather than the real visitor's IP, which
 // would silently bundle every user under one shared rate-limit identity
@@ -1345,35 +1346,7 @@ app.post('/webhooks/payment/:secret', async (req, res) => {
       return;
     }
 
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({ pro_status: true })
-      .eq('id', profile.id);
-
-    if(updateError){
-      console.error('[ThinkMaps] Payment webhook: found the account but failed to update pro_status:', updateError.message);
-      return;
-    }
-
-    console.log(`[ThinkMaps] Payment webhook: upgraded ${buyerEmail} to Pro successfully.`);
-
-    // Best-effort confirmation email — a failure here shouldn't undo the
-    // upgrade that already succeeded above.
-    try {
-      const bodyHtml = `
-        <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
-        <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
-        <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
-      `;
-      await sendPlainEmail({
-        to: profile.email,
-        subject: "You're on ThinkMaps Pro",
-        text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
-        html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
-      });
-    } catch (emailErr) {
-      console.error('[ThinkMaps] Payment webhook: upgrade succeeded but confirmation email failed:', emailErr.message);
-    }
+    await applyProUpgrade(profile, 'via the payment webhook (matched by email)');
   } catch (err) {
     console.error('[ThinkMaps] Payment webhook: unexpected error:', err.message);
   }
@@ -1481,6 +1454,16 @@ function extractThinkMapsUsernameFromText(text){
   const labeledPatterns = [
     /thinkmaps\s*user\s*name[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
     /thinkmaps\s*username[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
+    // The Name field prefill — formatted as "TMUSER <username>"
+    // specifically to pass Selar's own "first and last name" validation
+    // (a bare username alone gets rejected as not looking like a real
+    // name). Deliberately NOT using "ThinkMaps" as the marker word here
+    // — the product name legitimately appears many other places in a
+    // real notification email (plan name, footer branding), and a
+    // generic "thinkmaps <word>" pattern would risk false-matching
+    // something like "ThinkMaps Pro" and extracting "Pro" as a fake
+    // username. "TMUSER" doesn't appear anywhere else by construction.
+    /\bTMUSER\s+([a-zA-Z0-9_]{3,30})\b/i,
   ];
   for(const pattern of labeledPatterns){
     const match = text.match(pattern);
@@ -1490,14 +1473,17 @@ function extractThinkMapsUsernameFromText(text){
   return null;
 }
 
-// Finds a genuine UUID anywhere in the email body — this is what the
-// "address" field prefill (see openPaymentCheckout in script.js)
-// silently carries: the account's actual Supabase user id. Deliberately
-// NOT looking for a specific label here, unlike the username extractor
-// above — a UUID's format (32 hex characters in 5 groups) is
-// distinctive enough on its own that a plain pattern match is both
-// simpler and more robust than guessing at whatever label Selar might
-// put around an "address" field's echoed value.
+// Finds a genuine UUID anywhere in the email body — this catches the
+// account's Supabase user id, embedded directly into the Name field
+// prefill as "TMUSER <username> <profile_id>" (see openPaymentCheckout
+// in script.js). An earlier version of this plan tried carrying the
+// profile id via a separate "address" field, which turned out not to
+// work — that checkout type has no address field at all — so both
+// values now ride together in the one field Selar's checkout actually
+// has room for. Matched generically (no specific label) since a UUID's
+// format (32 hex characters in 5 groups) is distinctive enough on its
+// own to find reliably regardless of exactly how it's surrounded in the
+// notification email's text.
 function extractProfileIdFromText(text){
   if(!text) return null;
   const match = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
@@ -1585,15 +1571,16 @@ async function applyProUpgrade(profile, matchLogSuffix){
 
   try {
     const bodyHtml = `
-      <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">You're on Pro 🎉</h1>
-      <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Thanks for upgrading, ${escapeHtmlServer(profile.username || '')}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now — no need to do anything else.</p>
+      <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">Thank you for subscribing 🎉</h1>
+      <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Hi ${escapeHtmlServer(profile.username || '')}, thank you for upgrading to ThinkMaps Pro — we genuinely appreciate it. Your payment went through and your account is already fully upgraded, no further steps needed on your end.</p>
+      <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.</p>
       <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
     `;
     await sendPlainEmail({
       to: profile.email,
-      subject: "You're on ThinkMaps Pro",
-      text: `Thanks for upgrading, ${profile.username || ''}. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
-      html: emailShell({ preheader: "You're on ThinkMaps Pro — everything's unlocked.", bodyHtml })
+      subject: 'Thank you for subscribing to ThinkMaps Pro',
+      text: `Hi ${profile.username || ''}, thank you for upgrading to ThinkMaps Pro — we genuinely appreciate it. Your payment went through and your account is already fully upgraded. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
+      html: emailShell({ preheader: 'Thank you for subscribing — your ThinkMaps Pro account is ready.', bodyHtml })
     });
   } catch (emailErr) {
     console.error('[ThinkMaps] Payment inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
@@ -1984,7 +1971,7 @@ function getMistralApiKey(){
   return MISTRAL_API_KEYS[index];
 }
 
-async function callMistral(messages, maxTokens = 350){
+async function callMistral(messages, maxTokens = 350, isRetry = false){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -2005,6 +1992,11 @@ async function callMistral(messages, maxTokens = 350){
       // genuinely need more (build brief with 8 detailed MVP paragraphs,
       // final idea synthesis, confirmation questions) pass their own
       // higher override — this default only needs to fit canvas options.
+      //
+      // NOTE: no static number here is ever truly guaranteed sufficient —
+      // a sufficiently detailed idea can always need more room than any
+      // fixed budget assumes. See the finish_reason check below for the
+      // real fix for that, not just picking a bigger constant and hoping.
       max_tokens: maxTokens
     })
   });
@@ -2016,7 +2008,30 @@ async function callMistral(messages, maxTokens = 350){
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content;
+  const finishReason = data.choices?.[0]?.finish_reason;
   if(!content) throw new Error('Mistral returned no content.');
+
+  // This is the actual root cause behind nearly every "Mistral returned
+  // invalid JSON" failure across pivots, personas, launch checklist, the
+  // synthetic panel, and others — the response was CUT OFF mid-generation
+  // because it hit max_tokens before finishing, which produces a string
+  // like `{"personas": [{"name": "Mira Patel", "background": "...craving
+  // creative ways to break` with no closing quote, bracket, or brace.
+  // That's not a formatting quirk to work around during parsing — the
+  // JSON is genuinely incomplete, and no amount of cleanup below can
+  // recover data that was never generated. finish_reason === 'length' is
+  // Mistral's own explicit signal that this happened, so rather than
+  // statically guessing a bigger number and hoping it's always enough
+  // (it never truly is — a sufficiently detailed idea can always need
+  // more), this retries ONCE automatically with substantially more room
+  // the moment truncation is actually detected. Capped at one retry and
+  // a hard ceiling to avoid runaway cost if something is generating
+  // unbounded output for an unrelated reason.
+  if(finishReason === 'length' && !isRetry){
+    const retryBudget = Math.min(maxTokens * 2, 8000);
+    console.log(`[ThinkMaps] Mistral response was truncated at ${maxTokens} tokens — retrying once with ${retryBudget}.`);
+    return callMistral(messages, retryBudget, true);
+  }
 
   // Defensive: models occasionally wrap "pure JSON" in ```json fences or add
   // stray text around it even when told not to. Strip fences, then clip to
@@ -2034,7 +2049,12 @@ async function callMistral(messages, maxTokens = 350){
   try {
     return JSON.parse(cleaned);
   } catch (parseErr) {
-    throw new Error(`Mistral returned invalid JSON (${parseErr.message}). Raw: ${content.slice(0, 200)}`);
+    // Reached only if parsing failed for a reason OTHER than truncation
+    // (already retried above if that was the cause) — a genuinely
+    // malformed response, worth surfacing with the finish_reason
+    // included so it's clear at a glance whether truncation was ruled
+    // out or not.
+    throw new Error(`Mistral returned invalid JSON (${parseErr.message}). finish_reason: ${finishReason}. Raw: ${content.slice(0, 200)}`);
   }
 }
 
@@ -2068,6 +2088,7 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
   }
 
   let accumulated = '';
+  let finishReason = null;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
 
@@ -2083,12 +2104,25 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
       try {
         const parsed = JSON.parse(raw);
         const delta = parsed.choices?.[0]?.delta?.content;
+        if(parsed.choices?.[0]?.finish_reason) finishReason = parsed.choices[0].finish_reason;
         if(delta){
           accumulated += delta;
           try { onToken(delta); } catch(e){ /* don't let a broken SSE write kill the whole call */ }
         }
       } catch (e){ /* malformed chunk — skip */ }
     }
+  }
+
+  // Same truncation issue as the non-streaming path (see callMistral) —
+  // falls back to a plain, non-streaming retry with more room rather
+  // than re-streaming, since restarting the stream would show the
+  // person duplicated or restarted text mid-animation, which is a worse
+  // experience than a brief extra pause before the (correct) result
+  // appears all at once.
+  if(finishReason === 'length'){
+    const retryBudget = Math.min(maxTokens * 2, 8000);
+    console.log(`[ThinkMaps] Mistral streaming response was truncated at ${maxTokens} tokens — retrying once non-streamed with ${retryBudget}.`);
+    return callMistral(messages, retryBudget, true);
   }
 
   // Same cleanup / parse the non-streaming path does
@@ -2103,7 +2137,7 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
   try {
     return JSON.parse(cleaned);
   } catch (parseErr) {
-    throw new Error(`Mistral streaming returned invalid JSON (${parseErr.message}). Raw: ${accumulated.slice(0, 200)}`);
+    throw new Error(`Mistral streaming returned invalid JSON (${parseErr.message}). finish_reason: ${finishReason}. Raw: ${accumulated.slice(0, 200)}`);
   }
 }
 
@@ -3182,12 +3216,32 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
 // compactly on one line — used everywhere a card's real height matters
 // (collision checks, fan-out placement). Only text that actually needs
 // the extra room gets it; short labels stay compact.
+// Was previously a binary check (over/under 26 chars -> 54px or 38px flat)
+// — which meant a label wrapping to 3+ lines got estimated exactly the
+// same as one wrapping to 2, systematically under-counting real height
+// for longer option text and letting the layout collision-avoidance
+// below think there was clearance when there genuinely wasn't. This
+// scales proportionally with the actual estimated wrapped-line count
+// instead of capping at one step up.
+// ~26 characters is roughly what fits on one line at this card width
+// and font size — matches the collision system's existing assumptions,
+// just applied as a per-line divisor now instead of a single threshold.
 function estimateOptionHeight(label){
-  return (label || '').length > 26 ? 54 : 38;
+  const text = label || '';
+  const CHARS_PER_LINE = 26;
+  const lines = Math.max(1, Math.ceil(text.length / CHARS_PER_LINE));
+  const BASE_HEIGHT = 38; // one line
+  const EXTRA_LINE_HEIGHT = 18; // each additional wrapped line
+  return BASE_HEIGHT + (lines - 1) * EXTRA_LINE_HEIGHT;
 }
 
 function estimateHeaderHeight(label){
-  return (label || '').length > 22 ? 56 : 40;
+  const text = label || '';
+  const CHARS_PER_LINE = 22; // headers use a slightly larger font than option rows, so fewer characters fit per line
+  const lines = Math.max(1, Math.ceil(text.length / CHARS_PER_LINE));
+  const BASE_HEIGHT = 40;
+  const EXTRA_LINE_HEIGHT = 18;
+  return BASE_HEIGHT + (lines - 1) * EXTRA_LINE_HEIGHT;
 }
 
 // Filters out anything Mistral hands back without a real, non-empty label —
@@ -3380,8 +3434,15 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
     .neq('id', version.group_id); // exclude the SOURCE group itself — comparing it against its own position is what was breaking the up/down directions
 
   const occupied = [...(existingGroups || [])];
-  const MIN_CLEAR_X = 260; // a bit more than CARD_WIDTH
-  const MIN_CLEAR_Y = 460; // a bit more than a max-height (6-option) card, now taller due to text wrapping
+  const MIN_CLEAR_X = 320; // CARD_WIDTH_ESTIMATE (220) + real margin, not just barely more
+  // Worst realistic case (8-option Pro group, triple-wrapped options,
+  // multi-line header) computes to ~708px — a PREVIOUS version of this
+  // constant was set to exactly 700, meaning the "safety" margin in the
+  // worst case was actually NEGATIVE (708 > 700), not positive. That's
+  // not a safety margin at all, it's a bug waiting for the worst case to
+  // actually occur. 900 gives ~190px of genuine breathing room beyond
+  // the worst case, not just barely covering the average case.
+  const MIN_CLEAR_Y = 900;
 
   function resolveFreePosition(candidateX, candidateY){
     const overlaps = (x, y) => occupied.some(g => {
@@ -3406,8 +3467,8 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
 
   const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
   const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
-  const RADIATE_DISTANCE = 500; // comfortably more than MIN_CLEAR_Y, so a "free" direction has real breathing room against actual neighbors
-  const ASSUMED_CARD_HEIGHT = 56 + 6 * 54 + FOOTER_H; // conservative worst-case (tall header + 6 tall rows) for the screening pass below
+  const RADIATE_DISTANCE = 1000; // comfortably more than the new MIN_CLEAR_Y (900), so a "free" direction has real breathing room against actual neighbors
+  const ASSUMED_CARD_HEIGHT = 76 + 8 * 74 + FOOTER_H; // conservative worst-case (multi-line header + 8 triple-wrapped rows) for the screening pass below, matching MIN_CLEAR_Y's reasoning above
 
   // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
   // coordinates). "Behind" the source — whichever side has nothing nearby —
@@ -4265,8 +4326,11 @@ app.post('/options/:id/custom-spawned-group', requireAuth, async (req, res) => {
     if(!parentGroup) return res.status(404).json({ error: 'Parent group not found.' });
 
     const blueprintId = parentGroup.blueprint_id;
-    const MIN_CLEAR_X = 260;
-    const MIN_CLEAR_Y = 460;
+    // Same recomputed values as the main batch spawn above — see that
+    // comment for the full reasoning (corrected height formula + Pro's
+    // 8-option cap).
+    const MIN_CLEAR_X = 280;
+    const MIN_CLEAR_Y = 700;
 
     const { data: existingGroups } = await supabase
       .from('groups')
@@ -7248,7 +7312,7 @@ async function generateSyntheticPanel(ideaDraft, pathSummary){
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path that shaped this idea: ${pathSummary}` }
-  ]);
+  ], 2000);
 }
 
 // STAGE 3 — Risk-Prioritized Plan. Depends on stages 1 AND 2 already
@@ -7332,7 +7396,7 @@ Respond ONLY with valid JSON: {"pivots": [{"type": "audience"|"monetization"|"sc
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path that produced this idea: ${pathSummary}` }
-  ], 900);
+  ], 1400);
 }
 
 // =====================================================================
@@ -7348,27 +7412,31 @@ Respond ONLY with valid JSON: {"pivots": [{"type": "audience"|"monetization"|"sc
 async function generateLandingPageCopy(idea, marketIntel){
   const forumChatter = marketIntel?.forumChatter || [];
 
-  const systemPrompt = `You are a sharp, specific landing-page copywriter — not a corporate copywriter, not a "helpful assistant." Write real, opinionated, paste-ready landing page copy for the app idea below. This is for a solo founder who needs to put this on Carrd TONIGHT, not for a Series A pitch deck.
+  const systemPrompt = `You are a sharp, specific landing-page copywriter — not a corporate copywriter, not a "helpful assistant." Write real, opinionated, paste-ready landing page copy for the app idea below — a genuinely complete page's worth of copy, not just a hero section. This is for a solo founder who needs something they can paste into any landing-page builder (Carrd, Framer, a plain HTML page, whatever they're already using) TONIGHT, not a Series A pitch deck.
 
 STRICT bans, no exceptions: no corporate language, no passive voice, no "-ing" headlines (nothing starting with a gerund), never use the words "solution," "platform," or "seamlessly," no generic AI-copy phrasing.
 
-Generate exactly this structure:
+Generate exactly this structure, in this order — a real page, top to bottom:
 - heroHeadline: one punchy line, 8 words maximum, names the TRANSFORMATION not the feature.
 - subHeadline: 15-20 words — who it's for and what changes for them specifically.
-- featureBullets: exactly 3 bullets, each following "Problem → Solution → Outcome" in a SINGLE line each. Specific, not abstract.
-- ctaOptions: exactly 3 button text options — one cautious, one medium-commitment, one aggressive.
+- problemAgitation: 2-3 sentences making the pain feel real and specific before the pitch arrives — grounded in the real pain-point language below where it fits naturally, not invented.
+- featureBullets: exactly 4 bullets, each following "Problem → Solution → Outcome" in a SINGLE line each. Specific, not abstract — no two bullets covering the same ground.
+- howItWorks: exactly 3 short steps (a few words each) describing the actual user flow from first open to getting value — concrete, not "sign up, get started, enjoy."
+- objectionHandling: exactly 3 {question, answer} pairs addressing the most likely real skepticism a visitor would have about THIS specific idea (price, whether it actually works, why it's different) — each answer 1-2 sentences, direct, not defensive.
 - socialProofPlaceholder: one fill-in-the-blank sentence shaped for early traction (the founder fills in a real number/detail later).
+- footerCta: one final punchy closing line for the bottom of the page, distinct from the hero headline, that reads as a last nudge before the CTA button.
+- ctaOptions: exactly 3 button text options — one cautious, one medium-commitment, one aggressive.
 
 Use this REAL pain-point language from actual forum chatter about this exact problem — real phrases from real people are far better raw material than anything you'd invent: ${JSON.stringify(forumChatter)}
 
 Idea: ${JSON.stringify(idea)}
 
-Respond ONLY with valid JSON: {"heroHeadline": string, "subHeadline": string, "featureBullets": [string, string, string], "ctaOptions": {"cautious": string, "medium": string, "aggressive": string}, "socialProofPlaceholder": string}`;
+Respond ONLY with valid JSON: {"heroHeadline": string, "subHeadline": string, "problemAgitation": string, "featureBullets": [string, string, string, string], "howItWorks": [string, string, string], "objectionHandling": [{"question": string, "answer": string}, {"question": string, "answer": string}, {"question": string, "answer": string}], "socialProofPlaceholder": string, "footerCta": string, "ctaOptions": {"cautious": string, "medium": string, "aggressive": string}}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate the landing page copy now.' }
-  ], 700);
+  ], 1500);
 }
 
 // =====================================================================
@@ -7448,7 +7516,7 @@ Respond ONLY with valid JSON: {"personas": [{"name": string, "age": number, "occ
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path: ${pathSummary}` }
-  ], 1100);
+  ], 1800);
 }
 
 // =====================================================================
@@ -7538,7 +7606,7 @@ Respond ONLY with valid JSON: {"weeks": [{"weekNumber": 1, "title": "Validate th
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate the launch checklist now.' }
-  ], 1400);
+  ], 2200);
 }
 
 // =====================================================================
@@ -7810,7 +7878,7 @@ Be specific to THIS idea throughout — every section should clearly be about th
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate the build brief now.' }
-  ], 3000);
+  ], 5000);
 }
 
 // Driven by what the PERSON actually typed, not market intel — this is
@@ -8476,6 +8544,17 @@ app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
 
     const currentIdea = session.rewritten_idea || session.result;
     const buildBrief = await generateBuildBrief(currentIdea, session.path_summary, session.deeper_analysis);
+
+    // The prompt asks for 4-8 mvpScope entries, but models don't always
+    // perfectly obey an exact count — occasionally a stray extra entry
+    // comes back with an empty or missing title/description. Rather than
+    // let that render as a confusing blank "9." box with nothing in it,
+    // it's filtered out here at the source, once, rather than needing
+    // every place that ever renders mvpScope to defensively guard against
+    // the same malformed-entry possibility.
+    if(Array.isArray(buildBrief.mvpScope)){
+      buildBrief.mvpScope = buildBrief.mvpScope.filter(item => item?.title?.trim() && item?.description?.trim());
+    }
 
     await supabase.from('confirmation_sessions').update({ build_brief: buildBrief }).eq('id', session.id);
 
