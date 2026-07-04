@@ -686,27 +686,112 @@ async function initPricingSection(){
 
   applyPricingProState(isPro, freeCard, grid, goProBtn);
 
-  goProBtn.addEventListener('click', (e) => {
+  goProBtn.addEventListener('click', async (e) => {
     e.preventDefault();
     if(isPro) return; // button is disabled in this state, but guard anyway
-    openPaymentCheckout(session);
+    await openPaymentCheckout(session);
   });
 }
 
-// Opens the real Coachli payment page. The inbox check that actually
-// applies the upgrade matches the payment back to a ThinkMaps account
-// by EMAIL — so the one thing that genuinely matters here is the person
-// using the same email at Coachli checkout as their ThinkMaps account.
-// Surfaced as a plain confirm dialog rather than silently hoping they
-// notice, since a mismatched email means a real payment with no
-// automatic upgrade to show for it.
-function openPaymentCheckout(session){
-  const accountEmail = session?.user?.email;
-  const message = accountEmail
-    ? `Use this exact email at checkout so we can match your payment to your account: ${accountEmail}`
-    : 'Use the same email at checkout as your ThinkMaps account, so we can match your payment to it.';
-  alert(message);
-  window.open(PAYMENT_URL, '_blank', 'noopener');
+// Opens the real Selar payment page. Three layers work together now to
+// make a mismatched payment vanishingly rare rather than just
+// recoverable after the fact:
+//   1. The account's email is pre-filled directly into the Selar
+//      checkout URL (Selar officially supports &email=... prefilling) —
+//      removes the "typed the wrong email by accident" failure mode
+//      entirely, since the person never has to type it at all.
+//   2. The ThinkMaps username is shown here, big and copyable, right
+//      before checkout — Selar's "ThinkMaps UserName" custom question
+//      is set to Required, so checkout physically can't complete
+//      without an answer, and this makes it near-impossible to fat-
+//      finger since it's copy-pasted, not retyped from memory.
+//   3. /payment/start-checkout still records intent as the final
+//      safety net for the rare case where someone still manages to
+//      enter something unmatchable.
+// What this deliberately does NOT do: intercept or validate anything on
+// Selar's own payment authorization step. There's no hook into that —
+// Selar is a separate company's checkout, and the only signal available
+// after money moves is the notification email. This is the honest
+// ceiling of what's controllable from this side; everything above is
+// about making the failure mode this ceiling can't reach as rare as
+// possible, not pretending the ceiling isn't there.
+async function openPaymentCheckout(session){
+  const accountEmail = session?.user?.email || '';
+  let accountUsername = session?.user?.user_metadata?.username || '';
+
+  // Fallback to the authoritative source if it's missing from the
+  // session's own metadata for any reason — profiles.username is what
+  // the backend actually matches against, so this should never come up
+  // truly empty for a real account.
+  if(!accountUsername){
+    try {
+      const res = await authedFetch('/profile');
+      if(res && res.ok){
+        const body = await res.json();
+        accountUsername = body.username || '';
+      }
+    } catch (err) { /* leave blank — the modal shows a clear message if so */ }
+  }
+
+  try {
+    await authedFetch('/payment/start-checkout', { method: 'POST', body: JSON.stringify({}) });
+  } catch (err) {
+    // Never block checkout over this — worst case, this specific
+    // payment falls back to needing an exact match via email or
+    // username instead of the timing fallback path.
+  }
+
+  showCheckoutConfirmationModal(accountEmail, accountUsername);
+}
+
+function showCheckoutConfirmationModal(accountEmail, accountUsername){
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'checkoutConfirmationModal';
+  overlay.innerHTML = `
+    <div class="modal-card checkout-confirmation-card">
+      <h3>One thing before you pay</h3>
+      <p class="muted">Selar will ask for your ThinkMaps username at checkout — it's required. Copy it now so there's zero chance of a typo:</p>
+      <div class="checkout-username-display">
+        <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
+        <button type="button" class="btn btn-ghost" id="copyCheckoutUsernameBtn">Copy</button>
+      </div>
+      <p class="muted checkout-email-note">Your email (<strong>${escapeHtml(accountEmail)}</strong>) is already filled in for you on the checkout page — no need to type it.</p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="cancelCheckoutBtn" type="button">Cancel</button>
+        <button class="btn btn-primary" id="proceedCheckoutBtn" type="button">Continue to Selar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  document.getElementById('cancelCheckoutBtn')?.addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', (e) => { if(e.target === overlay) overlay.remove(); });
+
+  document.getElementById('copyCheckoutUsernameBtn')?.addEventListener('click', async (e) => {
+    try {
+      await navigator.clipboard.writeText(accountUsername);
+      const btn = e.currentTarget;
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    } catch (err) {
+      showToast('Could not copy — select the text manually.');
+    }
+  });
+
+  document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
+    overlay.remove();
+    // Selar's confirmed prefill parameters — email lands already filled
+    // in on their checkout page, removing the most common real-world
+    // mismatch (using a different personal email than the ThinkMaps
+    // account) at the source rather than catching it after the fact.
+    const params = new URLSearchParams();
+    if(accountEmail) params.set('email', accountEmail);
+    params.set('add_to_cart', '1');
+    const checkoutUrl = `${PAYMENT_URL}?${params.toString()}`;
+    window.open(checkoutUrl, '_blank', 'noopener');
+  });
 }
 
 // Shared between initPricingSection above and the dashboard's "Go Pro"
@@ -897,7 +982,7 @@ function showProPlanModal(){
   if(goProBtn && !isPro){
     goProBtn.addEventListener('click', async () => {
       const session = await getActiveSession();
-      openPaymentCheckout(session);
+      await openPaymentCheckout(session);
     });
   }
 }
