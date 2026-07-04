@@ -621,7 +621,6 @@ function showProFeaturesModal(){
           <li>Richer AI generation — more options per click, plus a "why this fits" hint on each one</li>
           <li>Blueprint Snapshots — save and restore named checkpoints of your whole graph</li>
           <li>A premium visual theme for the canvas itself</li>
-          <li>"Idea Already Exists?" pre-check, right from your first click</li>
         </ul>
       </div>
 
@@ -1730,6 +1729,158 @@ function showToast(message){
   }, 2600);
 }
 
+// =====================================================================
+// GUIDED TOURS — generic coach-mark engine, reused for both the canvas
+// tour and the idea toolkit tour rather than building two one-off
+// implementations.
+//
+// The spotlight effect uses a single trick instead of a separate
+// dimming overlay + z-index juggling against the app's own existing
+// layers (modals, canvas groups, sticky headers): a target element gets
+// `box-shadow: 0 0 0 9999px rgba(...)` — a shadow that extends 9999px
+// in every direction, which visually dims the ENTIRE rest of the page
+// while leaving a "hole" exactly where the target already sits, with
+// zero DOM restructuring and zero stacking-context fights. This is a
+// well-known, robust CSS technique specifically for this effect.
+//
+// Steps reference real selectors and are checked defensively — if a
+// target isn't found (different page, different state, a Pro-only
+// element on a free account), that step is skipped automatically rather
+// than the tour breaking or showing a spotlight around nothing.
+// =====================================================================
+function isCoarsePointer(){
+  return window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+}
+
+function hasSeenTour(tourId){
+  try { return localStorage.getItem(`thinkmaps_tour_seen_${tourId}`) === '1'; }
+  catch(e){ return false; }
+}
+
+function markTourSeen(tourId){
+  try { localStorage.setItem(`thinkmaps_tour_seen_${tourId}`, '1'); }
+  catch(e){ /* private browsing or storage disabled — tour just shows again next time, harmless */ }
+}
+
+let activeTourState = null;
+
+function startTour(tourId, steps){
+  // Resolve steps at call time, not definition time — mobile-specific
+  // wording needs to reflect the actual device the tour is running on.
+  const resolvedSteps = steps
+    .map(step => (typeof step === 'function' ? step() : step))
+    .filter(Boolean);
+
+  if(resolvedSteps.length === 0) return;
+
+  activeTourState = { tourId, steps: resolvedSteps, index: 0 };
+  renderTourStep();
+}
+
+function endTour(){
+  if(activeTourState) markTourSeen(activeTourState.tourId);
+  cleanupTourDOM();
+  activeTourState = null;
+}
+
+function cleanupTourDOM(){
+  document.getElementById('tourCaption')?.remove();
+  document.querySelectorAll('.tour-spotlight').forEach(el => {
+    el.classList.remove('tour-spotlight');
+    el.style.boxShadow = '';
+  });
+}
+
+function renderTourStep(){
+  if(!activeTourState) return;
+  cleanupTourDOM();
+
+  const { steps, index } = activeTourState;
+  const step = steps[index];
+
+  const target = step.selector ? document.querySelector(step.selector) : null;
+
+  // A step that names a selector but can't find it on the page right
+  // now (wrong tab, Pro-only element on a free account, etc.) is
+  // skipped entirely rather than spotlighting nothing — advances
+  // straight to the next step, or ends the tour if this was the last one.
+  if(step.selector && !target){
+    if(index + 1 < steps.length){
+      activeTourState.index++;
+      renderTourStep();
+    } else {
+      endTour();
+    }
+    return;
+  }
+
+  if(target){
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.add('tour-spotlight');
+  }
+
+  const caption = document.createElement('div');
+  caption.id = 'tourCaption';
+  caption.className = 'tour-caption' + (target ? '' : ' tour-caption-centered');
+  caption.innerHTML = `
+    <div class="tour-caption-progress">${index + 1} of ${steps.length}</div>
+    <h4>${escapeHtml(step.title)}</h4>
+    <p>${escapeHtml(step.text)}</p>
+    <div class="tour-caption-actions">
+      <button type="button" class="tour-skip-btn">Skip tour</button>
+      <div class="tour-nav-btns">
+        ${index > 0 ? `<button type="button" class="btn btn-ghost tour-back-btn">Back</button>` : ''}
+        <button type="button" class="btn btn-primary tour-next-btn">${index + 1 === steps.length ? 'Done' : 'Next'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(caption);
+
+  // Position near the target after a frame, once scrollIntoView has
+  // actually settled — positioning against a mid-scroll rect would be wrong.
+  requestAnimationFrame(() => {
+    if(!target){
+      caption.style.top = '50%';
+      caption.style.left = '50%';
+      caption.style.transform = 'translate(-50%, -50%)';
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    const captionRect = caption.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+
+    let top;
+    if(spaceBelow > captionRect.height + 24 || spaceBelow > spaceAbove){
+      top = rect.bottom + 16;
+    } else {
+      top = rect.top - captionRect.height - 16;
+    }
+    top = Math.max(12, Math.min(top, window.innerHeight - captionRect.height - 12));
+
+    let left = rect.left + rect.width / 2 - captionRect.width / 2;
+    left = Math.max(12, Math.min(left, window.innerWidth - captionRect.width - 12));
+
+    caption.style.top = `${top}px`;
+    caption.style.left = `${left}px`;
+  });
+
+  caption.querySelector('.tour-skip-btn')?.addEventListener('click', endTour);
+  caption.querySelector('.tour-next-btn')?.addEventListener('click', () => {
+    if(index + 1 < steps.length){
+      activeTourState.index++;
+      renderTourStep();
+    } else {
+      endTour();
+    }
+  });
+  caption.querySelector('.tour-back-btn')?.addEventListener('click', () => {
+    activeTourState.index--;
+    renderTourStep();
+  });
+}
+
+
 // One shared renderer for every pro-gated action button on the confirm
 // result page (deeper analysis, fixes, build brief, suggest changes) —
 // active and clickable for pro users, a clearly-labeled locked state
@@ -1842,6 +1993,68 @@ async function initAppPage(){
   });
   setupBlueprintTitleEditing();
   await loadGraph();
+  renderTourReopenButton();
+  if(!hasSeenTour('canvas')) startTour('canvas', getCanvasTourSteps());
+}
+
+// Defined as functions (not a plain array) so mobile-specific wording —
+// "long-press" vs "hold Ctrl" — reflects the actual device this runs on,
+// resolved fresh every time the tour starts rather than baked in once.
+function getCanvasTourSteps(){
+  return [
+    {
+      title: 'Welcome to your Blueprint Graph',
+      text: "This is your canvas — a quick tour of the basics, five steps, skip anytime."
+    },
+    {
+      selector: '#canvasViewport',
+      title: 'Pan around',
+      text: isCoarsePointer()
+        ? 'Drag anywhere on the canvas with your finger to pan around.'
+        : 'Click and drag anywhere on the canvas (not on a card) to pan around.'
+    },
+    {
+      selector: '.canvas-controls',
+      title: 'Zoom in and out',
+      text: isCoarsePointer()
+        ? 'Use these buttons to zoom, or pinch directly on the canvas.'
+        : 'Use these buttons to zoom, or scroll directly on the canvas.'
+    },
+    {
+      selector: '.canvas-option',
+      title: 'Pick a direction',
+      text: 'Click any option to activate it — this spawns new groups branching off your choice, building your path deeper.'
+    },
+    {
+      selector: '.canvas-group-footer',
+      title: 'Not quite right?',
+      text: "Retry regenerates this group's options, Random picks one for you, +Custom lets you type your own idea instead of picking one."
+    },
+    {
+      title: 'Combine ideas together (Pro)',
+      text: isCoarsePointer()
+        ? 'Long-press an option, then tap others to select several — combine them into one fused idea.'
+        : 'Hold Ctrl and click multiple options to select several — combine them into one fused idea.'
+    }
+  ];
+}
+
+// Same small "?" button pattern already used for Snapshots — appended
+// into the existing .canvas-controls cluster rather than needing any
+// change to app.html's own markup. Always visible, always restarts the
+// tour from scratch regardless of whether it's already been seen.
+function renderTourReopenButton(){
+  const controls = document.querySelector('.canvas-controls');
+  if(!controls || document.getElementById('canvasTourReopenBtn')) return;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'canvasTourReopenBtn';
+  btn.className = 'zoom-btn';
+  btn.title = 'Replay the tour';
+  btn.innerHTML = '?';
+  btn.addEventListener('click', () => startTour('canvas', getCanvasTourSteps()));
+  controls.appendChild(btn);
 }
 
 async function loadGraph(){
@@ -3657,87 +3870,11 @@ function updateStreamingPreview(labels, tokenCount){
   }
 }
 
-// ---------- 5. "Idea Already Exists?" Pre-Check ----------
-// Fires exactly once per blueprint, right after the very first root
-// option activation (see the isFirstEverActivation capture in
-// handleOptionActivate below). Never blocks — this is context, not a
-// gate, so any failure just quietly does nothing rather than
-// interrupting canvas exploration.
-async function maybeRunPreCheck(nicheLabel){
-  if(!nicheLabel) return;
-  // Pro-only, checked here before ever hitting the endpoint — this
-  // trigger is automatic, not something the user clicked, so a free
-  // user should just see nothing happen rather than an upgrade prompt
-  // interrupting their very first canvas click.
-  if(!canvasState.isPro) return;
-  try {
-    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/precheck`, {
-      method: 'POST',
-      body: JSON.stringify({ nicheLabel, firstOptionText: nicheLabel })
-    });
-    if(!res || !res.ok) return;
-    const body = await res.json();
-    if(body?.precheck) showPreCheckModal(body.precheck);
-  } catch (err) {
-    // Silent — pre-check is a nice-to-have, never worth surfacing an
-    // error over on top of what's already a smooth canvas moment.
-  }
-}
-
-function showPreCheckModal(precheck){
-  const existing = document.getElementById('preCheckModal');
-  if(existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.id = 'preCheckModal';
-
-  const productsHtml = (precheck.products || []).map(p => `
-    <a href="${escapeHtml(p.url || '#')}" target="_blank" rel="noopener" class="precheck-product-row">
-      <span class="precheck-product-name">${escapeHtml(p.name)}</span>
-      <span class="precheck-product-desc">${escapeHtml(p.description)}</span>
-    </a>
-  `).join('');
-
-  overlay.innerHTML = `
-    <div class="modal-card precheck-modal-card">
-      <span class="eyebrow">Worth knowing</span>
-      <h3>Here's what's already out there</h3>
-      ${productsHtml ? `<div class="precheck-products-list">${productsHtml}</div>` : ''}
-      <p class="precheck-gap-sentence">${escapeHtml(precheck.gapSentence || '')}</p>
-      <p class="muted precheck-disclaimer">This is context, not a verdict — some of the best ideas look crowded from the outside.</p>
-      <div class="modal-actions precheck-actions">
-        <button class="btn btn-ghost" id="precheckRethinkBtn" type="button">Let me rethink the niche</button>
-        <button class="btn btn-primary" id="precheckContinueBtn" type="button">I see the gap, keep going</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  document.getElementById('precheckContinueBtn')?.addEventListener('click', () => overlay.remove());
-  document.getElementById('precheckRethinkBtn')?.addEventListener('click', () => {
-    overlay.remove();
-    // Collapses back to niche selection WITHOUT losing the blueprint —
-    // the root group is still there, this just pans/zooms the view back
-    // to it (reusing the same function the zoom-reset button already
-    // calls) so the person can pick a different root option instead.
-    canvasState.zoom = 1;
-    centerCanvasOnRoot();
-  });
-}
-
 
 async function handleOptionActivate(optionId){
   if(canvasState.isLocked) return;
   const option = canvasState.options.find(o => o.id === optionId);
   setCanvasBusy(true, buildActivationAckMessage(option?.label));
-
-  // Only the root "Niches" group exists before anything has ever been
-  // activated on this blueprint — capturing that BEFORE the fetch call
-  // below is what lets the pre-check trigger fire exactly once, on the
-  // genuinely first click, and never again on any later activation.
-  const isFirstEverActivation = canvasState.groups.length === 1;
-  const nicheLabelForPrecheck = option?.label;
 
   let tokenCount = 0;
 
@@ -3814,7 +3951,6 @@ async function handleOptionActivate(optionId){
           } else {
             await loadGraph(); // fallback if full graph wasn't returned
           }
-          if(isFirstEverActivation) maybeRunPreCheck(nicheLabelForPrecheck);
         } else if(event.type === 'error'){
           alert(event.error || 'Could not activate that option.');
           return;
@@ -3839,7 +3975,6 @@ async function handleOptionActivate(optionId){
         } else {
           await loadGraph();
         }
-        if(isFirstEverActivation) maybeRunPreCheck(nicheLabelForPrecheck);
       }
     } catch(fallbackErr){
       alert('Something went wrong activating that option.');
@@ -4645,8 +4780,13 @@ async function renderConfirmResult(result){
     <div id="buildBriefSection"></div>
 
     <div class="idea-toolkit">
-      <h3 class="confirm-section-title">Idea toolkit</h3>
-      <p class="idea-toolkit-intro muted">Everything below builds on the hardened idea above — take what's useful, skip what isn't.</p>
+      <div class="idea-toolkit-header-row">
+        <div>
+          <h3 class="confirm-section-title">Idea toolkit</h3>
+          <p class="idea-toolkit-intro muted">Everything below builds on the hardened idea above — take what's useful, skip what isn't.</p>
+        </div>
+        <button type="button" class="btn btn-ghost toolkit-tour-reopen-btn" id="toolkitTourReopenBtn">What does each of these do?</button>
+      </div>
 
       <div class="toolkit-grid">
         <div class="toolkit-card" id="strengthScoreCard"></div>
@@ -5363,10 +5503,8 @@ function renderShareLink(token){
 // Every one of these follows the same shape as Build Brief above:
 // renderXSection() decides gated-button vs already-cached-result,
 // runX() fetches/generates and caches into confirmState, renderX()
-// paints the actual result. initIdeaToolkit() just calls all 8 section
-// renderers once (the 9th, the Pre-Check, isn't rendered here at all —
-// it's triggered from the canvas on the very first option activation,
-// see initAppPage).
+// paints the actual result. initIdeaToolkit() just calls all 7 section
+// renderers once.
 // =====================================================================
 function initIdeaToolkit(){
   renderStrengthScoreSection();
@@ -5377,6 +5515,58 @@ function initIdeaToolkit(){
   renderSpyModeSection();
   renderLaunchChecklistSection();
   renderExportSection();
+
+  document.getElementById('toolkitTourReopenBtn')?.addEventListener('click', () => startTour('toolkit', getToolkitTourSteps()));
+  if(!hasSeenTour('toolkit')) startTour('toolkit', getToolkitTourSteps());
+}
+
+function getToolkitTourSteps(){
+  return [
+    {
+      title: 'Everything past this point is optional',
+      text: "Your idea is already hardened above — everything below is extra firepower if you want it. Quick tour, eight stops."
+    },
+    {
+      selector: '#strengthScoreCard',
+      title: 'Idea Strength Score',
+      text: 'Four honest scores — market clarity, competitive gap, personal fit, technical feasibility — with real, specific reasoning behind each, not a generic pep talk.'
+    },
+    {
+      selector: '#pivotsCard',
+      title: 'Pivot Generator',
+      text: 'Three genuinely different directions for this same idea — a different audience, a different business model, a different scope. "Build This Instead" starts a fresh blueprint carrying that pivot forward.'
+    },
+    {
+      selector: '#personasCard',
+      title: 'User Persona Cards',
+      text: 'Three specific, named people who represent your real audience — daily routine, real frustrations, what would actually make them pay.'
+    },
+    {
+      selector: '#landingCopyCard',
+      title: 'Landing Page Copy',
+      text: 'Real, paste-ready copy for a landing page — headline, sub-headline, feature bullets, FAQ, CTA options — written for this exact idea, not a generic template.'
+    },
+    {
+      selector: '#redTeamCard',
+      title: 'Challenge This Idea',
+      text: "A sharp, unbalanced critique across five angles — market risk, technical traps, distribution, timing, founder fit. This is the counterweight to everything positive you've seen so far."
+    },
+    {
+      selector: '#spyModeCard',
+      title: 'Spy Mode',
+      text: "A full intelligence profile on each real competitor — what they're good at, where users complain, their pricing, and a specific attack vector. \"Steal This\" adds it straight to your Build Brief."
+    },
+    {
+      selector: '#launchChecklistCard',
+      title: 'Launch Checklist',
+      text: 'A week-by-week plan — validate, build, get 10 real users, measure — specific to this idea, not a generic startup checklist. Checkboxes save automatically.'
+    },
+    {
+      selector: '#exportCard',
+      title: 'Export This Idea',
+      text: 'A complete, properly formatted package of everything you\'ve generated — download as Markdown or export as a real PDF, ready to send to anyone.'
+    }
+  ];
 }
 
 // ---------- 1. Idea Strength Score ----------
