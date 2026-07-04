@@ -1400,17 +1400,13 @@ async function checkForNewPayments(){
   }
 
   try {
-    // Broad search on purpose — "coachli" or "selar" anywhere in the
-    // sender or subject, last 2 days (generous overlap window, since
+    // Broad search on purpose — "selar" anywhere in the sender or
+    // subject, last 2 days (generous overlap window, since
     // isPaymentEmailProcessed already guarantees no email is ever
     // double-processed regardless of how many times it's re-seen here).
-    // Selar stays in the query harmlessly in case anything from the old
-    // gateway is still mid-transit during the switch — it costs nothing
-    // to keep matching it, and can be dropped later once that's certain
-    // to be moot.
     const listRes = await gmailApi.users.messages.list({
       userId: 'me',
-      q: '(coachli OR selar) newer_than:2d',
+      q: 'selar newer_than:2d',
       maxResults: 20
     });
 
