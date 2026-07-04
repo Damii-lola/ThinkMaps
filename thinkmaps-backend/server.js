@@ -10,6 +10,7 @@ const { NICHE_PATHWAYS } = require('./niche_pathways');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render sits behind a reverse proxy — without this, req.ip (and every
 // rate limiter keyed on it below) sees Render's internal proxy address
 // for every single request rather than the real visitor's IP, which
 // would silently bundle every user under one shared rate-limit identity
@@ -2519,6 +2520,90 @@ const PATH_DEPTH_CAP_PRO = 10;
 function getPathDepthCap(isPro){
   return isPro ? PATH_DEPTH_CAP_PRO : PATH_DEPTH_CAP_FREE;
 }
+
+// One-time backfill for blueprints built during a PAST Pro period by an
+// account that has since downgraded. The "protect on next Pro edit" fix
+// (see the created_as_pro update calls throughout the activation routes
+// below) only ever fires going forward, at the moment of a Pro edit —
+// it structurally cannot protect a blueprint that was substantially
+// built while Pro if the account is free RIGHT NOW and nobody re-edits
+// it, since there's no Pro edit happening to trigger it.
+//
+// The fix here uses real, verifiable evidence instead of just trusting
+// account history: PATH_DEPTH_CAP_FREE (7) is enforced SERVER-SIDE at
+// generation time — a free-tier account is physically blocked from ever
+// reaching depth 8+ (see the depth check in /blueprints/:id/confirm/start
+// and the cap check inside activateOption). So any blueprint that
+// genuinely has a group 8 or more levels deep could ONLY have gotten
+// there with Pro access at some point, regardless of what tier the
+// account happens to be on today. That's a fact about the data, not a
+// guess about history.
+async function computeMaxDepthForBlueprint(blueprintId){
+  const [{ data: groups }, { data: allOptions }, { data: allVersions }] = await Promise.all([
+    supabase.from('groups').select('id, spawned_from_option_id').eq('blueprint_id', blueprintId),
+    supabase.from('options').select('id, group_version_id'),
+    supabase.from('group_versions').select('id, group_id')
+  ]);
+
+  if(!groups || groups.length === 0) return 0;
+
+  // option id -> the group_version it belongs to
+  const versionByOption = {};
+  (allOptions || []).forEach(o => { versionByOption[o.id] = o.group_version_id; });
+  // group_version id -> the group it belongs to
+  const groupByVersion = {};
+  (allVersions || []).forEach(v => { groupByVersion[v.id] = v.group_id; });
+
+  // group id -> its parent group id (via spawned_from_option_id -> option -> version -> group)
+  const parentOf = {};
+  groups.forEach(g => {
+    if(!g.spawned_from_option_id) return;
+    const versionId = versionByOption[g.spawned_from_option_id];
+    const parentGroupId = versionId ? groupByVersion[versionId] : null;
+    if(parentGroupId) parentOf[g.id] = parentGroupId;
+  });
+
+  // Depth of a group = 1 + depth of its parent, memoized since the same
+  // parent chain gets walked repeatedly across many groups otherwise.
+  const depthCache = {};
+  function depthOf(groupId){
+    if(depthCache[groupId] != null) return depthCache[groupId];
+    const parent = parentOf[groupId];
+    const depth = parent ? depthOf(parent) + 1 : 1;
+    depthCache[groupId] = depth;
+    return depth;
+  }
+
+  return Math.max(...groups.map(g => depthOf(g.id)));
+}
+
+app.post('/admin/backfill-pro-protection/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+
+  try {
+    const { data: candidates } = await supabase
+      .from('blueprints')
+      .select('id, title')
+      .eq('created_as_pro', false);
+
+    const protectedNow = [];
+
+    for(const bp of (candidates || [])){
+      const maxDepth = await computeMaxDepthForBlueprint(bp.id);
+      if(maxDepth > PATH_DEPTH_CAP_FREE){
+        await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', bp.id);
+        protectedNow.push({ id: bp.id, title: bp.title, maxDepth });
+      }
+    }
+
+    res.status(200).json({ scanned: (candidates || []).length, protectedNow });
+  } catch (err) {
+    res.status(500).json({ error: 'Backfill failed.', detail: err.message });
+  }
+});
+
 const GENERATE_IDEAS_BLOCK_NAME = 'Ready to Generate Ideas';
 
 // A group of this block_name never gets AI-generated content — it's a
@@ -3435,20 +3520,32 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
 
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 320; // CARD_WIDTH_ESTIMATE (220) + real margin, not just barely more
-  // Worst realistic case (8-option Pro group, triple-wrapped options,
-  // multi-line header) computes to ~708px — a PREVIOUS version of this
-  // constant was set to exactly 700, meaning the "safety" margin in the
-  // worst case was actually NEGATIVE (708 > 700), not positive. That's
-  // not a safety margin at all, it's a bug waiting for the worst case to
-  // actually occur. 900 gives ~190px of genuine breathing room beyond
-  // the worst case, not just barely covering the average case.
-  const MIN_CLEAR_Y = 900;
+  // A reasonable, TYPICAL neighbor height — not the pathological worst
+  // case (8 options, every one triple-wrapped) that a previous version of
+  // this code used as a FLAT requirement for every single group
+  // regardless of its real size. That's what caused the opposite bug
+  // reported right after: small, ordinary groups (3-4 short options)
+  // were being spaced as if they were the largest possible group,
+  // producing huge empty gaps for the common case. This assumes a
+  // realistic median group (header + 5 single-line options + footer)
+  // as the baseline neighbor allowance, and — critically — the actual
+  // clearance check below adds the REAL height of the specific group
+  // being placed on top of this, so a genuinely large group still gets
+  // genuinely more room, and a small one doesn't get punished for a
+  // worst case it isn't.
+  const TYPICAL_NEIGHBOR_HEIGHT = 40 + 5 * 38 + 40;
+  const Y_BUFFER = 60; // real breathing room between two cards' edges, not baked into either height estimate
 
-  function resolveFreePosition(candidateX, candidateY){
+  function requiredClearanceY(placedHeight){
+    return (placedHeight / 2) + (TYPICAL_NEIGHBOR_HEIGHT / 2) + Y_BUFFER;
+  }
+
+  function resolveFreePosition(candidateX, candidateY, placedHeight){
+    const minClearY = requiredClearanceY(placedHeight);
     const overlaps = (x, y) => occupied.some(g => {
       const dx = Math.abs((g.position_x || 0) - x);
       const dy = Math.abs((g.position_y || 0) - y);
-      return dx < MIN_CLEAR_X && dy < MIN_CLEAR_Y;
+      return dx < MIN_CLEAR_X && dy < minClearY;
     });
 
     let x = candidateX;
@@ -3467,8 +3564,11 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
 
   const sourceCenterX = (parentGroup?.position_x || 0) + CARD_WIDTH_ESTIMATE / 2;
   const sourceCenterY = (parentGroup?.position_y || 0) + parentCardHeight / 2;
-  const RADIATE_DISTANCE = 1000; // comfortably more than the new MIN_CLEAR_Y (900), so a "free" direction has real breathing room against actual neighbors
-  const ASSUMED_CARD_HEIGHT = 76 + 8 * 74 + FOOTER_H; // conservative worst-case (multi-line header + 8 triple-wrapped rows) for the screening pass below, matching MIN_CLEAR_Y's reasoning above
+  // Comfortably more than a typical requiredClearanceY, so a "free"
+  // direction has real breathing room against actual neighbors for the
+  // common case — genuinely large groups still get their own extra room
+  // via requiredClearanceY's use of their real height, not this constant.
+  const RADIATE_DISTANCE = 420;
 
   // 8 compass directions (degrees; 0 = right, -90 = up, 90 = down, screen
   // coordinates). "Behind" the source — whichever side has nothing nearby —
@@ -3483,11 +3583,12 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
     // ALSO top-left corners, so this has to match units or the clearance
     // check is silently off by half a card's width/height.
     const testX = centerX - CARD_WIDTH_ESTIMATE / 2;
-    const testY = centerY - ASSUMED_CARD_HEIGHT / 2;
+    const testY = centerY - TYPICAL_NEIGHBOR_HEIGHT / 2;
+    const minClearY = requiredClearanceY(TYPICAL_NEIGHBOR_HEIGHT);
     return !occupied.some(g => {
       const dx = Math.abs((g.position_x || 0) - testX);
       const dy = Math.abs((g.position_y || 0) - testY);
-      return dx < MIN_CLEAR_X && dy < MIN_CLEAR_Y;
+      return dx < MIN_CLEAR_X && dy < minClearY;
     });
   }
 
@@ -3528,7 +3629,7 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
       candidateY = baseY + (Math.random() - 0.5) * 300;
     }
 
-    const { x, y } = resolveFreePosition(candidateX, candidateY);
+    const { x, y } = resolveFreePosition(candidateX, candidateY, candidateHeight);
 
     const { data: newGroup, error: groupInsertError } = await supabase
       .from('groups')
@@ -4363,11 +4464,18 @@ app.post('/options/:id/custom-spawned-group', requireAuth, async (req, res) => {
     if(!parentGroup) return res.status(404).json({ error: 'Parent group not found.' });
 
     const blueprintId = parentGroup.blueprint_id;
-    // Same recomputed values as the main batch spawn above — see that
-    // comment for the full reasoning (corrected height formula + Pro's
-    // 8-option cap).
-    const MIN_CLEAR_X = 280;
-    const MIN_CLEAR_Y = 700;
+    // A custom-spawned group is always small and empty (just a header +
+    // one "+Custom" input + footer, no AI-generated options at all) — so
+    // it needs modest clearance, not the flat worst-case-derived
+    // constants this route was still using even after the main batch
+    // spawn path above was fixed to be content-aware. Same formula
+    // philosophy as resolveFreePosition above: real size of what's being
+    // placed, plus a typical-neighbor allowance, plus real buffer — not
+    // one static number assumed to fit every case.
+    const MIN_CLEAR_X = 320;
+    const TYPICAL_NEIGHBOR_HEIGHT = 40 + 5 * 38 + 40;
+    const CUSTOM_GROUP_HEIGHT = 40 + 40; // header + footer only, no options yet
+    const MIN_CLEAR_Y = (CUSTOM_GROUP_HEIGHT / 2) + (TYPICAL_NEIGHBOR_HEIGHT / 2) + 60;
 
     const { data: existingGroups } = await supabase
       .from('groups')
