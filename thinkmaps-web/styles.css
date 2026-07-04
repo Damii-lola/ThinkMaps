@@ -1695,11 +1695,19 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
    GUIDED TOURS — spotlight + coach-mark caption system
    ===================================================================== */
 .tour-spotlight{
-  position:relative; z-index:10000 !important;
+  z-index:10000 !important;
   box-shadow:0 0 0 6px var(--accent), 0 0 0 9999px rgba(20,16,12,0.62) !important;
   border-radius:inherit;
   transition:box-shadow .2s ease;
 }
+/* Only applied via JS, and only when the target's own computed position
+   is 'static' (the default — meaning it has no positioning of its own
+   yet) — a truly static element needs SOME position value for the
+   z-index/box-shadow spotlight to actually take effect at all. Anything
+   that already has fixed/absolute/relative positioning (like
+   .canvas-controls, deliberately anchored to a screen corner) keeps
+   its own position completely untouched. */
+.tour-needs-position{ position:relative; }
 .tour-caption{
   position:fixed; z-index:10001; max-width:340px;
   background:var(--surface); border:1px solid var(--line); border-radius:14px;
