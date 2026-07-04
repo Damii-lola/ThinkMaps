@@ -1460,21 +1460,6 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 .checklist-metric-row{ font-size:13px; margin-bottom:10px; }
 .checklist-pivot-link{ display:inline-block; margin-top:6px; font-size:12.5px; }
 
-/* ---------- Pre-Check Modal ---------- */
-.precheck-modal-card{ max-width:460px; }
-.precheck-products-list{ display:flex; flex-direction:column; gap:8px; margin:14px 0; }
-.precheck-product-row{
-  display:flex; flex-direction:column; gap:2px; padding:10px 12px;
-  background:var(--bg); border:1px solid var(--line); border-radius:8px;
-  text-decoration:none; color:var(--ink);
-}
-.precheck-product-row:hover{ border-color:var(--accent); }
-.precheck-product-name{ font-weight:600; font-size:13.5px; }
-.precheck-product-desc{ font-size:12px; color:var(--ink-muted); }
-.precheck-gap-sentence{ font-size:14px; font-weight:500; margin:10px 0; }
-.precheck-disclaimer{ font-size:12px; margin-bottom:16px; }
-.precheck-actions{ justify-content:space-between; }
-
 /* =====================================================================
    EXPORT PAGE (export.html) — print-first, screen-friendly too
    ===================================================================== */
@@ -1705,3 +1690,46 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 }
 .lc-copy-btn:hover{ border-color:var(--accent); color:var(--accent-deep); }
 .lc-carrd-explainer{ font-size:12px; margin-top:10px; line-height:1.5; }
+
+/* =====================================================================
+   GUIDED TOURS — spotlight + coach-mark caption system
+   ===================================================================== */
+.tour-spotlight{
+  position:relative; z-index:10000 !important;
+  box-shadow:0 0 0 6px var(--accent), 0 0 0 9999px rgba(20,16,12,0.62) !important;
+  border-radius:inherit;
+  transition:box-shadow .2s ease;
+}
+.tour-caption{
+  position:fixed; z-index:10001; max-width:340px;
+  background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  padding:18px 20px; box-shadow:0 12px 32px rgba(0,0,0,0.28);
+}
+.tour-caption-centered{
+  max-width:380px; text-align:center;
+}
+.tour-caption-progress{
+  font-family:var(--font-mono); font-size:11px; text-transform:uppercase;
+  letter-spacing:.05em; color:var(--accent-deep); margin-bottom:8px;
+}
+.tour-caption h4{ font-size:16px; margin-bottom:6px; }
+.tour-caption p{ font-size:13.5px; line-height:1.55; color:var(--ink); margin-bottom:14px; }
+.tour-caption-actions{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.tour-skip-btn{
+  background:none; border:none; font-size:12px; color:var(--ink-muted);
+  cursor:pointer; text-decoration:underline; padding:0;
+}
+.tour-skip-btn:hover{ color:var(--ink); }
+.tour-nav-btns{ display:flex; gap:8px; }
+.tour-nav-btns .btn{ padding:8px 16px; font-size:13px; }
+
+/* ---------- Toolkit tour header + reopen button ---------- */
+.idea-toolkit-header-row{
+  display:flex; align-items:flex-start; justify-content:space-between;
+  gap:16px; flex-wrap:wrap; margin-bottom:4px;
+}
+.toolkit-tour-reopen-btn{ font-size:12.5px; padding:8px 14px; white-space:nowrap; flex-shrink:0; }
+
+@media (max-width:640px){
+  .tour-caption{ max-width:calc(100vw - 32px); }
+}
