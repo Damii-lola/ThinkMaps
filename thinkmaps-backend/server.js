@@ -779,7 +779,64 @@ app.post('/auth/signup-verify', async (req, res) => {
     });
 
     if(createError){
-      if(/duplicate|unique/i.test(createError.message) || (/already/i.test(createError.message) && /register/i.test(createError.message))){
+      const looksLikeDuplicate = /duplicate|unique/i.test(createError.message) || (/already/i.test(createError.message) && /register/i.test(createError.message));
+
+      if(looksLikeDuplicate){
+        // Not necessarily a genuine duplicate — this also fires for an
+        // ORPHANED account: an earlier signup attempt where
+        // admin.createUser succeeded (auth.users got a row) but
+        // something after that never finished (a crashed request, a
+        // failed profiles insert, etc.), leaving a real login identity
+        // with no matching profiles row. That email is then permanently
+        // stuck — every future signup attempt hits this same "already
+        // registered" error forever, even though nothing in `profiles`
+        // shows anything taken. Rather than leave that as a dead end,
+        // check for exactly that condition and self-heal it: since this
+        // person just proved ownership of the email via OTP, finishing
+        // the setup on the EXISTING auth account is correct and safe,
+        // not a security shortcut.
+        const { data: userList } = await supabase.auth.admin.listUsers();
+        const existingAuthUser = userList?.users?.find(u => u.email?.toLowerCase() === email.toLowerCase());
+
+        if(existingAuthUser){
+          const { data: existingProfile } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('id', existingAuthUser.id)
+            .maybeSingle();
+
+          if(!existingProfile){
+            console.log(`[ThinkMaps] signup-verify: found an orphaned auth account for ${email} (auth user exists, no profile row) — self-healing instead of blocking.`);
+
+            // They just verified this OTP with a freshly-chosen
+            // password — setting it on the existing auth identity is
+            // exactly what "finish creating my account" should mean
+            // here, not leaving them stuck on a password from a signup
+            // attempt that never actually completed.
+            await supabase.auth.admin.updateUserById(existingAuthUser.id, {
+              password,
+              email_confirm: true,
+              user_metadata: { username }
+            });
+
+            const { error: profileInsertError } = await supabase
+              .from('profiles')
+              .insert({ id: existingAuthUser.id, email, username, pro_status: false });
+
+            if(profileInsertError){
+              // A genuine username collision at this exact point is the
+              // one case still worth surfacing as a real error, rather
+              // than silently pretending the account is ready.
+              return res.status(400).json({ error: 'That username is already taken — try a different one.' });
+            }
+
+            await deletePendingAuth(email, 'signup');
+            return res.status(201).json({ verified: true, email });
+          }
+        }
+
+        // A real profile already exists for this email/username — this
+        // IS a genuine duplicate, not an orphaned account.
         return res.status(400).json({ error: 'That email or username is already taken.' });
       }
       throw createError;
