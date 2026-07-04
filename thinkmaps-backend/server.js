@@ -10,11 +10,13 @@ const { NICHE_PATHWAYS } = require('./niche_pathways');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Render sits behind a reverse proxy — without this, req.ip (and every
 // rate limiter keyed on it below) sees Render's internal proxy address
 // for every single request rather than the real visitor's IP, which
 // would silently bundle every user under one shared rate-limit identity
 // instead of limiting each person individually. `1` trusts exactly one
-// hop of proxy (Render's own), not an arbitrary chain,
+// hop of proxy (Render's own), not an arbitrary chain, which is the
+// correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
 
 // Security headers — CSP is intentionally loose on script-src/style-src
@@ -434,16 +436,25 @@ async function getPendingAuth(email, type){
 }
 
 async function incrementPendingAuthAttempts(email, type){
-  await supabase.rpc('increment_pending_auth_attempts', { p_email: email, p_type: type }).catch(async () => {
-    // Fallback if the RPC function isn't set up — a plain read-then-write
-    // is fine here since attempt counting doesn't need to be perfectly
-    // race-proof, just approximately right (worst case, a concurrent
-    // double-submit costs one extra attempt of headroom, not a security hole).
-    const { data } = await supabase.from('pending_auth').select('attempts').eq('email', email).eq('type', type).maybeSingle();
-    if(data){
-      await supabase.from('pending_auth').update({ attempts: (data.attempts || 0) + 1 }).eq('email', email).eq('type', type);
-    }
-  });
+  // Wrapped in a top-level try/catch on top of the existing .catch()
+  // fallback below — this counter is purely best-effort bookkeeping,
+  // and it should be structurally impossible for it to throw and mask
+  // the actual "that code is incorrect" response the caller is trying
+  // to send back, replacing it with a confusing generic error instead.
+  try {
+    await supabase.rpc('increment_pending_auth_attempts', { p_email: email, p_type: type }).catch(async () => {
+      // Fallback if the RPC function isn't set up — a plain read-then-write
+      // is fine here since attempt counting doesn't need to be perfectly
+      // race-proof, just approximately right (worst case, a concurrent
+      // double-submit costs one extra attempt of headroom, not a security hole).
+      const { data } = await supabase.from('pending_auth').select('attempts').eq('email', email).eq('type', type).maybeSingle();
+      if(data){
+        await supabase.from('pending_auth').update({ attempts: (data.attempts || 0) + 1 }).eq('email', email).eq('type', type);
+      }
+    });
+  } catch (err) {
+    console.error('[ThinkMaps] incrementPendingAuthAttempts failed (non-fatal, attempt count just won\'t advance this time):', err.message);
+  }
 }
 
 async function deletePendingAuth(email, type){
@@ -778,6 +789,7 @@ app.post('/auth/signup-verify', async (req, res) => {
 
     res.status(201).json({ verified: true, email });
   } catch (err) {
+    console.error(`[ThinkMaps] signup-verify failed unexpectedly for ${req.body?.email}:`, err.message);
     res.status(500).json({ error: 'Could not verify code.', detail: err.message });
   }
 });
@@ -882,6 +894,7 @@ app.post('/auth/login-verify', async (req, res) => {
 
     res.status(200).json({ verified: true, accessToken, refreshToken });
   } catch (err) {
+    console.error(`[ThinkMaps] login-verify failed unexpectedly for ${req.body?.email}:`, err.message);
     res.status(500).json({ error: 'Could not verify code.', detail: err.message });
   }
 });
