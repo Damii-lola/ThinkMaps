@@ -745,6 +745,54 @@ async function initDashboardPage(){
   setupNewBlueprintModal();
   renderFeedbackButton();
   await loadDashboard();
+  await maybeHandlePaymentRedirect();
+}
+
+// Selar's post-purchase redirect lands here with ?email=...&fullname=...
+// in the URL — a real, useful signal that a payment probably just
+// happened, but never trusted directly (anyone could craft a URL with
+// any email in it). Instead this just triggers an immediate check via
+// /payment/recheck-now, which only ever reports back the LOGGED-IN
+// user's own resulting status — the query params here are only used to
+// decide whether to bother checking at all and what to tell the person,
+// never to decide who gets upgraded.
+async function maybeHandlePaymentRedirect(){
+  const params = new URLSearchParams(window.location.search);
+  const redirectEmail = params.get('email');
+  if(!redirectEmail) return;
+
+  // Clean the URL immediately regardless of outcome — refreshing the
+  // page shouldn't re-trigger this every time.
+  const cleanUrl = window.location.pathname;
+  window.history.replaceState({}, '', cleanUrl);
+
+  const session = await getActiveSession();
+  const accountEmail = session?.user?.email;
+
+  if(accountEmail && redirectEmail.toLowerCase() !== accountEmail.toLowerCase()){
+    // The email used at checkout doesn't match the logged-in account —
+    // this is exactly the situation that silently breaks the automatic
+    // matching, so it's surfaced plainly rather than just quietly
+    // checking and finding nothing.
+    showToast(`You checked out with ${redirectEmail}, but you're signed in as ${accountEmail} — those need to match for the upgrade to apply automatically. Contact support if you paid with a different email on purpose.`);
+    return;
+  }
+
+  showToast('Checking for your payment…');
+  try {
+    const res = await authedFetch('/payment/recheck-now', { method: 'POST', body: JSON.stringify({}) });
+    if(!res) return;
+    const body = await res.json();
+    if(res.ok && body.pro_status){
+      showToast("You're on Pro! 🎉");
+      await loadDashboard();
+    } else if(res.ok){
+      showToast("Payment not found yet — this can take a few minutes. It'll apply automatically once it comes through.");
+    }
+  } catch (err) {
+    // Silent failure here is fine — the automatic 5-minute poll is
+    // still running regardless of whether this instant check worked.
+  }
 }
 
 async function loadDashboard(){
