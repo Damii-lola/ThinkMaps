@@ -3119,6 +3119,7 @@ async function cleanupExpiredFreeBlueprints(userId){
     .from('blueprints')
     .select('id')
     .eq('user_id', userId)
+    .eq('created_as_pro', false) // ever touched by a Pro edit (see the flag-forward logic in activateOption) locks, never deletes — this is what actually enforces that, the lock-vs-delete distinction meant nothing if the deletion query itself never checked it
     .lt('created_at', cutoff);
 
   const expiredIds = (expiredBlueprints || []).map(b => b.id);
@@ -3890,10 +3891,29 @@ app.post('/options/:id/activate', requireAuth, async (req, res) => {
       return res.end();
     }
 
+    // The actual fix for "a blueprint edited by a Pro user shouldn't
+    // delete itself even after downgrading" — created_as_pro was
+    // previously only ever set ONCE, at creation time. A blueprint made
+    // while free, then substantially worked on during a LATER Pro
+    // period, still had created_as_pro=false — meaning if the person
+    // downgraded afterward, cleanupExpiredFreeBlueprints would still
+    // sweep it up and delete it once past FREE_TIER_DELETE_MS, with zero
+    // regard for all the Pro-tier work invested in it since. Marking it
+    // here, the moment a currently-Pro user actually touches it, closes
+    // that gap — real protection follows real Pro-tier investment in a
+    // blueprint, not just which tier happened to be active at the exact
+    // moment it was first created. The .eq('created_as_pro', false)
+    // guard keeps this a no-op write (not even a round trip that
+    // matters) once a blueprint is already protected, rather than
+    // re-writing the same value on every single activation forever.
+    const isPro = await isUserPro(req.user.id);
+    if(isPro){
+      await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
+    }
+
     // activateOption now accepts an onToken callback — when provided, it
     // calls Mistral in streaming mode and fires onToken for every delta
     // token so this route can forward them to the client in real-time.
-    const isPro = await isUserPro(req.user.id);
     const result = await activateOption(req.params.id, [], (tokenText) => {
       send({ type: 'token', text: tokenText });
     }, isPro);
@@ -3980,6 +4000,10 @@ app.post('/options/combine-activate', requireAuth, async (req, res) => {
     const validation = await validateCombinationSet(optionIds);
     if(validation.error) return res.status(400).json({ error: validation.error });
 
+    // This route already requires Pro to even reach — always applies.
+    // See the main /options/:id/activate route for the full reasoning.
+    await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
+
     const result = await activateOption(primaryOptionId, combinedOptionIds, null, true);
     res.status(200).json(result);
   } catch (err) {
@@ -3995,6 +4019,9 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     if(check.error) return res.status(check.status).json({ error: check.error });
 
     const isPro = await isUserPro(req.user.id);
+    if(isPro){
+      await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprint.id).eq('created_as_pro', false);
+    }
 
     const { data: groupRow } = await supabase.from('groups').select('spawned_from_option_id, block_name').eq('id', req.params.id).single();
     const isRoot = !groupRow?.spawned_from_option_id;
@@ -4125,6 +4152,11 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
+    const isPro = await isUserPro(req.user.id);
+    if(isPro){
+      await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprint.id).eq('created_as_pro', false);
+    }
+
     const { data: group } = await supabase.from('groups').select('current_version_number').eq('id', req.params.id).single();
 
     const { data: version } = await supabase
@@ -4145,7 +4177,6 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
       ? await buildPathContextFromOption(groupRow.spawned_from_option_id)
       : [];
     const chosen = await pickBestOptionWithAI(currentOptions, pathContext);
-    const isPro = await isUserPro(req.user.id);
     const result = await activateOption(chosen.id, [], null, isPro);
 
     res.status(200).json({ ...result, chosenOption: chosen });
@@ -4175,6 +4206,10 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
 
     const isPro = await isUserPro(req.user.id);
     const FREE_TIER_MAX_RETRIES = 3;
+
+    if(isPro){
+      await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
+    }
 
     const { data: spawnedGroups } = await supabase
       .from('groups')
@@ -4298,6 +4333,9 @@ app.post('/options/:id/random-spawned', requireAuth, async (req, res) => {
 
     const chosenOption = optionsInGroup[Math.floor(Math.random() * optionsInGroup.length)];
     const isPro = await isUserPro(req.user.id);
+    if(isPro){
+      await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
+    }
     const result = await activateOption(chosenOption.id, [], null, isPro);
 
     res.status(200).json({ ...result, chosenGroupId: chosenGroup.id, chosenOption });
@@ -7296,7 +7334,7 @@ async function gatherDeeperMarketIntel(ideaDraft){
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Competitors found earlier: ${competitorNames.join(', ') || 'none found'}` }
-  ]);
+  ], 1200);
 }
 
 // STAGE 2 — Synthetic User Panel. This is the single highest-risk spot in
@@ -7329,7 +7367,7 @@ async function generateRiskPrioritizedPlan(ideaDraft, marketIntel, syntheticPane
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userContent }
-  ]);
+  ], 2000);
 }
 
 // Triggered from the very end of the Stage 1-3 results — used to
@@ -7366,7 +7404,7 @@ Respond ONLY with valid JSON: {"fixes": [{"problem": string, "solution": string}
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate the fixes now.' }
-  ]);
+  ], 1800);
 }
 
 // =====================================================================
@@ -7516,7 +7554,7 @@ Respond ONLY with valid JSON: {"personas": [{"name": string, "age": number, "occ
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Full path: ${pathSummary}` }
-  ], 1800);
+  ], 2600);
 }
 
 // =====================================================================
@@ -8791,6 +8829,20 @@ app.post('/confirm/:sessionId/personas', requireAuth, async (req, res) => {
     const marketIntel = session.deeper_analysis?.marketIntel || null;
     const syntheticPanel = session.deeper_analysis?.syntheticPanel || null;
     const personas = await generateUserPersonas(currentIdea, session.path_summary, marketIntel, syntheticPanel);
+
+    // Same defensive filter as the build brief's mvpScope — even with a
+    // generous token budget and the automatic retry-on-truncation in
+    // callMistral, a persona could still come back with an empty or
+    // missing critical field (a quote cut off mid-word, an empty
+    // dailyRoutine). Rather than let that render as a visibly broken
+    // card, any persona missing its core fields is dropped here, once,
+    // at the source.
+    if(personas && Array.isArray(personas.personas)){
+      personas.personas = personas.personas.filter(p =>
+        p?.name?.trim() && p?.dailyRoutine?.trim() && p?.quote?.trim() &&
+        Array.isArray(p?.topFrustrations) && p.topFrustrations.length > 0
+      );
+    }
 
     await supabase.from('confirmation_sessions').update({ personas }).eq('id', session.id);
 
