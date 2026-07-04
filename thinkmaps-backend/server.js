@@ -1491,6 +1491,20 @@ function extractThinkMapsUsernameFromText(text){
   return null;
 }
 
+// Finds a genuine UUID anywhere in the email body — this is what the
+// "address" field prefill (see openPaymentCheckout in script.js)
+// silently carries: the account's actual Supabase user id. Deliberately
+// NOT looking for a specific label here, unlike the username extractor
+// above — a UUID's format (32 hex characters in 5 groups) is
+// distinctive enough on its own that a plain pattern match is both
+// simpler and more robust than guessing at whatever label Selar might
+// put around an "address" field's echoed value.
+function extractProfileIdFromText(text){
+  if(!text) return null;
+  const match = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return match ? match[0] : null;
+}
+
 // Picks whichever pending-upgrade is closest in time to when the
 // payment email actually arrived — not just "is there exactly one
 // candidate at all." Two people clicking Go Pro in the same half hour
@@ -1605,11 +1619,36 @@ for(const msgRef of messages){
 
       console.log(`[ThinkMaps] Payment inbox check: examining message "${subject}"`);
 
-      // ---------- Match attempt 1: ThinkMaps username from the custom
-      // checkout question. The strongest possible match — the buyer
-      // typed their real username at the point of paying, so if this
-      // parses AND resolves to a real account, there's no ambiguity
-      // left to reason about at all.
+      // ---------- Match attempt 1: Profile ID (UUID), silently carried
+      // via the "address" field prefill. The single strongest possible
+      // match — a UUID is globally unique by construction, so if one
+      // turns up in this email and matches an actual account, there is
+      // categorically zero ambiguity, not just "very likely correct."
+      const checkoutProfileId = extractProfileIdFromText(bodyText);
+      if(checkoutProfileId){
+        const { data: idProfile } = await supabase
+          .from('profiles')
+          .select('id, username, email, pro_status')
+          .eq('id', checkoutProfileId)
+          .maybeSingle();
+
+        if(idProfile){
+          if(idProfile.pro_status){
+            console.log(`[ThinkMaps] Payment inbox check: ${idProfile.username} (matched by profile id) is already Pro — nothing to do.`);
+          } else {
+            await applyProUpgrade(idProfile, `via their account's profile id, matched directly from the checkout`);
+          }
+          await markPaymentEmailProcessed(msgRef.id);
+          continue;
+        }
+
+        console.log(`[ThinkMaps] Payment inbox check: message "${subject}" had a UUID-shaped value ("${checkoutProfileId}") but it didn't match any account id — falling back to username matching.`);
+      }
+
+      // ---------- Match attempt 2: ThinkMaps username from the custom
+      // checkout question (or the repurposed "fullname" prefill). The
+      // buyer's real username, so if this parses AND resolves to a real
+      // account, there's no ambiguity left to reason about at all.
       const checkoutUsername = extractThinkMapsUsernameFromText(bodyText);
       if(checkoutUsername){
         const { data: usernameProfile } = await supabase
@@ -1631,7 +1670,7 @@ for(const msgRef of messages){
         console.log(`[ThinkMaps] Payment inbox check: message "${subject}" had a checkout username ("${checkoutUsername}") but it didn't match any ThinkMaps account — falling back to email matching.`);
       }
 
-      // ---------- Match attempt 2: exact email match (original method).
+      // ---------- Match attempt 3: exact email match (original method).
       const buyerEmail = extractBuyerEmailFromText(bodyText);
 
       if(!buyerEmail){
@@ -1647,7 +1686,7 @@ for(const msgRef of messages){
         .maybeSingle();
 
       if(!profile){
-        // ---------- Match attempt 3: pending-upgrade timing fallback —
+        // ---------- Match attempt 4: pending-upgrade timing fallback —
         // only reached if neither the checkout username nor the email
         // resolved to an account.
         const paymentTimestampMs = parseInt(fullMessage.data.internalDate, 10) || Date.now();
