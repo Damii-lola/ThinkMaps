@@ -1750,7 +1750,6 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
    TOUR DEMONSTRATION SYSTEM — ghost cursor + click ripple
    The actual "show, don't tell" layer: an animated cursor moves across
    real page elements, clicks them (ripple), and cards visibly react
-   (a brief press/select state) — genuinely demonstrating the gesture
    on the live page, not narrating it in a caption alone.
    ===================================================================== */
 .tour-ghost-cursor{
