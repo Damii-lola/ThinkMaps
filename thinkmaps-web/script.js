@@ -466,7 +466,7 @@ async function handleOtpSubmit(e){
     const body = await res.json();
 
     if(!res.ok){
-      errorEl.textContent = body.error || 'Could not verify that code.';
+      errorEl.textContent = body.detail ? `${body.error} (${body.detail})` : (body.error || 'Could not verify that code.');
       return;
     }
 
