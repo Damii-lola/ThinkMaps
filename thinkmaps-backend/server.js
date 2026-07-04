@@ -779,7 +779,7 @@ app.post('/auth/signup-verify', async (req, res) => {
     });
 
     if(createError){
-      if(/duplicate|unique|already registered/i.test(createError.message)){
+      if(/duplicate|unique/i.test(createError.message) || (/already/i.test(createError.message) && /register/i.test(createError.message))){
         return res.status(400).json({ error: 'That email or username is already taken.' });
       }
       throw createError;
