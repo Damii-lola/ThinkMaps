@@ -1,3 +1,4 @@
+// ThinkMaps — single shared frontend script.
 // Every page (index, auth, dashboard, app) loads this file.
 // It checks what's actually on the page and runs the matching logic.
 // All backend calls go through API_BASE_URL, pointed at the Render service.
