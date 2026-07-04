@@ -1763,6 +1763,261 @@ function markTourSeen(tourId){
 }
 
 let activeTourState = null;
+let tourDemoRunning = false;
+
+function wait(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function ensureGhostCursor(){
+  let cursor = document.getElementById('tourGhostCursor');
+  if(!cursor){
+    cursor = document.createElement('div');
+    cursor.id = 'tourGhostCursor';
+    cursor.className = 'tour-ghost-cursor';
+    document.body.appendChild(cursor);
+  }
+  return cursor;
+}
+
+function moveGhostCursor(cursor, x, y){
+  cursor.style.left = `${x}px`;
+  cursor.style.top = `${y}px`;
+}
+
+function spawnClickRipple(x, y){
+  const ripple = document.createElement('div');
+  ripple.className = 'tour-click-ripple';
+  ripple.style.left = `${x}px`;
+  ripple.style.top = `${y}px`;
+  document.body.appendChild(ripple);
+  setTimeout(() => ripple.remove(), 700);
+}
+
+function removeGhostCursor(){
+  document.getElementById('tourGhostCursor')?.remove();
+  document.getElementById('tourCtrlBadge')?.remove();
+  document.querySelectorAll('.tour-click-ripple').forEach(el => el.remove());
+}
+
+// Each demo runs as a self-repeating loop for as long as its step stays
+// on screen (checked via tourDemoRunning before every await-gated step,
+// so it stops cleanly mid-animation rather than finishing a stray cycle
+// after the person has already clicked Next). Real coordinates are read
+// fresh from the actual target element every loop — this is animating
+// the genuine live page, not a canned recording, so it stays correct
+// even if layout shifts between loops.
+const TOUR_DEMOS = {
+  async pan(cursor){
+    const target = document.querySelector('#canvasViewport');
+    if(!target) return;
+    const rect = target.getBoundingClientRect();
+    const y = rect.top + rect.height * 0.45;
+    const startX = rect.left + rect.width * 0.62;
+    const endX = rect.left + rect.width * 0.32;
+
+    moveGhostCursor(cursor, startX, y);
+    cursor.classList.add('tour-cursor-grabbing');
+    await wait(450); if(!tourDemoRunning) return;
+    moveGhostCursor(cursor, endX, y); // CSS transition animates this as a smooth drag
+    await wait(750); if(!tourDemoRunning) return;
+    cursor.classList.remove('tour-cursor-grabbing');
+    await wait(500);
+  },
+
+  async zoom(){
+    const zoomIn = document.querySelector('#zoomInBtn');
+    const zoomOut = document.querySelector('#zoomOutBtn');
+    const cursor = ensureGhostCursor();
+    for(const btn of [zoomIn, zoomOut]){
+      if(!btn || !tourDemoRunning) continue;
+      const rect = btn.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      moveGhostCursor(cursor, x, y);
+      await wait(500); if(!tourDemoRunning) return;
+      spawnClickRipple(x, y);
+      btn.classList.add('tour-demo-pressed');
+      await wait(180);
+      btn.classList.remove('tour-demo-pressed');
+      await wait(500); if(!tourDemoRunning) return;
+    }
+  },
+
+  async activate(cursor){
+    const target = document.querySelector('.canvas-option');
+    if(!target) return;
+    const rect = target.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    moveGhostCursor(cursor, x, y);
+    await wait(550); if(!tourDemoRunning) return;
+    spawnClickRipple(x, y);
+    target.classList.add('tour-demo-pressed');
+    await wait(200);
+    target.classList.remove('tour-demo-pressed');
+    await wait(700);
+  },
+
+  async groupFooter(cursor){
+    const buttons = document.querySelectorAll('.canvas-group-footer button');
+    for(const btn of buttons){
+      if(!tourDemoRunning) return;
+      const rect = btn.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      moveGhostCursor(cursor, x, y);
+      await wait(450); if(!tourDemoRunning) return;
+      spawnClickRipple(x, y);
+      btn.classList.add('tour-demo-pressed');
+      await wait(180);
+      btn.classList.remove('tour-demo-pressed');
+      await wait(350); if(!tourDemoRunning) return;
+    }
+    await wait(400);
+  },
+
+  async combine(cursor){
+    const options = document.querySelectorAll('.canvas-option');
+    if(options.length < 2) return;
+    const [first, second] = options;
+
+    const badge = document.createElement('div');
+    badge.id = 'tourCtrlBadge';
+    badge.className = 'tour-ctrl-badge';
+    badge.textContent = isCoarsePointer() ? 'Long-press' : 'Ctrl held';
+    document.body.appendChild(badge);
+
+    for(const opt of [first, second]){
+      if(!tourDemoRunning){ badge.remove(); return; }
+      const rect = opt.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      moveGhostCursor(cursor, x, y);
+      badge.style.left = `${x + 18}px`;
+      badge.style.top = `${y - 30}px`;
+      await wait(500); if(!tourDemoRunning){ badge.remove(); return; }
+      spawnClickRipple(x, y);
+      opt.classList.add('tour-demo-selected');
+      await wait(400); if(!tourDemoRunning){ badge.remove(); return; }
+    }
+    await wait(600);
+    [first, second].forEach(opt => opt.classList.remove('tour-demo-selected'));
+    badge.remove();
+  },
+
+  async dragActivate(cursor){
+    const options = document.querySelectorAll('.canvas-option');
+    if(options.length < 2) return;
+
+    const source = options[0];
+    const sourceCard = source.closest('.canvas-group');
+    // Prefer a target option in a DIFFERENT group card — that's the
+    // whole point of the gesture (dragging INTO another spawned
+    // group), not just any second option in the same card.
+    let target = null;
+    for(const opt of options){
+      if(opt === source) continue;
+      if(opt.closest('.canvas-group') !== sourceCard){ target = opt; break; }
+    }
+    if(!target) target = options[1];
+
+    const sourceRect = source.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const sx = sourceRect.left + sourceRect.width / 2;
+    const sy = sourceRect.top + sourceRect.height / 2;
+    const tx = targetRect.left + targetRect.width / 2;
+    const ty = targetRect.top + targetRect.height / 2;
+
+    moveGhostCursor(cursor, sx, sy);
+    await wait(500); if(!tourDemoRunning) return;
+    cursor.classList.add('tour-cursor-grabbing');
+    source.classList.add('tour-demo-pressed');
+    await wait(250); if(!tourDemoRunning){ cursor.classList.remove('tour-cursor-grabbing'); source.classList.remove('tour-demo-pressed'); return; }
+
+    // A real connector line, animated growing from source toward target
+    // frame-by-frame — this is deliberately NOT just a CSS transition
+    // like the cursor's own movement, since a line needs to track BOTH
+    // its length and angle continuously as it grows, not just move from
+    // point A to B.
+    const line = document.createElement('div');
+    line.className = 'tour-drag-line';
+    document.body.appendChild(line);
+    moveGhostCursor(cursor, tx, ty);
+
+    const steps = 16;
+    for(let i = 1; i <= steps; i++){
+      if(!tourDemoRunning){
+        line.remove();
+        cursor.classList.remove('tour-cursor-grabbing');
+        source.classList.remove('tour-demo-pressed');
+        return;
+      }
+      const px = sx + (tx - sx) * (i / steps);
+      const py = sy + (ty - sy) * (i / steps);
+      const dx = px - sx, dy = py - sy;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+      line.style.left = `${sx}px`;
+      line.style.top = `${sy}px`;
+      line.style.width = `${length}px`;
+      line.style.transform = `rotate(${angle}deg)`;
+      await wait(30);
+    }
+
+    target.classList.add('tour-demo-selected'); // mirrors the real .drop-hover highlight
+    await wait(450); if(!tourDemoRunning){ line.remove(); target.classList.remove('tour-demo-selected'); return; }
+
+    spawnClickRipple(tx, ty);
+    cursor.classList.remove('tour-cursor-grabbing');
+    source.classList.remove('tour-demo-pressed');
+    await wait(350);
+    target.classList.remove('tour-demo-selected');
+    line.remove();
+    await wait(500);
+  },
+
+  // Generic, reused across every toolkit tour step — dynamically finds
+  // whichever card is currently spotlighted (via the active step's own
+  // selector) and points at/presses its real button, rather than
+  // needing separate bespoke logic written out per feature.
+  async cardButton(cursor){
+    if(!activeTourState) return;
+    const step = activeTourState.steps[activeTourState.index];
+    const card = step.selector ? document.querySelector(step.selector) : null;
+    const btn = card ? card.querySelector('button, a.btn') : null;
+    if(!btn) return;
+
+    const rect = btn.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    moveGhostCursor(cursor, x, y);
+    await wait(500); if(!tourDemoRunning) return;
+    spawnClickRipple(x, y);
+    btn.classList.add('tour-demo-pressed');
+    await wait(200);
+    btn.classList.remove('tour-demo-pressed');
+    await wait(750);
+  }
+};
+
+async function runTourDemoLoop(demoName){
+  const demoFn = TOUR_DEMOS[demoName];
+  if(!demoFn) return;
+
+  tourDemoRunning = true;
+  const cursor = ensureGhostCursor();
+  cursor.style.opacity = '1';
+
+  while(tourDemoRunning){
+    await demoFn(cursor);
+    if(!tourDemoRunning) break;
+    await wait(700); // pause before looping so it reads as a repeatable action, not a jittery loop
+  }
+}
+
+function stopTourDemo(){
+  tourDemoRunning = false;
+  removeGhostCursor();
+}
 
 function startTour(tourId, steps){
   // Resolve steps at call time, not definition time — mobile-specific
@@ -1779,11 +2034,13 @@ function startTour(tourId, steps){
 
 function endTour(){
   if(activeTourState) markTourSeen(activeTourState.tourId);
+  stopTourDemo();
   cleanupTourDOM();
   activeTourState = null;
 }
 
 function cleanupTourDOM(){
+  stopTourDemo();
   document.getElementById('tourCaption')?.remove();
   document.querySelectorAll('.tour-spotlight').forEach(el => {
     el.classList.remove('tour-spotlight');
@@ -1878,6 +2135,19 @@ function renderTourStep(){
     activeTourState.index--;
     renderTourStep();
   });
+
+  // Short delay lets the smooth scrollIntoView above actually settle —
+  // starting the demo immediately risks it reading a mid-scroll rect on
+  // its very first frame.
+  if(step.demo){
+    setTimeout(() => {
+      // Guard against a fast Next/Skip click landing before this fires —
+      // only start if we're still actually on this exact step.
+      if(activeTourState && activeTourState.steps[activeTourState.index] === step){
+        runTourDemoLoop(step.demo);
+      }
+    }, 450);
+  }
 }
 
 
@@ -2004,37 +2274,41 @@ function getCanvasTourSteps(){
   return [
     {
       title: 'Welcome to your Blueprint Graph',
-      text: "This is your canvas — a quick tour of the basics, five steps, skip anytime."
+      text: "This is your canvas — a quick tour of the basics, five steps, skip anytime. Watch the little cursor — it'll show you exactly what to do."
     },
     {
       selector: '#canvasViewport',
       title: 'Pan around',
       text: isCoarsePointer()
         ? 'Drag anywhere on the canvas with your finger to pan around.'
-        : 'Click and drag anywhere on the canvas (not on a card) to pan around.'
+        : 'Click and drag anywhere on the canvas (not on a card) to pan around.',
+      demo: 'pan'
     },
     {
       selector: '.canvas-controls',
       title: 'Zoom in and out',
       text: isCoarsePointer()
         ? 'Use these buttons to zoom, or pinch directly on the canvas.'
-        : 'Use these buttons to zoom, or scroll directly on the canvas.'
+        : 'Use these buttons to zoom, or scroll directly on the canvas.',
+      demo: 'zoom'
     },
     {
       selector: '.canvas-option',
       title: 'Pick a direction',
-      text: 'Click any option to activate it — this spawns new groups branching off your choice, building your path deeper.'
+      text: 'Click any option to activate it — this spawns new groups branching off your choice, building your path deeper.',
+      demo: 'activate'
+    },
+    {
+      selector: '.canvas-option',
+      title: 'Or drag to connect',
+      text: "You can also click and drag from an option straight onto another option in a group it already spawned — dropping it there activates that one instead of clicking it directly.",
+      demo: 'dragActivate'
     },
     {
       selector: '.canvas-group-footer',
       title: 'Not quite right?',
-      text: "Retry regenerates this group's options, Random picks one for you, +Custom lets you type your own idea instead of picking one."
-    },
-    {
-      title: 'Combine ideas together (Pro)',
-      text: isCoarsePointer()
-        ? 'Long-press an option, then tap others to select several — combine them into one fused idea.'
-        : 'Hold Ctrl and click multiple options to select several — combine them into one fused idea.'
+      text: "Retry regenerates this group's options, Random picks one for you, +Custom lets you type your own idea instead of picking one.",
+      demo: 'groupFooter'
     }
   ];
 }
@@ -5529,42 +5803,50 @@ function getToolkitTourSteps(){
     {
       selector: '#strengthScoreCard',
       title: 'Idea Strength Score',
-      text: 'Four honest scores — market clarity, competitive gap, personal fit, technical feasibility — with real, specific reasoning behind each, not a generic pep talk.'
+      text: 'Four honest scores — market clarity, competitive gap, personal fit, technical feasibility — with real, specific reasoning behind each, not a generic pep talk.',
+      demo: 'cardButton'
     },
     {
       selector: '#pivotsCard',
       title: 'Pivot Generator',
-      text: 'Three genuinely different directions for this same idea — a different audience, a different business model, a different scope. "Build This Instead" starts a fresh blueprint carrying that pivot forward.'
+      text: 'Three genuinely different directions for this same idea — a different audience, a different business model, a different scope. "Build This Instead" starts a fresh blueprint carrying that pivot forward.',
+      demo: 'cardButton'
     },
     {
       selector: '#personasCard',
       title: 'User Persona Cards',
-      text: 'Three specific, named people who represent your real audience — daily routine, real frustrations, what would actually make them pay.'
+      text: 'Three specific, named people who represent your real audience — daily routine, real frustrations, what would actually make them pay.',
+      demo: 'cardButton'
     },
     {
       selector: '#landingCopyCard',
       title: 'Landing Page Copy',
-      text: 'Real, paste-ready copy for a landing page — headline, sub-headline, feature bullets, FAQ, CTA options — written for this exact idea, not a generic template.'
+      text: 'Real, paste-ready copy for a landing page — headline, sub-headline, feature bullets, FAQ, CTA options — written for this exact idea, not a generic template.',
+      demo: 'cardButton'
     },
     {
       selector: '#redTeamCard',
       title: 'Challenge This Idea',
-      text: "A sharp, unbalanced critique across five angles — market risk, technical traps, distribution, timing, founder fit. This is the counterweight to everything positive you've seen so far."
+      text: "A sharp, unbalanced critique across five angles — market risk, technical traps, distribution, timing, founder fit. This is the counterweight to everything positive you've seen so far.",
+      demo: 'cardButton'
     },
     {
       selector: '#spyModeCard',
       title: 'Spy Mode',
-      text: "A full intelligence profile on each real competitor — what they're good at, where users complain, their pricing, and a specific attack vector. \"Steal This\" adds it straight to your Build Brief."
+      text: "A full intelligence profile on each real competitor — what they're good at, where users complain, their pricing, and a specific attack vector. \"Steal This\" adds it straight to your Build Brief.",
+      demo: 'cardButton'
     },
     {
       selector: '#launchChecklistCard',
       title: 'Launch Checklist',
-      text: 'A week-by-week plan — validate, build, get 10 real users, measure — specific to this idea, not a generic startup checklist. Checkboxes save automatically.'
+      text: 'A week-by-week plan — validate, build, get 10 real users, measure — specific to this idea, not a generic startup checklist. Checkboxes save automatically.',
+      demo: 'cardButton'
     },
     {
       selector: '#exportCard',
       title: 'Export This Idea',
-      text: 'A complete, properly formatted package of everything you\'ve generated — download as Markdown or export as a real PDF, ready to send to anyone.'
+      text: 'A complete, properly formatted package of everything you\'ve generated — download as Markdown or export as a real PDF, ready to send to anyone.',
+      demo: 'cardButton'
     }
   ];
 }
