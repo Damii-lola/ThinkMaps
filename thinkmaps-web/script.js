@@ -2290,7 +2290,9 @@ async function initAppPage(){
   // flag already said "seen." A new blueprint genuinely being opened
   // for the first time is what should trigger this, every time.
   const canvasTourKey = `canvas_${canvasState.blueprintId}`;
-  if(!hasSeenTour(canvasTourKey)) startTour(canvasTourKey, getCanvasTourSteps(), { mandatory: true });
+  const alreadySeen = hasSeenTour(canvasTourKey);
+  console.log(`[ThinkMaps] Canvas tour check — blueprintId: ${canvasState.blueprintId}, key: ${canvasTourKey}, alreadySeen: ${alreadySeen}`);
+  if(!alreadySeen) startTour(canvasTourKey, getCanvasTourSteps(), { mandatory: true });
 }
 
 // Defined as functions (not a plain array) so mobile-specific wording —
