@@ -1374,6 +1374,11 @@ function wireSettingsDeleteAccount(){
   openBtn.addEventListener('click', () => {
     if(input) input.value = '';
     if(errorEl) errorEl.textContent = '';
+    const textEl = document.getElementById('deleteAccountModalText');
+    if(textEl){
+      const uname = settingsState.username || 'your username';
+      textEl.textContent = `This permanently deletes your account and every blueprint you've created. Type your username, ${uname}, to confirm — this can't be undone.`;
+    }
     modal.style.display = 'flex';
     input?.focus();
   });
@@ -1734,14 +1739,12 @@ function showToast(message){
 // tour and the idea toolkit tour rather than building two one-off
 // implementations.
 //
-// The spotlight effect uses a single trick instead of a separate
-// dimming overlay + z-index juggling against the app's own existing
-// layers (modals, canvas groups, sticky headers): a target element gets
-// `box-shadow: 0 0 0 9999px rgba(...)` — a shadow that extends 9999px
-// in every direction, which visually dims the ENTIRE rest of the page
-// while leaving a "hole" exactly where the target already sits, with
-// zero DOM restructuring and zero stacking-context fights. This is a
-// well-known, robust CSS technique specifically for this effect.
+// The highlight is a pulsing glow ring around the target itself (see
+// .tour-spotlight / @keyframes tourPulseGlow in styles.css) — no
+// darkened backdrop over the rest of the page. A connector line links
+// the caption (always anchored to a fixed top-left corner, regardless
+// of target) to whatever's highlighted, since without a dimmed
+// backdrop tying them together visually, that link needs to be explicit.
 //
 // Steps reference real selectors and are checked defensively — if a
 // target isn't found (different page, different state, a Pro-only
@@ -1823,10 +1826,9 @@ const TOUR_DEMOS = {
     await wait(500);
   },
 
-  async zoom(){
+  async zoom(cursor){
     const zoomIn = document.querySelector('#zoomInBtn');
     const zoomOut = document.querySelector('#zoomOutBtn');
-    const cursor = ensureGhostCursor();
     for(const btn of [zoomIn, zoomOut]){
       if(!btn || !tourDemoRunning) continue;
       const rect = btn.getBoundingClientRect();
@@ -1989,7 +1991,18 @@ const TOUR_DEMOS = {
     if(!activeTourState) return;
     const step = activeTourState.steps[activeTourState.index];
     const card = step.selector ? document.querySelector(step.selector) : null;
-    const btn = card ? card.querySelector('button, a.btn') : null;
+    if(!card) return;
+    // Prefer the card's actual primary action (inside .toolkit-card-actions,
+    // the consistent wrapper every card uses for its main button) —
+    // falling back to any button only for a card that doesn't have that
+    // wrapper yet (e.g. still showing its initial Pro-gate button before
+    // anything's been generated). Without this preference, a card with
+    // several small inline buttons of its own — Landing Copy has a
+    // "Copy" button next to every section — would have the demo point
+    // at whichever one of those happens to sit first in the markup,
+    // not the card's actual main action.
+    const btn = card.querySelector('.toolkit-card-actions button, .toolkit-card-actions a.btn')
+      || card.querySelector('button, a.btn');
     if(!btn) return;
 
     const rect = btn.getBoundingClientRect();
@@ -2118,7 +2131,16 @@ function renderTourStep(){
   caption.style.left = '24px';
 
   if(target){
-    requestAnimationFrame(() => {
+    // Same reasoning as the demo-start delay further down — scrollIntoView
+    // is a SMOOTH scroll that takes several hundred ms to actually
+    // finish, while requestAnimationFrame only waits for the next
+    // single frame (~16ms). Reading the target's rect via
+    // requestAnimationFrame alone was measuring its PRE-scroll position,
+    // not where it actually settles — the connector line was visibly
+    // pointing at the wrong spot on screen for any target that needed
+    // scrolling into view.
+    setTimeout(() => {
+      if(!activeTourState || activeTourState.steps[activeTourState.index] !== step) return;
       const captionRect = caption.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
       const fromX = captionRect.right;
@@ -2139,7 +2161,7 @@ function renderTourStep(){
       line.style.width = `${length}px`;
       line.style.transform = `rotate(${angle}deg)`;
       document.body.appendChild(line);
-    });
+    }, 450);
   }
 
   caption.querySelector('.tour-skip-btn')?.addEventListener('click', endTour);
