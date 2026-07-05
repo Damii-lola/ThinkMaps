@@ -15,8 +15,7 @@ const PORT = process.env.PORT || 3000;
 // correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
 
-// Security headers — CSP is intentionally loose on script-src/style-src
-// since this API serves no HTML pages of its own (the actual frontend
+// Security headers — CSP is intentionally loose on script-src/style-s
 // is static files on GitHub Pages, entirely separate from this server),
 // so the parts of helmet that matter here are the response headers
 // (X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security,
