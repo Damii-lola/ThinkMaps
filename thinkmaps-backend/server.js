@@ -724,7 +724,7 @@ app.post('/auth/signup-start', async (req, res) => {
     const { data: existingByUsername } = await supabase
       .from('profiles')
       .select('id')
-      .eq('username', trimmedUsername)
+      .ilike('username', trimmedUsername)
       .maybeSingle();
 
     if(existingByEmail || existingByUsername){
@@ -867,7 +867,7 @@ app.post('/auth/login-start', async (req, res) => {
       const { data: profile, error: lookupError } = await supabase
         .from('profiles')
         .select('email')
-        .eq('username', identifier)
+        .ilike('username', identifier)
         .single();
       if(lookupError || !profile) return res.status(404).json({ error: 'No account found for that username.' });
       email = profile.email;
@@ -1121,7 +1121,7 @@ app.post('/profile/username', requireAuth, async (req, res) => {
     const { data: existing } = await supabase
       .from('profiles')
       .select('id')
-      .eq('username', trimmed)
+      .ilike('username', trimmed)
       .neq('id', req.user.id)
       .maybeSingle();
 
