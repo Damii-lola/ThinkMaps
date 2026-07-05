@@ -14,8 +14,7 @@ const PORT = process.env.PORT || 3000;
 // rate limiter keyed on it below) sees Render's internal proxy address
 // for every single request rather than the real visitor's IP, which
 // would silently bundle every user under one shared rate-limit identity
-// instead of limiting each person individually. `1` trusts exactly one
-// hop of proxy (Render's own), not an arbitrary chain, which is the
+// instead of limiting each person individually. `1` trusts exactly 
 // correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
 
