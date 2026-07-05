@@ -11,10 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Render sits behind a reverse proxy — without this, req.ip (and every
-// rate limiter keyed on it below) sees Render's internal proxy address
-// for every single request rather than the real visitor's IP, which
-// would silently bundle every user under one shared rate-limit identity
-// instead of limiting each person individually. `1` trusts exactly 
+// rate limiter keyed on it below) sees Render's internal proxy addr
 // correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
 
