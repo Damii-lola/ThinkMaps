@@ -11,11 +11,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Render sits behind a reverse proxy — without this, req.ip (and every
-// rate limiter keyed on it below) sees Render's internal proxy addr
+// rate limiter keyed on it below) sees Render's internal proxy address
+// for every single request rather than the real visitor's IP, which
+// would silently bundle every user under one shared rate-limit identity
+// instead of limiting each person individually. `1` trusts exactly one
+// hop of proxy (Render's own), not an arbitrary chain, which is the
 // correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
 
-// Security headers — CSP is intentionally loose on script-src/style-s
+// Security headers — CSP is intentionally loose on script-src/style-src
+// since this API serves no HTML pages of its own (the actual frontend
 // is static files on GitHub Pages, entirely separate from this server),
 // so the parts of helmet that matter here are the response headers
 // (X-Content-Type-Options, X-Frame-Options, Strict-Transport-Security,
@@ -1005,11 +1010,20 @@ app.get('/dashboard', requireAuth, async (req, res) => {
 
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('username, email, pro_status, pro_expires_at')
+      .select('username, email, pro_status, plan_tier, pro_expires_at')
       .eq('id', userId)
       .single();
 
     if (profileError) throw profileError;
+
+    // Same expiration check as isUserPro and /profile — without this,
+    // an account whose month just ran out would stay fully unlocked
+    // here for up to an hour, until the next cleanup run, directly
+    // undermining "Pro/Ultra isn't permanent." This is read-only (same
+    // reasoning as isUserPro) — the actual DB write back to free still
+    // happens in the periodic cleanup job, not here.
+    const isExpired = profile.pro_status && profile.pro_expires_at && new Date(profile.pro_expires_at) < new Date();
+    const effectivePro = profile.pro_status && !isExpired;
 
     const { data: blueprints, error: blueprintsError } = await supabase
       .from('blueprints')
@@ -1032,7 +1046,7 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       // so the real countdown number went out regardless, and the
       // frontend's own "show the free-tier label if minutesRemaining
       // isn't null" check had no way to know it should suppress it.
-      if(profile.pro_status){
+      if(effectivePro){
         return { ...bp, isLocked: false, lockReason: null, minutesRemaining: null, daysUntilDeletion: null };
       }
 
@@ -1062,9 +1076,9 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     });
 
     res.status(200).json({
-      profile,
+      profile: { ...profile, pro_status: effectivePro, plan_tier: effectivePro ? (profile.plan_tier || 'pro') : 'free' },
       blueprints: enrichedBlueprints,
-      canCreateNew: profile.pro_status || blueprints.length === 0
+      canCreateNew: effectivePro || blueprints.length === 0
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load dashboard.', detail: err.message });
@@ -1079,14 +1093,21 @@ app.get('/profile', requireAuth, async (req, res) => {
   try {
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('pro_status, username, email')
+      .select('pro_status, plan_tier, pro_expires_at, username, email')
       .eq('id', req.user.id)
       .single();
 
     if(error) throw error;
 
+    // Same expiration logic as isUserPro — checked here too so this
+    // response is accurate even in the window between an account
+    // actually expiring and the next hourly cleanup run catching it.
+    const isExpired = profile?.pro_status && profile?.pro_expires_at && new Date(profile.pro_expires_at) < new Date();
+
     res.status(200).json({
-      pro_status: !!profile?.pro_status,
+      pro_status: isExpired ? false : !!profile?.pro_status,
+      plan_tier: isExpired ? 'free' : (profile?.plan_tier || 'free'),
+      pro_expires_at: isExpired ? null : (profile?.pro_expires_at || null),
       username: profile?.username || req.user.user_metadata?.username || '',
       email: profile?.email || req.user.email || ''
     });
@@ -1409,7 +1430,13 @@ app.post('/webhooks/payment/:secret', async (req, res) => {
       return;
     }
 
-    await applyProUpgrade(profile, 'via the payment webhook (matched by email)');
+    // This route works off a raw JSON webhook payload, not an email
+    // body — extractTierFromText doesn't apply the same way here, and
+    // this route remains genuinely dormant/unconfirmed (see the big
+    // comment above). Defaulting to 'pro' matches extractTierFromText's
+    // own safe-default behavior elsewhere, rather than guessing at
+    // tier from an unconfirmed payload shape.
+    await applyProUpgrade(profile, 'via the payment webhook (matched by email)', 'pro');
   } catch (err) {
     console.error('[ThinkMaps] Payment webhook: unexpected error:', err.message);
   }
@@ -1517,15 +1544,20 @@ function extractThinkMapsUsernameFromText(text){
   const labeledPatterns = [
     /thinkmaps\s*user\s*name[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
     /thinkmaps\s*username[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
-    // The Name field prefill — formatted as "TMUSER <username>"
-    // specifically to pass Selar's own "first and last name" validation
-    // (a bare username alone gets rejected as not looking like a real
-    // name). Deliberately NOT using "ThinkMaps" as the marker word here
+    // The Name field prefill — formatted as "TMUSER-PRO <username>" or
+    // "TMUSER-ULTRA <username>", the tier baked directly into the marker
+    // itself (see extractTierFromText below, which reads the same
+    // string). Two words, satisfying Selar's own "first and last name"
+    // validation. Deliberately NOT using "ThinkMaps" as the marker word
     // — the product name legitimately appears many other places in a
     // real notification email (plan name, footer branding), and a
     // generic "thinkmaps <word>" pattern would risk false-matching
     // something like "ThinkMaps Pro" and extracting "Pro" as a fake
     // username. "TMUSER" doesn't appear anywhere else by construction.
+    /\bTMUSER-(?:PRO|ULTRA)\s+([a-zA-Z0-9_]{3,30})\b/i,
+    // Older plain "TMUSER <username>" format, kept as a fallback purely
+    // for any payment already in flight from before tier-encoding
+    // shipped — new checkouts always use the tiered format above.
     /\bTMUSER\s+([a-zA-Z0-9_]{3,30})\b/i,
   ];
   for(const pattern of labeledPatterns){
@@ -1534,6 +1566,25 @@ function extractThinkMapsUsernameFromText(text){
   }
 
   return null;
+}
+
+// Reads the same Name-field marker as extractThinkMapsUsernameFromText
+// above to determine which plan was actually purchased — Pro ($15) or
+// Ultra ($25). This is deliberately NOT based on parsing a dollar/naira
+// amount out of the email: Selar transacts in NGN, and hardcoding an
+// exact naira threshold to distinguish the two tiers would be fragile
+// against exchange-rate drift and would need updating every time the
+// rate moves. Encoding the tier directly into the checkout itself is
+// exact and never goes stale. Defaults to 'pro' — the lower tier — when
+// the marker genuinely can't be found (an in-flight payment from before
+// tier-encoding existed, or the custom checkout question was used
+// instead of the Name field); defaulting to the cheaper tier is the
+// safe direction to guess wrong in, never the more expensive one.
+function extractTierFromText(text){
+  if(!text) return 'pro';
+  if(/\bTMUSER-ULTRA\b/i.test(text)) return 'ultra';
+  if(/\bTMUSER-PRO\b/i.test(text)) return 'pro';
+  return 'pro';
 }
 
 // Finds a genuine UUID anywhere in the email body — this catches the
@@ -1619,10 +1670,12 @@ async function checkForNewPayments(){
 // so that logic exists in exactly one place instead of three
 // near-identical copies that would drift out of sync with each other
 // over time.
-async function applyProUpgrade(profile, matchLogSuffix){
+async function applyProUpgrade(profile, matchLogSuffix, tier = 'pro'){
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
   const { error: updateError } = await supabase
     .from('profiles')
-    .update({ pro_status: true })
+    .update({ pro_status: true, plan_tier: tier, pro_expires_at: expiresAt.toISOString() })
     .eq('id', profile.id);
 
   if(updateError){
@@ -1630,20 +1683,23 @@ async function applyProUpgrade(profile, matchLogSuffix){
     return false;
   }
 
-  console.log(`[ThinkMaps] Payment inbox check: upgraded ${profile.email} to Pro ${matchLogSuffix}.`);
+  const tierLabel = tier === 'ultra' ? 'Ultra' : 'Pro';
+  console.log(`[ThinkMaps] Payment inbox check: upgraded ${profile.email} to ${tierLabel} (expires ${expiresAt.toISOString()}) ${matchLogSuffix}.`);
+
+  const expiresLabel = expiresAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
   try {
     const bodyHtml = `
       <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">Thank you for subscribing 🎉</h1>
-      <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Hi ${escapeHtmlServer(profile.username || '')}, thank you for upgrading to ThinkMaps Pro — we genuinely appreciate it. Your payment went through and your account is already fully upgraded, no further steps needed on your end.</p>
-      <p style="margin:0 0 20px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.</p>
+      <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Hi ${escapeHtmlServer(profile.username || '')}, thank you for upgrading to ThinkMaps ${tierLabel} — we genuinely appreciate it. Your payment went through and your account is already fully upgraded, no further steps needed on your end.</p>
+      <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Unlimited blueprints, the full idea toolkit, and everything else in the ${tierLabel} plan is live on your account right now, through <strong>${expiresLabel}</strong>. This is a one-time payment for one month, not an auto-renewing subscription — nothing will be charged again automatically. To keep ${tierLabel} going after that, just come back and pay again for another month whenever you're ready.</p>
       <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
     `;
     await sendPlainEmail({
       to: profile.email,
-      subject: 'Thank you for subscribing to ThinkMaps Pro',
-      text: `Hi ${profile.username || ''}, thank you for upgrading to ThinkMaps Pro — we genuinely appreciate it. Your payment went through and your account is already fully upgraded. Unlimited blueprints, the full idea toolkit, and everything else in the Pro plan is live on your account right now.`,
-      html: emailShell({ preheader: 'Thank you for subscribing — your ThinkMaps Pro account is ready.', bodyHtml })
+      subject: `Thank you for subscribing to ThinkMaps ${tierLabel}`,
+      text: `Hi ${profile.username || ''}, thank you for upgrading to ThinkMaps ${tierLabel} — we genuinely appreciate it. Your payment went through and your account is already fully upgraded, through ${expiresLabel}. This is a one-time payment for one month, not an auto-renewing subscription — nothing will be charged again automatically. To keep ${tierLabel} going after that, just come back and pay again for another month.`,
+      html: emailShell({ preheader: `Thank you for subscribing — your ThinkMaps ${tierLabel} account is ready.`, bodyHtml })
     });
   } catch (emailErr) {
     console.error('[ThinkMaps] Payment inbox check: upgrade succeeded but confirmation email failed:', emailErr.message);
@@ -1668,6 +1724,11 @@ for(const msgRef of messages){
 
       console.log(`[ThinkMaps] Payment inbox check: examining message "${subject}"`);
 
+      // Extracted once here, not per-matching-method — which tier was
+      // purchased is independent of which of the 4 methods below ends
+      // up identifying the account, so this is shared across all of them.
+      const purchasedTier = extractTierFromText(bodyText);
+
       // ---------- Match attempt 1: Profile ID (UUID), silently carried
       // via the "address" field prefill. The single strongest possible
       // match — a UUID is globally unique by construction, so if one
@@ -1685,7 +1746,7 @@ for(const msgRef of messages){
           if(idProfile.pro_status){
             console.log(`[ThinkMaps] Payment inbox check: ${idProfile.username} (matched by profile id) is already Pro — nothing to do.`);
           } else {
-            await applyProUpgrade(idProfile, `via their account's profile id, matched directly from the checkout`);
+            await applyProUpgrade(idProfile, `via their account's profile id, matched directly from the checkout`, purchasedTier);
           }
           await markPaymentEmailProcessed(msgRef.id);
           continue;
@@ -1710,7 +1771,7 @@ for(const msgRef of messages){
           if(usernameProfile.pro_status){
             console.log(`[ThinkMaps] Payment inbox check: ${usernameProfile.username} (matched by checkout username) is already Pro — nothing to do.`);
           } else {
-            await applyProUpgrade(usernameProfile, `via the ThinkMaps username entered at checkout ("${checkoutUsername}")`);
+            await applyProUpgrade(usernameProfile, `via the ThinkMaps username entered at checkout ("${checkoutUsername}")`, purchasedTier);
           }
           await markPaymentEmailProcessed(msgRef.id);
           continue;
@@ -1749,7 +1810,7 @@ for(const msgRef of messages){
             .single();
 
           if(fallbackProfile && !fallbackProfile.pro_status){
-            await applyProUpgrade(fallbackProfile, `via the pending-upgrade timing fallback (checkout email "${buyerEmail}" didn't match their account directly, but they were the closest-in-time account that had just clicked Go Pro)`);
+            await applyProUpgrade(fallbackProfile, `via the pending-upgrade timing fallback (checkout email "${buyerEmail}" didn't match their account directly, but they were the closest-in-time account that had just clicked Go Pro)`, purchasedTier);
             await supabase.from('pending_upgrades').update({ fulfilled: true }).eq('user_id', fallbackUserId).eq('fulfilled', false);
             await markPaymentEmailProcessed(msgRef.id);
             continue;
@@ -1771,7 +1832,7 @@ for(const msgRef of messages){
         continue;
       }
 
-      await applyProUpgrade(profile, `from message "${subject}" (matched by email)`);
+      await applyProUpgrade(profile, `from message "${subject}" (matched by email)`, purchasedTier);
       await markPaymentEmailProcessed(msgRef.id);
     }
   } catch (err) {
@@ -1992,6 +2053,38 @@ app.delete('/blueprints/:id', requireAuth, async (req, res) => {
     res.status(200).json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: 'Could not delete this blueprint.', detail: err.message });
+  }
+});
+
+// Pro/Ultra only — clears all explored progress on a blueprint back to
+// just the root "Niches" picker, without deleting the blueprint itself
+// (its title, its id, its URL all stay the same). Relies on the exact
+// same cascade already proven for both blueprint deletion and snapshot
+// restore: deleting a group cascades to its own group_versions and
+// options automatically, so this only needs to delete the GROUP rows
+// themselves — everything hanging off them cleans up on its own.
+app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
+    if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
+
+    // The true root group has no spawned_from_option_id at all — every
+    // OTHER group in this blueprint was spawned from some option
+    // somewhere, directly or indirectly, so deleting every group WITH
+    // a spawned_from_option_id is exactly "everything except the root."
+    const { error } = await supabase
+      .from('groups')
+      .delete()
+      .eq('blueprint_id', req.params.id)
+      .not('spawned_from_option_id', 'is', null);
+
+    if(error) throw error;
+
+    res.status(200).json({ reset: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not reset this blueprint.', detail: err.message });
   }
 });
 
@@ -3200,9 +3293,45 @@ async function getOwnedBlueprint(blueprintId, userId){
 // through this rather than each re-writing its own profile query, so
 // there's exactly one place that definition could ever drift.
 async function isUserPro(userId){
-  const { data: profile } = await supabase.from('profiles').select('pro_status').eq('id', userId).single();
-  return !!profile?.pro_status;
+  const { data: profile } = await supabase.from('profiles').select('pro_status, pro_expires_at').eq('id', userId).single();
+  if(!profile?.pro_status) return false;
+  // Pro/Ultra is never permanent — this is the actual enforcement of
+  // that. NULL pro_expires_at (shouldn't happen after the backfill
+  // migration, but defensive regardless) is treated as NOT expired
+  // rather than immediately locking someone out due to missing data —
+  // the periodic cleanup below is what actually corrects that state,
+  // this is just the read-time gate.
+  if(profile.pro_expires_at && new Date(profile.pro_expires_at) < new Date()) return false;
+  return true;
 }
+
+// Runs periodically (see setInterval below) rather than checking-and-
+// writing on every single isUserPro call — that would mean a DB write
+// on every gated request across the whole app, for something that only
+// actually needs to happen once, right around the moment an account's
+// month runs out. isUserPro itself stays a fast, read-only check;  this
+// is what actually moves an expired account back to free in the
+// database, not just treats it as free in memory for one request.
+async function expireOutdatedProAccounts(){
+  try {
+    const { data: expired } = await supabase
+      .from('profiles')
+      .select('id, email, username')
+      .eq('pro_status', true)
+      .lt('pro_expires_at', new Date().toISOString());
+
+    if(!expired || expired.length === 0) return;
+
+    for(const profile of expired){
+      await supabase.from('profiles').update({ pro_status: false, plan_tier: 'free' }).eq('id', profile.id);
+      console.log(`[ThinkMaps] Plan expired for ${profile.email} (${profile.username}) — reverted to free.`);
+    }
+  } catch (err) {
+    console.error('[ThinkMaps] expireOutdatedProAccounts failed:', err.message);
+  }
+}
+setTimeout(expireOutdatedProAccounts, 20 * 1000);
+setInterval(expireOutdatedProAccounts, 60 * 60 * 1000); // hourly is plenty — expiration only needs to be caught within an hour of actually happening, not instantly
 
 // Convenience for the top of any pro-gated route — returns true and
 // sends the 403 itself if the user ISN'T pro, so callers can just do
