@@ -8,14 +8,7 @@ const API_BASE_URL = 'https://thinkmaps.onrender.com';
 // upgrade itself is applied by the inbox check in server.js once a
 // payment completes, matched back to a ThinkMaps account by email. This
 // link is the only thing the frontend needs to know about payment at all.
-// Two separate Selar products — Pro ($15/month, one-time payment) and
-// Ultra ($25/month, one-time payment, everything Pro has). The Ultra
-// URL below is a PLACEHOLDER — create the actual Ultra product on Selar
-// (same setup as Pro: one-time payment type, not subscription, the
-// "ThinkMaps UserName" Required custom question) and swap this for the
-// real link before deploying.
 const PRO_PAYMENT_URL = 'https://selar.com/130n178z3r';
-const ULTRA_PAYMENT_URL = 'https://selar.com/REPLACE-WITH-REAL-ULTRA-PRODUCT-LINK';
 
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
@@ -652,20 +645,16 @@ function closeProFeaturesModal(){
 // Kept in one place specifically so it's the one spot that needs
 // updating when a new Pro feature ships, rather than this list quietly
 // drifting out of sync with the pricing card's shorter version.
-function showProFeaturesModal(tier = 'pro'){
+function showProFeaturesModal(){
   closeProFeaturesModal();
-
-  const tierLabel = tier === 'ultra' ? 'Ultra' : 'Pro';
-  const tierPrice = tier === 'ultra' ? '$25' : '$15';
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'proFeaturesModal';
   overlay.innerHTML = `
     <div class="modal-card pro-features-modal-card">
-      <span class="ptag">${tierLabel} — ${tierPrice}/month, one-time</span>
-      <h3>Everything ${tierLabel} includes</h3>
-      ${tier === 'ultra' ? '<p class="muted">Ultra has exactly everything Pro has — same features, just for people who\'d rather pay a bit more than think about it.</p>' : ''}
+      <span class="ptag">Pro — $15/month, one-time</span>
+      <h3>Everything Pro includes</h3>
 
       <div class="pro-features-group">
         <div class="pro-features-group-label">Blueprints</div>
@@ -713,7 +702,7 @@ function showProFeaturesModal(tier = 'pro'){
 
       <div class="modal-actions pro-features-modal-actions">
         <button class="btn btn-ghost" id="closeProFeaturesModalBtn" type="button">Close</button>
-        <a href="auth.html" class="btn btn-primary">Go ${tierLabel}</a>
+        <a href="auth.html" class="btn btn-primary">Go Pro</a>
       </div>
     </div>
   `;
@@ -727,43 +716,31 @@ async function initPricingSection(){
   const grid = document.getElementById('pricingGrid');
   const freeCard = document.getElementById('freePlanCard');
   const goProBtn = document.getElementById('proPlanGoProBtn');
-  const goUltraBtn = document.getElementById('ultraPlanGoBtn');
   if(!grid || !freeCard || !goProBtn) return;
 
   // Wired here, before the session check below — this is purely
   // informational and should work for a logged-out visitor just
   // browsing pricing, not only for someone already signed in.
-  document.getElementById('proPlanMoreBtn')?.addEventListener('click', () => showProFeaturesModal('pro'));
-  document.getElementById('ultraPlanMoreBtn')?.addEventListener('click', () => showProFeaturesModal('ultra'));
+  document.getElementById('proPlanMoreBtn')?.addEventListener('click', () => showProFeaturesModal());
 
   const session = await getActiveSession();
   if(!session) return;
 
-  let currentTier = 'free';
+  let isPro = false;
   try {
     const res = await authedFetch('/profile');
     if(res && res.ok){
       const body = await res.json();
-      // plan_tier is the real source of truth for WHICH tier, but older
-      // accounts predating that column could still have pro_status=true
-      // with no plan_tier set — falling back to 'pro' there rather than
-      // treating a genuinely paying account as free.
-      currentTier = body.pro_status ? (body.plan_tier || 'pro') : 'free';
+      isPro = !!body.pro_status;
     }
-  } catch (err) { /* leave currentTier 'free' on failure — worst case shows all plans as available */ }
+  } catch (err) { /* leave isPro false on failure — worst case shows the plan as available */ }
 
-  applyPricingProState(currentTier, freeCard, grid, goProBtn, goUltraBtn);
+  applyPricingProState(isPro, freeCard, grid, goProBtn);
 
   goProBtn.addEventListener('click', async (e) => {
     e.preventDefault();
-    if(currentTier !== 'free') return; // button is disabled in this state, but guard anyway
-    await openPaymentCheckout(session, 'pro');
-  });
-
-  goUltraBtn?.addEventListener('click', async (e) => {
-    e.preventDefault();
-    if(currentTier !== 'free') return;
-    await openPaymentCheckout(session, 'ultra');
+    if(isPro) return; // button is disabled in this state, but guard anyway
+    await openPaymentCheckout(session);
   });
 }
 
@@ -798,7 +775,7 @@ async function initPricingSection(){
 // that field gets fully repurposed. For a digital subscription product,
 // that's a fair trade for reliable automatic matching — but it IS a
 // real tradeoff, not a free lunch.
-async function openPaymentCheckout(session, tier = 'pro'){
+async function openPaymentCheckout(session){
   const accountEmail = session?.user?.email || '';
   const accountId = session?.user?.id || '';
   let accountUsername = session?.user?.user_metadata?.username || '';
@@ -825,7 +802,7 @@ async function openPaymentCheckout(session, tier = 'pro'){
     // or profile id instead of the timing fallback path.
   }
 
-  showCheckoutConfirmationModal(accountEmail, accountUsername, accountId, tier);
+  showCheckoutConfirmationModal(accountEmail, accountUsername, accountId);
 }
 
 // Robust clipboard copy — navigator.clipboard.writeText silently fails
@@ -857,20 +834,15 @@ async function copyTextRobustly(text){
   }
 }
 
-function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId, tier = 'pro'){
-  const tierLabel = tier === 'ultra' ? 'Ultra' : 'Pro';
-  const tierPrice = tier === 'ultra' ? '$25' : '$15';
-  const tierMarker = tier === 'ultra' ? 'TMUSER-ULTRA' : 'TMUSER-PRO';
-  const paymentUrl = tier === 'ultra' ? ULTRA_PAYMENT_URL : PRO_PAYMENT_URL;
-
+function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId){
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'checkoutConfirmationModal';
   overlay.innerHTML = `
     <div class="modal-card checkout-confirmation-card">
       <h3>You're all set — nothing to type</h3>
-      <p class="muted">${tierLabel} is a one-time payment of ${tierPrice} for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
-      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>${tierMarker} ${escapeHtml(accountUsername)} ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
+      <p class="muted">Pro is a one-time payment of $15 for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
+      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml(accountUsername)} ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
       <p class="muted">If checkout also asks for your ThinkMaps username separately, use this (just in case):</p>
       <div class="checkout-username-display">
         <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
@@ -900,25 +872,24 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId,
   document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
     overlay.remove();
     // Selar's confirmed prefill parameters. fullname carries THREE
-    // signals at once now — tier, username, and profile id — since this
-    // checkout type has no address field to split any of them off into
-    // separately. Selar's Name validation was confirmed (via a real
-    // rejected attempt) to require at least a space; three words is a
-    // reasonable bet to still pass the same "contains a space" check
-    // that two words does, but this specific case hasn't been confirmed
-    // against a real checkout beyond that assumption — if it gets
-    // rejected, that's the first thing to check.
+    // signals at once — a fixed "TMUSER-PRO" marker, username, and
+    // profile id — since this checkout type has no address field to
+    // split any of them off into separately. Selar's Name validation
+    // was confirmed (via a real rejected attempt) to require at least a
+    // space; three words is a reasonable bet to still pass the same
+    // "contains a space" check that two words does, but this specific
+    // case hasn't been confirmed against a real checkout beyond that
+    // assumption — if it gets rejected, that's the first thing to check.
     //
-    // "TMUSER-PRO"/"TMUSER-ULTRA" (not "ThinkMaps") is deliberate — the
-    // product name legitimately appears many other places in the actual
-    // notification email (plan name, footer branding), which would risk
-    // the backend extractor false-matching on one of those instead of
-    // the real encoded value.
+    // Still "TMUSER-PRO", not "ThinkMaps" — the product name legitimately
+    // appears many other places in the actual notification email (plan
+    // name, footer branding), which would risk the backend extractor
+    // false-matching on one of those instead of the real encoded value.
     const params = new URLSearchParams();
     if(accountEmail) params.set('email', accountEmail);
-    if(accountUsername) params.set('fullname', `${tierMarker} ${accountUsername} ${accountId}`.trim());
+    if(accountUsername) params.set('fullname', `TMUSER-PRO ${accountUsername} ${accountId}`.trim());
     params.set('add_to_cart', '1');
-    const checkoutUrl = `${paymentUrl}?${params.toString()}`;
+    const checkoutUrl = `${PRO_PAYMENT_URL}?${params.toString()}`;
     window.open(checkoutUrl, '_blank', 'noopener');
   });
 }
@@ -926,27 +897,11 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId,
 // Shared between initPricingSection above and the dashboard's "Go Pro"
 // modal (see showProPlanModal) — the same on/off visual state, applied
 // in two different places someone might see it.
-function applyPricingProState(currentTier, freeCard, grid, goProBtn, goUltraBtn){
-  const isPaying = currentTier !== 'free';
-  freeCard.style.display = isPaying ? 'none' : '';
-  grid.classList.toggle('pro-only', isPaying);
-
-  goProBtn.textContent = currentTier === 'pro' ? "You're on Pro"
-    : currentTier === 'ultra' ? 'Included in Ultra'
-    : 'Go Pro';
-  goProBtn.disabled = isPaying;
-
-  if(goUltraBtn){
-    goUltraBtn.textContent = currentTier === 'ultra' ? "You're on Ultra"
-      : currentTier === 'pro' ? 'Upgrade to Ultra'
-      : 'Go Ultra';
-    // Pro accounts CAN still upgrade to Ultra (a real, meaningful
-    // action — more time before their next payment, or just because
-    // they want to) — only actually disabled once they're already on
-    // Ultra itself, unlike the Pro button above which locks out
-    // entirely for any paying tier.
-    goUltraBtn.disabled = currentTier === 'ultra';
-  }
+function applyPricingProState(isPro, freeCard, grid, goProBtn){
+  freeCard.style.display = isPro ? 'none' : '';
+  grid.classList.toggle('pro-only', isPro);
+  goProBtn.textContent = isPro ? "You're on Pro" : 'Go Pro';
+  goProBtn.disabled = isPro;
 }
 
 // ---------- DASHBOARD PAGE ----------
@@ -957,7 +912,7 @@ function applyPricingProState(currentTier, freeCard, grid, goProBtn, goUltraBtn)
 // Set once per loadDashboard() call (see renderProBanner) — lets the Pro
 // plan modal (showProPlanModal) know the current state without needing
 // it threaded through as a function argument from wherever it's opened.
-const dashboardState = { isPro: false, planTier: 'free' };
+const dashboardState = { isPro: false };
 
 async function initDashboardPage(){
   const root = document.getElementById('dashboardRoot');
@@ -1058,14 +1013,12 @@ function renderProBanner(bannerEl, profile){
   if(!bannerEl) return;
 
   dashboardState.isPro = !!profile.pro_status;
-  dashboardState.planTier = profile.pro_status ? (profile.plan_tier || 'pro') : 'free';
 
   if(profile.pro_status){
-    const tierLabel = dashboardState.planTier === 'ultra' ? 'Ultra' : 'Pro';
     const expiresLabel = profile.pro_expires_at
       ? new Date(profile.pro_expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
       : null;
-    bannerEl.innerHTML = `<span class="eyebrow">${tierLabel}</span> Unlimited blueprints, no edit lock, never deleted.${expiresLabel ? ` Active through <strong>${expiresLabel}</strong>, then back to Free automatically.` : ''}`;
+    bannerEl.innerHTML = `<span class="eyebrow">Pro</span> Unlimited blueprints, no edit lock, never deleted.${expiresLabel ? ` Active through <strong>${expiresLabel}</strong>, then back to Free automatically.` : ''}`;
     bannerEl.classList.add('pro');
   } else {
     bannerEl.innerHTML = `
@@ -1098,39 +1051,27 @@ function renderProBanner(bannerEl, profile){
 function showProPlanModal(){
   closeProPlanModal(); // guard against a stray double-open leaving two overlays stacked
 
-  const currentTier = dashboardState.planTier || 'free';
+  const isPro = dashboardState.isPro;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'proPlanModal';
   overlay.innerHTML = `
-    <div class="modal-card modal-card-wide">
-      <div class="modal-plan-grid">
-        <div class="plan pro modal-plan-card">
-          <span class="ptag">Pro</span>
-          <h3>For builders who iterate</h3>
-          <div class="price">$15<sup>/month, one-time</sup></div>
-          <ul>
-            <li>Unlimited blueprints, no edit lock, never deleted</li>
-            <li>Combine multiple selections into one fused idea</li>
-            <li>Market Intel &amp; Risk Analysis</li>
-            <li>AI-found fixes for surfaced risks</li>
-            <li>Detailed Build Brief for your MVP</li>
-            <li>Suggest Changes — revise with your own feedback</li>
-          </ul>
-          <button type="button" class="btn btn-primary" id="modalGoProBtn" ${currentTier !== 'free' ? 'disabled' : ''}>${currentTier === 'pro' ? "You're on Pro" : currentTier === 'ultra' ? 'Included in Ultra' : 'Go Pro'}</button>
-        </div>
-        <div class="plan pro ultra modal-plan-card">
-          <span class="ptag">Ultra</span>
-          <h3>Everything Pro has</h3>
-          <div class="price">$25<sup>/month, one-time</sup></div>
-          <ul>
-            <li>Everything in Pro, no exceptions</li>
-            <li>Same features, same limits removed</li>
-          </ul>
-          <button type="button" class="btn btn-primary" id="modalGoUltraBtn" ${currentTier === 'ultra' ? 'disabled' : ''}>${currentTier === 'ultra' ? "You're on Ultra" : currentTier === 'pro' ? 'Upgrade to Ultra' : 'Go Ultra'}</button>
-        </div>
+    <div class="modal-card">
+      <div class="plan pro modal-plan-card">
+        <span class="ptag">Pro</span>
+        <h3>For builders who iterate</h3>
+        <div class="price">$15<sup>/month, one-time</sup></div>
+        <ul>
+          <li>Unlimited blueprints, no edit lock, never deleted</li>
+          <li>Combine multiple selections into one fused idea</li>
+          <li>Market Intel &amp; Risk Analysis</li>
+          <li>AI-found fixes for surfaced risks</li>
+          <li>Detailed Build Brief for your MVP</li>
+          <li>Suggest Changes — revise with your own feedback</li>
+        </ul>
+        <button type="button" class="btn btn-primary" id="modalGoProBtn" ${isPro ? 'disabled' : ''}>${isPro ? "You're on Pro" : 'Go Pro'}</button>
       </div>
-      <p class="muted modal-plan-expiry-note">Both are one-time payments for one month of access — not auto-renewing subscriptions.</p>
+      <p class="muted modal-plan-expiry-note">One-time payment for one month of access — not an auto-renewing subscription.</p>
       <button type="button" class="btn btn-ghost modal-close-btn" id="closeProPlanModalBtn">Close</button>
     </div>
   `;
@@ -1142,18 +1083,10 @@ function showProPlanModal(){
   document.getElementById('closeProPlanModalBtn').addEventListener('click', closeProPlanModal);
 
   const goProBtn = document.getElementById('modalGoProBtn');
-  if(goProBtn && currentTier === 'free'){
+  if(goProBtn && !isPro){
     goProBtn.addEventListener('click', async () => {
       const session = await getActiveSession();
-      await openPaymentCheckout(session, 'pro');
-    });
-  }
-
-  const goUltraBtn = document.getElementById('modalGoUltraBtn');
-  if(goUltraBtn && currentTier !== 'ultra'){
-    goUltraBtn.addEventListener('click', async () => {
-      const session = await getActiveSession();
-      await openPaymentCheckout(session, 'ultra');
+      await openPaymentCheckout(session);
     });
   }
 }
@@ -1280,7 +1213,7 @@ async function submitFeedback(textarea, sendBtn){
 // before this page did — GET/POST /profile, POST /profile/password,
 // DELETE /profile — this is purely the frontend for infrastructure that
 // was already there.
-const settingsState = { username: '', email: '', isPro: false, planTier: 'free', proExpiresAt: null };
+const settingsState = { username: '', email: '', isPro: false, proExpiresAt: null };
 
 async function initSettingsPage(){
   const root = document.getElementById('settingsRoot');
@@ -1308,7 +1241,6 @@ async function loadSettingsProfile(){
     settingsState.username = profile.username || '';
     settingsState.email = profile.email || '';
     settingsState.isPro = !!profile.pro_status;
-    settingsState.planTier = profile.pro_status ? (profile.plan_tier || 'pro') : 'free';
     settingsState.proExpiresAt = profile.pro_expires_at || null;
 
     const usernameDisplay = document.getElementById('settingsUsernameDisplay');
@@ -1334,11 +1266,10 @@ function renderSettingsPlan(){
   if(!labelEl || !descEl || !btnEl) return;
 
   if(settingsState.isPro){
-    const tierLabel = settingsState.planTier === 'ultra' ? 'Ultra' : 'Pro';
     const expiresLabel = settingsState.proExpiresAt
       ? new Date(settingsState.proExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
       : null;
-    labelEl.innerHTML = `<span class="eyebrow">${tierLabel}</span>`;
+    labelEl.innerHTML = '<span class="eyebrow">Pro</span>';
     descEl.textContent = expiresLabel
       ? `Unlimited blueprints, no edit lock, never deleted. Active through ${expiresLabel}, then back to Free automatically.`
       : 'Unlimited blueprints, no edit lock, never deleted.';
@@ -1350,14 +1281,13 @@ function renderSettingsPlan(){
   }
   btnEl.style.display = 'inline-flex';
 
-  // showProPlanModal reads dashboardState.planTier (a module-level
-  // object shared across every page this script runs on, not just
+  // showProPlanModal reads dashboardState.isPro (a module-level object
+  // shared across every page this script runs on, not just
   // dashboard.html) to decide its own copy/behavior — keeping it in
   // sync here means the exact same modal works correctly whether it was
   // opened from the dashboard or from here.
   btnEl.onclick = () => {
     dashboardState.isPro = settingsState.isPro;
-    dashboardState.planTier = settingsState.planTier;
     showProPlanModal();
   };
 }
@@ -2610,7 +2540,7 @@ function renderSnapshotsButton(){
   controls.appendChild(btn);
 }
 
-// Pro/Ultra only — wipes every explored group back to just the root
+// Pro only — wipes every explored group back to just the root
 // "Niches" picker, without deleting the blueprint itself. Genuinely
 // destructive (every group, every option, every retry gone), so this
 // gets a real confirmation, not a single click.
