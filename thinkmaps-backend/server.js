@@ -1019,7 +1019,7 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     // Same expiration check as isUserPro and /profile — without this,
     // an account whose month just ran out would stay fully unlocked
     // here for up to an hour, until the next cleanup run, directly
-    // undermining "Pro/Ultra isn't permanent." This is read-only (same
+    // undermining "Pro isn't permanent." This is read-only (same
     // reasoning as isUserPro) — the actual DB write back to free still
     // happens in the periodic cleanup job, not here.
     const isExpired = profile.pro_status && profile.pro_expires_at && new Date(profile.pro_expires_at) < new Date();
@@ -1569,17 +1569,12 @@ function extractThinkMapsUsernameFromText(text){
 }
 
 // Reads the same Name-field marker as extractThinkMapsUsernameFromText
-// above to determine which plan was actually purchased — Pro ($15) or
-// Ultra ($25). This is deliberately NOT based on parsing a dollar/naira
-// amount out of the email: Selar transacts in NGN, and hardcoding an
-// exact naira threshold to distinguish the two tiers would be fragile
-// against exchange-rate drift and would need updating every time the
-// rate moves. Encoding the tier directly into the checkout itself is
-// exact and never goes stale. Defaults to 'pro' — the lower tier — when
-// the marker genuinely can't be found (an in-flight payment from before
-// tier-encoding existed, or the custom checkout question was used
-// instead of the Name field); defaulting to the cheaper tier is the
-// safe direction to guess wrong in, never the more expensive one.
+// above. Only Pro exists as an actual product now (Ultra was removed) —
+// this function is kept dormant rather than deleted, since it costs
+// nothing to leave in place and correctly defaults to 'pro' for every
+// real payment going forward (the frontend never sends TMUSER-ULTRA
+// anymore). If a second tier ever comes back, this is already wired to
+// applyProUpgrade below and needs zero changes to start working again.
 function extractTierFromText(text){
   if(!text) return 'pro';
   if(/\bTMUSER-ULTRA\b/i.test(text)) return 'ultra';
@@ -2056,7 +2051,7 @@ app.delete('/blueprints/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Pro/Ultra only — clears all explored progress on a blueprint back to
+// Pro only — clears all explored progress on a blueprint back to
 // just the root "Niches" picker, without deleting the blueprint itself
 // (its title, its id, its URL all stay the same). Relies on the exact
 // same cascade already proven for both blueprint deletion and snapshot
@@ -3295,7 +3290,7 @@ async function getOwnedBlueprint(blueprintId, userId){
 async function isUserPro(userId){
   const { data: profile } = await supabase.from('profiles').select('pro_status, pro_expires_at').eq('id', userId).single();
   if(!profile?.pro_status) return false;
-  // Pro/Ultra is never permanent — this is the actual enforcement of
+  // Pro is never permanent — this is the actual enforcement of
   // that. NULL pro_expires_at (shouldn't happen after the backfill
   // migration, but defensive regardless) is treated as NOT expired
   // rather than immediately locking someone out due to missing data —
