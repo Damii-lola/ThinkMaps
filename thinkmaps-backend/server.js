@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const { NICHE_PATHWAYS } = require('./niche_pathways');
@@ -18,6 +19,15 @@ const PORT = process.env.PORT || 3000;
 // hop of proxy (Render's own), not an arbitrary chain, which is the
 // correct setting for this hosting setup specifically.
 app.set('trust proxy', 1);
+
+// Gzip every response — this server sends nothing but JSON, and JSON
+// compresses extremely well (typically 70-80% smaller on the wire).
+// Applied here, before every other route and before helmet, so it's
+// genuinely global — every canvas action, every toolkit call, every
+// page load's initial data fetch, all of it, not just the big payloads.
+// The CPU cost of compressing is real but small next to the network
+// time saved, especially for anyone not on a fast connection.
+app.use(compression());
 
 // Security headers — CSP is intentionally loose on script-src/style-src
 // since this API serves no HTML pages of its own (the actual frontend
@@ -3242,8 +3252,11 @@ async function pickBestOptionWithAI(optionsList, pathContext){
 async function freezeOptionSubtree(optionId){
   const { data: spawnedGroups } = await supabase.from('groups').select('id').eq('spawned_from_option_id', optionId);
 
+  const touchedGroupIds = [];
+
   for(const g of (spawnedGroups || [])){
     await supabase.from('groups').update({ is_frozen: true }).eq('id', g.id);
+    touchedGroupIds.push(g.id);
 
     const { data: versions } = await supabase.from('group_versions').select('id').eq('group_id', g.id);
     const versionIds = (versions || []).map(v => v.id);
@@ -3252,9 +3265,12 @@ async function freezeOptionSubtree(optionId){
     const { data: innerOptions } = await supabase.from('options').select('id').in('group_version_id', versionIds);
 
     for(const io of (innerOptions || [])){
-      await freezeOptionSubtree(io.id);
+      const nested = await freezeOptionSubtree(io.id);
+      touchedGroupIds.push(...nested);
     }
   }
+
+  return touchedGroupIds;
 }
 
 // Un-grays the IMMEDIATE batch an option spawned (re-activating a previously
@@ -3265,6 +3281,7 @@ async function unfreezeOptionSubtree(optionId){
   for(const g of (spawnedGroups || [])){
     await supabase.from('groups').update({ is_frozen: false }).eq('id', g.id);
   }
+  return (spawnedGroups || []).map(g => g.id);
 }
 
 async function getBlueprintIdForGroup(groupId){
@@ -3375,8 +3392,8 @@ async function requireProOrReject(req, res){
 //      meaningful distinction rather than a label with no effect.
 // A currently-Pro user is never locked out of anything, full stop,
 // regardless of which tier a given blueprint was originally created on.
-async function checkIsLocked(userId, blueprint){
-  const pro = await isUserPro(userId);
+async function checkIsLocked(userId, blueprint, knownIsPro = null){
+  const pro = knownIsPro !== null ? knownIsPro : await isUserPro(userId);
   if(pro) return { isLocked: false, lockReason: null };
 
   if(blueprint.created_as_pro){
@@ -3400,8 +3417,8 @@ async function checkIsLocked(userId, blueprint){
 // — if that cascade isn't actually set up in the schema, this would
 // leave orphaned rows behind; worth a quick check against the real
 // schema before this matters in practice.
-async function cleanupExpiredFreeBlueprints(userId){
-  const pro = await isUserPro(userId);
+async function cleanupExpiredFreeBlueprints(userId, knownIsPro = null){
+  const pro = knownIsPro === null ? await isUserPro(userId) : knownIsPro;
   if(pro) return;
 
   const cutoff = new Date(Date.now() - FREE_TIER_DELETE_MS).toISOString();
@@ -3453,7 +3470,13 @@ async function verifyOptionOwnershipAndLock(optionId, userId){
   const blueprint = await getOwnedBlueprint(group.blueprint_id, userId);
   if(!blueprint) return { error: 'Not your blueprint.', status: 403 };
 
-  const { isLocked, lockReason } = await checkIsLocked(userId, blueprint);
+  // Computed once here and returned below — callers that need isPro
+  // right after calling this (see /options/:id/activate) used to fetch
+  // it AGAIN from scratch immediately afterward, a fully redundant
+  // second profile lookup for the exact same question on the single
+  // most performance-sensitive route in the app.
+  const isPro = await isUserPro(userId);
+  const { isLocked, lockReason } = await checkIsLocked(userId, blueprint, isPro);
   if(isLocked){
     return {
       error: lockReason === 'pro_required'
@@ -3463,10 +3486,12 @@ async function verifyOptionOwnershipAndLock(optionId, userId){
     };
   }
 
-  // blueprintId returned so callers can use it without re-fetching the same
-  // chain — the activate route uses this to include the full graph in its
-  // response, saving the client a second round trip.
-  return { ok: true, blueprintId: group.blueprint_id };
+  // blueprintId AND isPro returned so callers can use both without
+  // re-fetching either — the activate route uses blueprintId to include
+  // the full graph in its response (saving a second round trip) and now
+  // reuses isPro the same way (saving the redundant profile lookup
+  // described above).
+  return { ok: true, blueprintId: group.blueprint_id, isPro };
 }
 
 async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = false } = {}){
@@ -3476,8 +3501,15 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
   const blueprint = await getOwnedBlueprint(group.blueprint_id, userId);
   if(!blueprint) return { error: 'Not your blueprint.', status: 403 };
 
+  // Computed unconditionally, even when allowWhenLocked skips the lock
+  // check entirely below — callers need this returned value either way
+  // (see the combine-activate and random-branch routes, which used to
+  // each pay for a separate, fully redundant isUserPro call right after
+  // this function returned).
+  const isPro = await isUserPro(userId);
+
   if(!allowWhenLocked){
-    const { isLocked, lockReason } = await checkIsLocked(userId, blueprint);
+    const { isLocked, lockReason } = await checkIsLocked(userId, blueprint, isPro);
     if(isLocked){
       return {
         error: lockReason === 'pro_required'
@@ -3488,7 +3520,7 @@ async function verifyGroupOwnershipAndLock(groupId, userId, { allowWhenLocked = 
     }
   }
 
-  return { ok: true, group, blueprint };
+  return { ok: true, group, blueprint, isPro };
 }
 
 // The core action: branch from a given option. If that option already has a
@@ -3597,23 +3629,31 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
     (combinedOptionRows || []).forEach(o => involvedVersionIds.add(o.group_version_id));
   }
 
-  for(const versionId of involvedVersionIds){
-    const { data: siblingOptions } = await supabase
-      .from('options')
-      .select('id')
-      .eq('group_version_id', versionId);
+  // Sibling lookups across different group_versions are independent of
+  // each other, so these run in parallel rather than one version's
+  // lookup waiting on the last.
+  const siblingResults = await Promise.all(
+    [...involvedVersionIds].map(versionId =>
+      supabase.from('options').select('id').eq('group_version_id', versionId)
+    )
+  );
+  const allSiblingIds = siblingResults
+    .flatMap(r => r.data || [])
+    .map(s => s.id)
+    .filter(id => !allCombinedIds.includes(id));
 
-    for(const sibling of (siblingOptions || [])){
-      if(!allCombinedIds.includes(sibling.id)){
-        await freezeOptionSubtree(sibling.id);
-      }
-    }
-  }
+  // Freezing one sibling's subtree touches a genuinely disjoint set of
+  // rows from freezing another sibling's — different options, different
+  // spawned groups (if any) — so there's no reason for these to run one
+  // at a time either. freezeOptionSubtree's own internal recursion is
+  // left exactly as it was; only this outer fan-out is new.
+  const frozenGroupIdArrays = await Promise.all(allSiblingIds.map(id => freezeOptionSubtree(id)));
+  const frozenGroupIds = frozenGroupIdArrays.flat();
 
   if(option.is_selected){
-    await unfreezeOptionSubtree(optionId);
+    const unfrozenIds = await unfreezeOptionSubtree(optionId);
     const { data: existingGroups } = await supabase.from('groups').select('*').eq('spawned_from_option_id', optionId);
-    return { groups: existingGroups || [], reactivated: true };
+    return { groups: existingGroups || [], reactivated: true, frozenGroupIds, unfrozenGroupIds: unfrozenIds };
   }
 
   await supabase.from('options').update({ is_selected: true }).in('id', allCombinedIds);
@@ -3695,34 +3735,27 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
   // and add a little random angle variation so two candidates never land
   // at a perfectly mechanical 180° from each other. Only when truly no
   // direction is free does it fall back to the old "further right" approach.
-  const { data: parentGroup } = await supabase
-    .from('groups')
-    .select('label, position_x, position_y')
-    .eq('id', version.group_id)
-    .single();
+  //
+  // All 3 queries below run in parallel, not sequentially — none of them
+  // depends on either of the others' results (parentGroup only needs
+  // version.group_id, parentOptionsForHeight only needs version.id,
+  // existingGroups only needs blueprintId — all already known before any
+  // of the three fire), so there was never a real reason for one to wait
+  // on the next.
+  const [{ data: parentGroup }, { data: parentOptionsForHeight }, { data: existingGroups }] = await Promise.all([
+    supabase.from('groups').select('label, position_x, position_y').eq('id', version.group_id).single(),
+    supabase.from('options').select('label').eq('group_version_id', version.id),
+    supabase.from('groups').select('position_x, position_y').eq('blueprint_id', blueprintId).neq('id', version.group_id) // exclude the SOURCE group itself — comparing it against its own position is what was breaking the up/down directions
+  ]);
 
   const CARD_WIDTH_ESTIMATE = 220;
   const baseX = (parentGroup?.position_x || 0) + 320; // fallback anchor — "further right"
   const baseY = (parentGroup?.position_y || 0);
 
-  // Need the source group's REAL height — summed from its actual option
-  // labels, not a flat per-row number — so short lists/short labels don't
-  // get treated as if they were as tall as a full 6-long, all-wrapped card.
-  const { data: parentOptionsForHeight } = await supabase
-    .from('options')
-    .select('label')
-    .eq('group_version_id', version.id);
-
   const FOOTER_H = 40;
   const parentCardHeight = estimateHeaderHeight(parentGroup?.label)
     + (parentOptionsForHeight || []).reduce((sum, o) => sum + estimateOptionHeight(o.label), 0)
     + FOOTER_H;
-
-  const { data: existingGroups } = await supabase
-    .from('groups')
-    .select('position_x, position_y')
-    .eq('blueprint_id', blueprintId)
-    .neq('id', version.group_id); // exclude the SOURCE group itself — comparing it against its own position is what was breaking the up/down directions
 
   const occupied = [...(existingGroups || [])];
   const MIN_CLEAR_X = 320; // CARD_WIDTH_ESTIMATE (220) + real margin, not just barely more
@@ -3891,10 +3924,10 @@ async function activateOption(optionId, combinedOptionIds = [], onToken = null, 
 
     if(optionsInsertError) throw optionsInsertError;
 
-    newGroups.push({ ...newGroup, options: insertedOptions });
+    newGroups.push({ ...newGroup, version: newVersion, options: insertedOptions });
   }
 
-  return { groups: newGroups, reactivated: false };
+  return { groups: newGroups, reactivated: false, selectedOptionIds: allCombinedIds, frozenGroupIds };
 }
 
 // Fetches the full graph for a blueprint. Auto-generates the root "Niches"
@@ -3904,13 +3937,13 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
     if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
 
-    const { isLocked, lockReason } = await checkIsLocked(req.user.id, blueprint);
-    // Fetched once here so the frontend can gate pro-only canvas
-    // features (currently: ctrl+click multi-select combining) without a
-    // separate round trip — checkIsLocked above already does its own
-    // profile lookup internally, so this is one more cheap query, not a
-    // duplicated definition of what "pro" means.
+    // Computed once, here, and passed into checkIsLocked below instead
+    // of each doing its own separate profile lookup for the same
+    // question — this route used to pay for isUserPro's query TWICE
+    // (once inside checkIsLocked, once again right after) on every
+    // single canvas load.
     const isPro = await isUserPro(req.user.id);
+    const { isLocked, lockReason } = await checkIsLocked(req.user.id, blueprint, isPro);
 
     let { data: groups, error: groupsError } = await supabase
       .from('groups')
@@ -4212,7 +4245,11 @@ app.post('/options/:id/activate', requireAuth, async (req, res) => {
     // guard keeps this a no-op write (not even a round trip that
     // matters) once a blueprint is already protected, rather than
     // re-writing the same value on every single activation forever.
-    const isPro = await isUserPro(req.user.id);
+    // isPro reused from verifyOptionOwnershipAndLock's own return value
+    // above, not recomputed — this route is the single most
+    // performance-sensitive one in the app (it's what runs on every
+    // canvas click), and it used to pay for isUserPro's query TWICE.
+    const isPro = check.isPro;
     if(isPro){
       await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
     }
@@ -4224,14 +4261,44 @@ app.post('/options/:id/activate', requireAuth, async (req, res) => {
       send({ type: 'token', text: tokenText });
     }, isPro);
 
-    let fullGraph = null;
-    try {
-      fullGraph = await fetchFullBlueprintGraph(check.blueprintId);
-    } catch (graphErr) {
-      console.error('[ThinkMaps] full graph fetch after activate failed:', graphErr.message);
+    // This USED to re-fetch the entire blueprint graph here (every
+    // group, every version, every option, across the WHOLE blueprint)
+    // on every single activation, then send the whole thing back down —
+    // meaning every click paid a cost that grew with how deep the
+    // blueprint already was, for data that was almost entirely already
+    // sitting in the browser unchanged.
+    //
+    // Everything actually NEW is already sitting in `result.groups`
+    // right now, built directly from the insert calls that just created
+    // it — no fetch needed for that part at all. The one thing that
+    // genuinely COULD touch existing rows elsewhere in the blueprint is
+    // freezing sibling branches (freezeOptionSubtree can recurse
+    // arbitrarily deep) — activateOption now returns exactly which
+    // group IDs that touched, so this fetches ONLY those specific rows
+    // instead of guessing or falling back to fetching everything. Still
+    // correct, just bounded to a handful of rows instead of the whole
+    // blueprint.
+    const touchedGroupIds = [...(result.frozenGroupIds || []), ...(result.unfrozenGroupIds || [])];
+    let updatedExistingGroups = [];
+    if(touchedGroupIds.length > 0){
+      const { data } = await supabase.from('groups').select('*').in('id', touchedGroupIds);
+      updatedExistingGroups = data || [];
     }
 
-    send({ type: 'done', groups: result.groups, reactivated: result.reactivated, fullGraph });
+    const delta = result.reactivated
+      ? { groups: [], groupVersions: [], options: [], updatedGroups: updatedExistingGroups, selectedOptionIds: [] }
+      : {
+          groups: result.groups.map(g => {
+            const { version, options, ...groupRow } = g;
+            return groupRow;
+          }),
+          groupVersions: result.groups.map(g => g.version).filter(Boolean),
+          options: result.groups.flatMap(g => g.options || []),
+          updatedGroups: updatedExistingGroups,
+          selectedOptionIds: result.selectedOptionIds || []
+        };
+
+    send({ type: 'done', groups: result.groups, reactivated: result.reactivated, delta });
     res.end();
   } catch (err) {
     send({ type: 'error', error: 'Could not activate that option.', detail: err.message });
@@ -4324,7 +4391,7 @@ app.post('/groups/:id/retry', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const isPro = await isUserPro(req.user.id);
+    const isPro = check.isPro; // reused, not recomputed — see verifyGroupOwnershipAndLock
     if(isPro){
       await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprint.id).eq('created_as_pro', false);
     }
@@ -4458,7 +4525,7 @@ app.post('/groups/:id/random-branch', requireAuth, async (req, res) => {
     const check = await verifyGroupOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const isPro = await isUserPro(req.user.id);
+    const isPro = check.isPro; // reused, not recomputed — see verifyGroupOwnershipAndLock
     if(isPro){
       await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprint.id).eq('created_as_pro', false);
     }
@@ -4510,7 +4577,7 @@ app.post('/options/:id/retry-spawned', requireAuth, async (req, res) => {
     const check = await verifyOptionOwnershipAndLock(req.params.id, req.user.id);
     if(check.error) return res.status(check.status).json({ error: check.error });
 
-    const isPro = await isUserPro(req.user.id);
+    const isPro = check.isPro;
     const FREE_TIER_MAX_RETRIES = 3;
 
     if(isPro){
@@ -4638,7 +4705,7 @@ app.post('/options/:id/random-spawned', requireAuth, async (req, res) => {
     }
 
     const chosenOption = optionsInGroup[Math.floor(Math.random() * optionsInGroup.length)];
-    const isPro = await isUserPro(req.user.id);
+    const isPro = check.isPro; // reused from verifyOptionOwnershipAndLock at the top of this route, not recomputed
     if(isPro){
       await supabase.from('blueprints').update({ created_as_pro: true }).eq('id', check.blueprintId).eq('created_as_pro', false);
     }
