@@ -3283,6 +3283,25 @@ async function getOwnedBlueprint(blueprintId, userId){
   return blueprint;
 }
 
+// Every one of the 9 idea toolkit routes (deeper-analysis, build-brief,
+// pivots, personas, landing-copy, strength-score, launch-checklist,
+// red-team, spy-mode — 23 call sites total) used to verify ownership by
+// looking up the session's blueprint and checking who owns THAT. That
+// worked fine as long as every confirmation_session was guaranteed to
+// have a real blueprint behind it — which stopped being true the moment
+// Paste Your Own Idea shipped: those sessions have blueprint_id = NULL
+// by design (that's the whole point — a session that was never built
+// through the canvas at all). Rather than duplicate a second ownership
+// check into all 23 places, this one function handles both cases, and
+// every call site above was updated to call this instead.
+async function verifySessionOwnership(session, userId){
+  if(session.blueprint_id){
+    const blueprint = await getOwnedBlueprint(session.blueprint_id, userId);
+    return !!blueprint;
+  }
+  return session.user_id === userId;
+}
+
 // The one shared source of truth for "is this user pro" — every gate in
 // this file (blueprint locking, the newly pro-gated routes below) goes
 // through this rather than each re-writing its own profile query, so
@@ -7348,6 +7367,35 @@ async function synthesizeBasicIdea(nicheLabel, answers){
 }
 
 // ============================================================
+// PASTE YOUR OWN IDEA — a second, separate entry point into the exact
+// same idea toolkit, for someone who already has an idea and doesn't
+// want to build it up through the canvas at all. Deliberately produces
+// the IDENTICAL output shape as synthesizeBasicIdea above
+// ({name, oneLiner, coreProblem, tenXFeature, monetization}) — that's
+// what makes this work: every downstream toolkit route (deeper-analysis,
+// build-brief, personas, pivots, strength-score, etc.) already operates
+// generically on whatever's in a confirmation_sessions row's `result`
+// field, with zero awareness of whether that idea came from a 7-node
+// canvas path or a pasted paragraph. Nothing about the toolkit itself
+// needed to change for this feature to exist.
+async function structurePastedIdea(rawIdea, mode){
+  const asIsInstruction = `Stay faithful to what was actually written — organize it into the required fields without meaningfully changing the substance, the scope, or the core mechanic. If a field genuinely isn't addressed in the original text, make the smallest reasonable inference to fill it, not an invention that changes what the idea actually is.`;
+
+  const refurbishInstruction = `This idea is a starting point, not a fixed spec — actively strengthen it. Sharpen a vague problem into something specific, upgrade a weak differentiator into a real one, tighten unfocused scope, and fix a monetization approach that wouldn't actually work. Keep the core concept recognizable (don't replace it with a different idea entirely), but don't be shy about meaningfully improving the weak parts.`;
+
+  const systemPrompt = `You are the idea-structuring engine for ThinkMaps. Someone pasted in their own raw idea below, in their own words — not generated through ThinkMaps' own canvas. Your job: turn it into the same structured shape every other idea in this app uses.
+
+${mode === 'refurbish' ? refurbishInstruction : asIsInstruction}
+
+Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "tenXFeature": string, "monetization": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: rawIdea }
+  ], 700);
+}
+
+// ============================================================
 // CONFIRMATION FLOW — the "harden the idea" pipeline triggered by the
 // canvas's 7-node "Ready to Generate Ideas" terminal card.
 //
@@ -8260,8 +8308,7 @@ app.post('/ideation/:sessionId/answer', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(session.status === 'completed'){
       return res.status(200).json({ status: 'completed', result: session.result });
@@ -8326,8 +8373,7 @@ app.get('/ideation/:sessionId', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     res.status(200).json({
       sessionId: session.id,
@@ -8342,6 +8388,59 @@ app.get('/ideation/:sessionId', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that session.', detail: err.message });
+  }
+});
+
+// ---- Paste Your Own Idea — a second entry point into the exact same
+// toolkit as the canvas flow, for someone who already has an idea and
+// doesn't want to build it up through the canvas at all. Creates a
+// confirmation_sessions row directly in the 'completed' state — no Q&A
+// questions to answer, since a pasted idea is already a complete
+// concept, not something being progressively synthesized from a path.
+// blueprint_id is genuinely NULL here (see verifySessionOwnership
+// above for how ownership works without one).
+app.post('/pasted-ideas', requireAuth, async (req, res) => {
+  try {
+    if(await requireProOrReject(req, res)) return;
+
+    const { rawIdea, mode } = req.body;
+    if(!rawIdea || !rawIdea.trim()){
+      return res.status(400).json({ error: 'Paste in your idea first.' });
+    }
+    if(rawIdea.trim().length < 20){
+      return res.status(400).json({ error: "That's too short to work with — give it at least a sentence or two." });
+    }
+    if(mode !== 'as_is' && mode !== 'refurbish'){
+      return res.status(400).json({ error: 'mode must be "as_is" or "refurbish".' });
+    }
+
+    const trimmedIdea = rawIdea.trim().slice(0, 4000); // generous cap — long enough for a real paragraph or two, not unbounded
+    const structuredIdea = await structurePastedIdea(trimmedIdea, mode);
+
+    const pathSummary = `User-submitted idea (pasted directly, not built through the canvas — ${mode === 'refurbish' ? 'refurbished by AI from the original' : 'used as originally written'}): ${trimmedIdea.slice(0, 300)}`;
+
+    const { data: session, error } = await supabase
+      .from('confirmation_sessions')
+      .insert({
+        user_id: req.user.id,
+        blueprint_id: null,
+        source: 'pasted',
+        raw_idea_text: trimmedIdea,
+        idea_draft: structuredIdea,
+        path_summary: pathSummary,
+        answers: [],
+        status: 'completed',
+        result: structuredIdea,
+        total_questions: 0
+      })
+      .select()
+      .single();
+
+    if(error) throw error;
+
+    res.status(201).json({ sessionId: session.id });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not process that idea.', detail: err.message });
   }
 });
 
@@ -8478,8 +8577,7 @@ app.post('/confirm/:sessionId/answer', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(session.status === 'completed'){
       return res.status(200).json({ status: 'completed', result: session.result });
@@ -8599,8 +8697,7 @@ app.post('/confirm/:sessionId/answer-for-me', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.pending_question){
       return res.status(400).json({ error: 'No question is currently pending on this session.' });
@@ -8626,8 +8723,7 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     res.status(200).json({
       sessionId: session.id,
@@ -8644,7 +8740,14 @@ app.get('/confirm/:sessionId', requireAuth, async (req, res) => {
       deeperAnalysisFixes: session.deeper_analysis_fixes || null,
       buildBrief: session.build_brief || null,
       shareToken: session.share_token || null,
-      pendingRevision: session.pending_revision || null
+      pendingRevision: session.pending_revision || null,
+      pivots: session.pivots || null,
+      landingCopy: session.landing_copy || null,
+      strengthScore: session.strength_score || null,
+      personas: session.personas || null,
+      launchChecklist: session.launch_checklist || null,
+      redTeam: session.red_team || null,
+      spyMode: session.spy_mode || null
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load that confirmation session.', detail: err.message });
@@ -8669,8 +8772,7 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(session.status !== 'completed' || !session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before deeper analysis can run.' });
@@ -8766,8 +8868,7 @@ app.post('/confirm/:sessionId/deeper-fixes', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before fixes can be generated.' });
@@ -8812,8 +8913,7 @@ app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before a build brief can be generated.' });
@@ -8860,8 +8960,7 @@ app.post('/confirm/:sessionId/share', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be shared.' });
@@ -8905,8 +9004,7 @@ app.post('/confirm/:sessionId/pivots', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before pivots can be generated.' });
@@ -8981,8 +9079,7 @@ app.post('/confirm/:sessionId/landing-copy', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before landing copy can be generated.' });
@@ -9021,8 +9118,7 @@ app.post('/confirm/:sessionId/strength-score', requireAuth, async (req, res) => 
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be scored.' });
@@ -9057,8 +9153,7 @@ app.post('/confirm/:sessionId/personas', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before personas can be generated.' });
@@ -9108,8 +9203,7 @@ app.post('/confirm/:sessionId/launch-checklist', requireAuth, async (req, res) =
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.build_brief){
       return res.status(400).json({ error: 'Generate the Build Brief first — the launch checklist is built from it.' });
@@ -9143,8 +9237,7 @@ app.post('/confirm/:sessionId/red-team', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be challenged.' });
@@ -9188,8 +9281,7 @@ app.post('/confirm/:sessionId/red-team/respond', requireAuth, async (req, res) =
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.red_team){
       return res.status(400).json({ error: 'Run the Red Team challenge first.' });
@@ -9231,8 +9323,7 @@ app.post('/confirm/:sessionId/spy-mode', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     const currentIdea = session.rewritten_idea || session.result;
     if(!currentIdea?.competitors?.length){
@@ -9274,8 +9365,7 @@ app.post('/confirm/:sessionId/spy-mode/steal', requireAuth, async (req, res) => 
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.build_brief){
       return res.status(400).json({ error: "Generate the Build Brief first — there's nothing to append this to yet." });
@@ -9315,8 +9405,7 @@ app.get('/confirm/:sessionId/export/markdown', requireAuth, async (req, res) => 
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be exported.' });
@@ -9352,8 +9441,7 @@ app.get('/confirm/:sessionId/export/data', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be exported.' });
@@ -9440,8 +9528,7 @@ app.post('/confirm/:sessionId/revise', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be revised.' });
@@ -9473,8 +9560,7 @@ app.post('/confirm/:sessionId/revise/commit', requireAuth, async (req, res) => {
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     if(!session.pending_revision?.idea){
       return res.status(400).json({ error: 'There is no pending revision to make permanent.' });
@@ -9502,8 +9588,7 @@ app.post('/confirm/:sessionId/revise/discard', requireAuth, async (req, res) => 
 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
-    const blueprint = await getOwnedBlueprint(session.blueprint_id, req.user.id);
-    if(!blueprint) return res.status(403).json({ error: 'Not your session.' });
+    if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
     await supabase.from('confirmation_sessions').update({ pending_revision: null }).eq('id', session.id);
 
