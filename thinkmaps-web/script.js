@@ -8,7 +8,7 @@ const API_BASE_URL = 'https://thinkmaps.onrender.com';
 // upgrade itself is applied by the inbox check in server.js once a
 // payment completes, matched back to a ThinkMaps account by email. This
 // link is the only thing the frontend needs to know about payment at all.
-const PRO_PAYMENT_URL = 'https://selar.com/130n178z3r';
+const PRO_PAYMENT_URL = 'https://selar.com/thinkmaps';
 
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
@@ -54,6 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initIdeatePage();
   initConfirmPage();
   initSettingsPage();
+  initPasteIdeaPage();
   initPasswordToggles();
 });
 
@@ -929,6 +930,7 @@ async function initDashboardPage(){
 
   setupNewBlueprintModal();
   renderFeedbackButton();
+  renderPasteIdeaButton();
   await loadDashboard();
   await maybeHandlePaymentRedirect();
 }
@@ -1118,6 +1120,30 @@ function renderFeedbackButton(){
     </svg>
   `;
   btn.addEventListener('click', showFeedbackModal);
+  document.body.appendChild(btn);
+}
+
+// Stacked directly above the feedback button (same fixed-position FAB
+// pattern, just anchored higher up) — dashboard-only, same as feedback.
+// Pencil icon, links to the new Paste Your Own Idea page. Shown to
+// every account regardless of Pro status — the page itself is what
+// shows the Pro gate, same pattern as clicking a Pro-only feature
+// elsewhere in the app, rather than hiding the entry point entirely.
+function renderPasteIdeaButton(){
+  if(document.getElementById('pasteIdeaFab')) return;
+
+  const btn = document.createElement('a');
+  btn.href = 'paste-idea.html';
+  btn.id = 'pasteIdeaFab';
+  btn.className = 'feedback-fab paste-idea-fab';
+  btn.title = 'Paste your own idea (Pro)';
+  btn.setAttribute('aria-label', 'Paste your own idea');
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
+      <path d="M12 20h9"/>
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+    </svg>
+  `;
   document.body.appendChild(btn);
 }
 
@@ -1794,6 +1820,95 @@ function showToast(message){
     el.classList.remove('app-toast-visible');
     setTimeout(() => el.remove(), 250);
   }, 2600);
+}
+
+// =====================================================================
+// PASTE YOUR OWN IDEA — a separate page from the canvas entirely, for
+// someone who already has an idea and wants the toolkit run on it
+// directly. Pro-only. The heavy lifting (structuring the pasted idea,
+// creating a completed session) happens server-side in one call to
+// POST /pasted-ideas — this page's job is just collecting the idea and
+// the as-is/refurbish choice, then handing off to confirm.html?session=
+// which already knows how to render a completed session and run the
+// full toolkit on it, unchanged.
+// =====================================================================
+async function initPasteIdeaPage(){
+  const root = document.getElementById('pasteIdeaRoot');
+  if(!root) return;
+
+  const session = await getActiveSession();
+  if(!session){
+    window.location.href = 'auth.html';
+    return;
+  }
+
+  const gateEl = document.getElementById('pasteIdeaProGate');
+  const formEl = document.getElementById('pasteIdeaForm');
+
+  let isPro = false;
+  try {
+    const res = await authedFetch('/profile');
+    if(res && res.ok){
+      const body = await res.json();
+      isPro = !!body.pro_status;
+    }
+  } catch (err) { /* leave isPro false on failure — the gate is the safe default */ }
+
+  if(!isPro){
+    if(gateEl) gateEl.style.display = '';
+    if(formEl) formEl.style.display = 'none';
+    return;
+  }
+
+  if(gateEl) gateEl.style.display = 'none';
+  if(formEl) formEl.style.display = '';
+
+  const textarea = document.getElementById('pasteIdeaTextarea');
+  const submitBtn = document.getElementById('pasteIdeaSubmitBtn');
+  const errorEl = document.getElementById('pasteIdeaError');
+  const charCountEl = document.getElementById('pasteIdeaCharCount');
+
+  textarea?.addEventListener('input', () => {
+    if(charCountEl) charCountEl.textContent = `${textarea.value.length} / 4000`;
+  });
+
+  submitBtn?.addEventListener('click', async () => {
+    const rawIdea = textarea?.value.trim() || '';
+    const mode = document.querySelector('input[name="pasteIdeaMode"]:checked')?.value || 'as_is';
+
+    if(errorEl) errorEl.textContent = '';
+
+    if(rawIdea.length < 20){
+      if(errorEl) errorEl.textContent = "That's too short to work with — give it at least a sentence or two.";
+      return;
+    }
+
+    submitBtn.disabled = true;
+    const originalText = submitBtn.textContent;
+    submitBtn.textContent = mode === 'refurbish' ? 'Refurbishing your idea…' : 'Processing your idea…';
+
+    try {
+      const res = await authedFetch('/pasted-ideas', {
+        method: 'POST',
+        body: JSON.stringify({ rawIdea, mode })
+      });
+      if(!res) return;
+
+      const body = await res.json();
+      if(!res.ok){
+        if(errorEl) errorEl.textContent = body.error || 'Could not process that idea.';
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalText;
+        return;
+      }
+
+      window.location.href = `confirm.html?session=${body.sessionId}`;
+    } catch (err) {
+      if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalText;
+    }
+  });
 }
 
 // =====================================================================
@@ -4807,27 +4922,69 @@ async function initConfirmPage(){
   }
 
   const params = new URLSearchParams(window.location.search);
+  const directSessionId = params.get('session');
   const blueprintId = params.get('blueprint');
   const sourceOptionId = params.get('option');
+
+  // Fetched in parallel with whichever loading path runs below, not
+  // before it — independent of both, so no reason to pay for it
+  // sequentially. Stored on confirmState itself (not a local variable)
+  // so renderConfirmResult — which can fire from this function OR from
+  // submitConfirmAnswer much later in the flow — can reliably await it
+  // regardless of which call site reaches it first. A failure here just
+  // leaves isPro at its false default rather than blocking the actual
+  // confirmation flow.
+  confirmState._profilePromise = authedFetch('/profile')
+    .then(res => res && res.ok ? res.json() : null)
+    .then(body => { confirmState.isPro = !!body?.pro_status; })
+    .catch(() => {});
+
+  // A pasted idea (Paste Your Own Idea) already exists as a fully
+  // completed session by the time it ever reaches this page — there's
+  // no blueprint, no source option, and definitely no Q&A questions
+  // left to answer. This loads it directly instead of going through the
+  // blueprint/option-based confirm/start flow, which doesn't apply here
+  // at all.
+  if(directSessionId){
+    confirmState.sessionId = directSessionId;
+    confirmState.blueprintId = null;
+    confirmState.sourceOptionId = null;
+
+    try {
+      const res = await authedFetch(`/confirm/${directSessionId}`);
+      if(!res) return;
+      const body = await res.json();
+      if(!res.ok){
+        showConfirmError(body.error || 'Could not load this idea.');
+        return;
+      }
+
+      confirmState.deeperAnalysis = body.deeperAnalysis || null;
+      confirmState.rewrittenIdea = body.rewrittenIdea || null;
+      confirmState.deeperAnalysisFixes = body.deeperAnalysisFixes || null;
+      confirmState.buildBrief = body.buildBrief || null;
+      confirmState.shareToken = body.shareToken || null;
+      confirmState.pendingRevision = body.pendingRevision || null;
+      confirmState.pivots = body.pivots || null;
+      confirmState.landingCopy = body.landingCopy || null;
+      confirmState.strengthScore = body.strengthScore || null;
+      confirmState.personas = body.personas || null;
+      confirmState.launchChecklist = body.launchChecklist || null;
+      confirmState.redTeam = body.redTeam || null;
+      confirmState.spyMode = body.spyMode || null;
+      renderConfirmResult(body.result);
+    } catch (err) {
+      showConfirmError('Something went wrong loading this idea.');
+    }
+    return;
+  }
+
   if(!blueprintId || !sourceOptionId){
     window.location.href = 'dashboard.html';
     return;
   }
   confirmState.blueprintId = blueprintId;
   confirmState.sourceOptionId = sourceOptionId;
-
-  // Fetched in parallel with confirm/start below, not before it — these
-  // two requests are independent of each other, so there's no reason to
-  // pay for them sequentially. Stored on confirmState itself (not a
-  // local variable) so renderConfirmResult — which can fire from this
-  // function OR from submitConfirmAnswer much later in the flow — can
-  // reliably await it regardless of which call site reaches it first. A
-  // failure here just leaves isPro at its false default rather than
-  // blocking the actual confirmation flow.
-  confirmState._profilePromise = authedFetch('/profile')
-    .then(res => res && res.ok ? res.json() : null)
-    .then(body => { confirmState.isPro = !!body?.pro_status; })
-    .catch(() => {});
 
   try {
     const res = await authedFetch(`/blueprints/${blueprintId}/confirm/start`, {
@@ -6217,6 +6374,16 @@ function renderPivots(pivots){
 }
 
 async function buildPivotInstead(pivot, btn){
+  if(!confirmState.blueprintId){
+    // A pasted idea has no source blueprint at all — "Build This
+    // Instead" specifically means "start a new canvas blueprint
+    // carrying this pivot forward FROM an existing one," which doesn't
+    // have anywhere to attach for an idea that was never built through
+    // the canvas in the first place.
+    showToast("This idea wasn't built from a blueprint, so there's nothing to carry the pivot forward from — try pasting the pivoted idea in fresh on the Paste Your Own Idea page instead.");
+    return;
+  }
+
   if(btn){ btn.disabled = true; btn.textContent = 'Starting new blueprint…'; }
 
   try {
