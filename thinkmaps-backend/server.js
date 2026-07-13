@@ -2132,6 +2132,15 @@ function getMistralApiKey(){
   return MISTRAL_API_KEYS[index];
 }
 
+// "-latest" deliberately, not a pinned dated snapshot — this used to be
+// hardcoded to mistral-small-2503, which was over a year stale by the
+// time it was caught, and canvas generation was paying for it: Mistral's
+// newer Small releases are specifically throughput-optimized (Small 4
+// alone is documented at ~40% faster end-to-end completion and 3x more
+// requests/sec than the generation this app was still pinned to). Using
+// the alias means every future Mistral Small release speeds this up
+// automatically, instead of silently falling behind again until someone
+// notices generation has gotten slow.
 async function callMistral(messages, maxTokens = 350, isRetry = false){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
@@ -2140,7 +2149,7 @@ async function callMistral(messages, maxTokens = 350, isRetry = false){
       'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-2503',
+      model: 'mistral-small-latest',
       messages,
       response_format: { type: 'json_object' },
       // Hard cap on output tokens — every canvas generation call produces
@@ -2235,7 +2244,7 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
       'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-2503',
+      model: 'mistral-small-latest',
       messages,
       response_format: { type: 'json_object' },
       max_tokens: maxTokens,
@@ -2309,7 +2318,7 @@ async function callMistralPlainText(messages){
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${getMistralApiKey()}`
     },
-    body: JSON.stringify({ model: 'mistral-small-2503', messages, max_tokens: 700 })
+    body: JSON.stringify({ model: 'mistral-small-latest', messages, max_tokens: 700 })
   });
 
   if(!res.ok){
@@ -2337,7 +2346,7 @@ async function callMistralStreaming(messages, maxTokens = 350){
       'Authorization': `Bearer ${getMistralApiKey()}`
     },
     body: JSON.stringify({
-      model: 'mistral-small-2503',
+      model: 'mistral-small-latest',
       messages,
       response_format: { type: 'json_object' },
       max_tokens: maxTokens,
