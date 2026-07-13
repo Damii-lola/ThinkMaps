@@ -1830,3 +1830,53 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 
 /* ---------- Canvas reset button ---------- */
 .reset-blueprint-btn{ font-size:16px; }
+
+/* ---------- Paste-idea FAB (stacked above the feedback FAB) ---------- */
+.paste-idea-fab{
+  bottom:86px; /* feedback-fab's 24px + its own 52px + a real gap */
+  text-decoration:none;
+  background:var(--ink);
+}
+.paste-idea-fab:hover{ background:#3A342C; }
+@media (hover:none) and (pointer:coarse){
+  .paste-idea-fab{ bottom:86px; right:18px; }
+}
+
+/* ---------- Paste Your Own Idea page ---------- */
+.paste-idea-wrap{ max-width:640px; }
+.pro-gate-block{
+  text-align:center; padding:32px 20px;
+  display:flex; flex-direction:column; align-items:center; gap:10px;
+}
+.pro-gate-block .ptag{ margin-bottom:4px; }
+.pro-gate-block h3{ font-size:20px; }
+.pro-gate-block p{ max-width:420px; margin-bottom:8px; }
+.paste-idea-label{
+  display:block; font-family:var(--font-mono); font-size:11px;
+  text-transform:uppercase; letter-spacing:.05em; color:var(--ink-muted);
+  margin-bottom:8px;
+}
+.paste-idea-textarea{
+  width:100%; min-height:220px; resize:vertical;
+  padding:14px 16px; border:1px solid var(--line); border-radius:10px;
+  background:var(--surface); font-family:var(--font-body); font-size:14.5px;
+  line-height:1.6; color:var(--ink);
+}
+.paste-idea-textarea:focus{ outline:none; border-color:var(--accent); }
+.paste-idea-char-count{
+  text-align:right; font-family:var(--font-mono); font-size:11px;
+  color:var(--ink-muted); margin-top:6px; margin-bottom:22px;
+}
+.paste-idea-mode-choice{ display:flex; flex-direction:column; gap:10px; margin-bottom:20px; }
+.paste-idea-mode-option{
+  display:flex; align-items:flex-start; gap:12px; padding:14px 16px;
+  border:1px solid var(--line); border-radius:10px; cursor:pointer;
+  transition:border-color .15s ease, background .15s ease;
+}
+.paste-idea-mode-option:has(input:checked){
+  border-color:var(--accent); background:rgba(217,119,87,0.06);
+}
+.paste-idea-mode-option input[type="radio"]{ margin-top:3px; flex-shrink:0; accent-color:var(--accent); }
+.paste-idea-mode-option strong{ font-size:14px; display:block; margin-bottom:3px; }
+.paste-idea-mode-option p{ margin:0; font-size:12.5px; }
+.paste-idea-submit-btn{ width:100%; }
