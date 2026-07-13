@@ -118,6 +118,20 @@ const generationLimiter = rateLimit({
 });
 app.use('/options/', generationLimiter);
 app.use('/confirm/', generationLimiter);
+// These 3 routes also make real, costed Mistral calls but don't share a
+// path prefix with the two above — found by checking every route that
+// actually generates against what this limiter's path matching covers,
+// not assumed from the prefix pattern alone. /groups/ as a whole prefix
+// is deliberately broad here: every real generation route lives under
+// it (retry, random-branch), and anything else under /groups/ is cheap
+// enough that 100 req/15min is still generous, not a meaningful
+// restriction. /pasted-ideas is a single exact route. confirm/start is
+// NOT given a broad /blueprints/ prefix — most blueprint routes are
+// plain CRUD that shouldn't be held to generation's tighter ceiling —
+// it gets the limiter applied directly where it's defined instead (see
+// its own route below).
+app.use('/groups/', generationLimiter);
+app.use('/pasted-ideas', generationLimiter);
 
 // Supabase client — service role key, so this bypasses RLS entirely.
 // Every privileged read/write for ThinkMaps goes through this one client.
@@ -3054,10 +3068,31 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
 
   const systemPrompt = `You are the node-generation engine for ThinkMaps, an app-idea ideation tool. ${instructions}${retryNote}${diversityNote}${SHORT_OPTION_RULE} Respond ONLY with valid JSON in this exact shape, nothing else: {"groupLabel": string, "options": [{"label": string}]}`;
 
-  return callMistral([
+  const result = await callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: `Path so far (their actual choices, in order): ${pathDescription}` }
   ]);
+
+  // Hard, code-level exact-match dedup — this path (Retry, and
+  // drag-created groups) previously had NONE at all, relying entirely on
+  // the diversityNote instruction above with nothing actually checking
+  // the result afterward. Guards against both a verbatim repeat of
+  // something already used elsewhere in the niche (existingLabels) AND
+  // the model repeating itself within its own returned list.
+  const existingLabelKeys = new Set(existingLabels.map(l => l.trim().toLowerCase()));
+  const seenInThisResult = new Set();
+  const dedupedOptions = sanitizeOptionLabels(result?.options).filter(o => {
+    const key = o.label.trim().toLowerCase();
+    if(seenInThisResult.has(key) || existingLabelKeys.has(key)) return false;
+    seenInThisResult.add(key);
+    return true;
+  });
+
+  // Semantic layer on top — same reasoning as generateCandidateBatch's
+  // own version of this check.
+  const finalOptions = await filterThematicDuplicates(dedupedOptions, existingLabels);
+
+  return { ...result, options: finalOptions };
 }
 
 // Generates a BATCH of candidate groups — one per ASSIGNED block, not
@@ -3102,6 +3137,52 @@ async function searchRealExistingSolutions(pathContext){
   const baseQuery = buildSearchQueryFromPath(pathContext);
   if(!baseQuery) return null;
   return await webSearchForSimilarProducts(`${baseQuery} existing apps solutions reviews`);
+}
+
+// Real semantic dedup, not just exact-string matching — catches "guilt
+// about skipping workouts" vs "shame from missing gym days" as the same
+// underlying theme, which no string comparison ever could. This is a
+// deliberate SECOND, cheap Mistral call after the main generation
+// completes — genuinely adds latency, a real tradeoff explicitly signed
+// off on rather than left as a silent cost. Kept as small and fast as
+// this kind of check reasonably can be: a small model, a tiny token
+// budget (this only ever needs to return a short list of indices, never
+// full content), and a hard 3s timeout that fails OPEN (keeps every
+// option) rather than closed if the check itself is slow or errors — a
+// slow/failed duplicate check should never be the reason someone ends up
+// with FEWER options than they should.
+async function filterThematicDuplicates(candidateOptions, existingLabels){
+  if(candidateOptions.length === 0 || existingLabels.length === 0) return candidateOptions;
+
+  // Enough real history to catch genuine repeats without ballooning the
+  // prompt — matches the same 40-item spirit already used elsewhere for
+  // the same "recent history, not the entire niche verbatim" tradeoff.
+  const recentExisting = existingLabels.slice(-40);
+  const candidateList = candidateOptions.map((o, i) => `${i}: ${o.label}`).join('\n');
+  const existingList = recentExisting.map(l => `- ${l}`).join('\n');
+
+  const systemPrompt = `You are a duplicate-theme detector for ThinkMaps. Below is a list of NEW candidate options (indexed) and a list of angles ALREADY used elsewhere in the same niche. For each NEW option, decide if it's a genuine THEME duplicate of something already used — the same underlying idea in different words — not just a loosely related topic. Being lenient is the correct failure mode here: only flag a TRUE restatement, never something merely similar or adjacent.
+
+NEW candidates:
+${candidateList}
+
+ALREADY USED:
+${existingList}
+
+Respond ONLY with valid JSON: {"duplicateIndices": [number, ...]} — indices from the NEW list above that are genuine theme duplicates. Empty array if none are.`;
+
+  const result = await withTimeout(
+    callMistral([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: 'Check now.' }
+    ], 250),
+    3000
+  );
+
+  const duplicateIndices = new Set(Array.isArray(result?.duplicateIndices) ? result.duplicateIndices : []);
+  if(duplicateIndices.size === 0) return candidateOptions;
+
+  return candidateOptions.filter((_, i) => !duplicateIndices.has(i));
 }
 
 async function generateCandidateBatch(pathContext, blockNames, existingLabels = [], onToken = null, isPro = false){
@@ -3173,24 +3254,41 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   // the options side too.
   const rawGroups = Array.isArray(result?.groups) ? result.groups : [];
 
-  // Code-level safety net on top of the crossBlockNote instruction above
-  // — that's a prompt-level ask, not a guarantee. This catches the worst
-  // case deterministically: if the exact same label (trimmed,
-  // case-insensitive) shows up in an EARLIER block of this same
-  // response, it's dropped from a LATER one rather than shown twice. A
-  // block ending up with 5 options instead of 6 is a far smaller problem
-  // than a verbatim duplicate sitting in two sibling cards at once.
+  // Hard, code-level exact-match dedup — on top of the crossBlockNote/
+  // diversityNote prompt instructions above, which are asks, not
+  // guarantees. Guarantees no VERBATIM repeat ever reaches the canvas,
+  // whether that repeat is against a sibling in this same response
+  // (seenLabelsAcrossBatch) or against anything already generated
+  // anywhere else in this niche, on an earlier click, possibly minutes
+  // or hours ago (existingLabels, passed in from the caller's full
+  // niche history).
+  const existingLabelKeys = new Set(existingLabels.map(l => l.trim().toLowerCase()));
   const seenLabelsAcrossBatch = new Set();
-  const groups = blockNames.map((blockName, i) => {
+  let groups = blockNames.map((blockName, i) => {
     const sanitized = sanitizeOptionLabels(rawGroups[i]?.options);
     const deduped = sanitized.filter(o => {
       const key = o.label.trim().toLowerCase();
-      if(seenLabelsAcrossBatch.has(key)) return false;
+      if(seenLabelsAcrossBatch.has(key) || existingLabelKeys.has(key)) return false;
       seenLabelsAcrossBatch.add(key);
       return true;
     });
     return { groupLabel: blockName, blockName, options: deduped };
   });
+
+  // Semantic dedup layer, on top of the exact-match one above — catches
+  // the case exact-string matching structurally can't: two options
+  // worded differently that mean the same thing. Flattened across every
+  // block first (not run per-block), since theme overlap happens ACROSS
+  // blocks just as often as within one — the same scope crossBlockNote
+  // above already targets, now with a real check behind it instead of
+  // only a prompt-level ask. Survivors are redistributed back into their
+  // original blocks afterward, preserving which block each one belongs to.
+  const flatOptions = groups.flatMap((g, groupIndex) => g.options.map(o => ({ ...o, groupIndex })));
+  const survivingFlat = await filterThematicDuplicates(flatOptions, existingLabels);
+  groups = groups.map((g, groupIndex) => ({
+    ...g,
+    options: g.options.filter(o => survivingFlat.some(s => s.groupIndex === groupIndex && s.label === o.label))
+  }));
 
   return { groups };
 }
@@ -8527,7 +8625,7 @@ app.post('/pasted-ideas', requireAuth, async (req, res) => {
 // Ideas" terminal card) — not the blueprint's root niche, which is what
 // the 45Q flow above uses. Synthesizes a real idea draft from the full
 // path, then generates confirmation question 1.
-app.post('/blueprints/:id/confirm/start', requireAuth, async (req, res) => {
+app.post('/blueprints/:id/confirm/start', generationLimiter, requireAuth, async (req, res) => {
   try {
     const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
     if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
