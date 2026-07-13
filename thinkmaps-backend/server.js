@@ -2171,7 +2171,8 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     }
 
     const { descendantGroupIds, spawningOptionIds } = collectDescendantGroupIds(rootGroupId, snapshot);
-    console.log(`[ThinkMaps] Reset: resetting from group ${rootGroupId} — ${descendantGroupIds.length} descendant group(s) to delete, ${spawningOptionIds.length} option(s) to un-select.`);
+    const spawningOptionLabels = spawningOptionIds.map(id => snapshot.optionsById.get(id)?.label || '(unknown)');
+    console.log(`[ThinkMaps] Reset: resetting from group ${rootGroupId} — ${descendantGroupIds.length} descendant group(s) to delete, ${spawningOptionIds.length} option(s) to un-select: ${JSON.stringify(spawningOptionLabels)}`);
 
     if(descendantGroupIds.length > 0){
       const { error: deleteError } = await supabase.from('groups').delete().in('id', descendantGroupIds);
@@ -2180,10 +2181,17 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
 
     // The actual bug fix — without this, the option that spawned
     // everything just deleted still shows as picked/activated, even
-    // though nothing downstream of it exists anymore.
+    // though nothing downstream of it exists anymore. .select() added
+    // so the response proves exactly which rows were actually touched,
+    // rather than just trusting the call succeeded.
     if(spawningOptionIds.length > 0){
-      const { error: updateError } = await supabase.from('options').update({ is_selected: false }).in('id', spawningOptionIds);
+      const { data: updatedOptions, error: updateError } = await supabase
+        .from('options')
+        .update({ is_selected: false })
+        .in('id', spawningOptionIds)
+        .select('id, label, is_selected');
       if(updateError) throw updateError;
+      console.log(`[ThinkMaps] Reset: is_selected cleared on ${updatedOptions?.length || 0} option(s):`, JSON.stringify(updatedOptions));
     }
 
     // Auto-snapshot AFTER the reset too — symmetric with the "before"
@@ -4342,19 +4350,32 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     // spawned_from_option_id and group_version_id reference already
     // baked into the snapshot's own rows stays correct with zero remapping.
     const snap = targetSnapshot.snapshot_data || {};
+    console.log(`[ThinkMaps] Restoring snapshot "${targetSnapshot.name}" — ${snap.groups?.length || 0} group(s), ${snap.groupVersions?.length || 0} version(s), ${snap.options?.length || 0} option(s).`);
+
     if(snap.groups?.length){
-      await supabase.from('groups').insert(snap.groups);
+      const { error: groupsInsertError } = await supabase.from('groups').insert(snap.groups);
+      // None of these 3 inserts were ever checked before — if one
+      // silently failed, the delete above had already wiped the live
+      // blueprint, leaving it genuinely empty with zero trace of why.
+      // That's exactly what "restore takes me to a blank screen" looks
+      // like from the outside.
+      if(groupsInsertError) throw new Error(`Restoring groups failed: ${groupsInsertError.message}`);
     }
     if(snap.groupVersions?.length){
-      await supabase.from('group_versions').insert(snap.groupVersions);
+      const { error: versionsInsertError } = await supabase.from('group_versions').insert(snap.groupVersions);
+      if(versionsInsertError) throw new Error(`Restoring group versions failed: ${versionsInsertError.message}`);
     }
     if(snap.options?.length){
-      await supabase.from('options').insert(snap.options);
+      const { error: optionsInsertError } = await supabase.from('options').insert(snap.options);
+      if(optionsInsertError) throw new Error(`Restoring options failed: ${optionsInsertError.message}`);
     }
+
+    console.log(`[ThinkMaps] Restore of "${targetSnapshot.name}" completed successfully.`);
 
     const restoredGraph = await fetchFullBlueprintGraph(blueprint.id);
     res.status(200).json({ restored: true, fullGraph: restoredGraph });
-  } catch (err) {
+  } catch (err){
+    console.error(`[ThinkMaps] Restore failed for blueprint ${req.params.id}:`, err.message);
     res.status(500).json({ error: 'Could not restore this snapshot.', detail: err.message });
   }
 });
