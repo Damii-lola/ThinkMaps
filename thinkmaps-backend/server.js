@@ -83,7 +83,8 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
-app.use(cors({
+
+const strictCors = cors({
   origin: (origin, callback) => {
     // No origin header at all (curl, server-to-server, Postman, the
     // payment webhook) — allow it through; CORS only ever governs
@@ -92,7 +93,27 @@ app.use(cors({
     if(ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   }
-}));
+});
+
+// /admin/ routes already have their own secret-based check on every
+// single one — CORS was never the real security boundary for them, so
+// blocking based on origin here only ever succeeds at rejecting
+// legitimate traffic, which is exactly what was happening: the admin
+// dashboard app runs inside Expo/Snack, sending an Origin header
+// (something like an expo.dev or snack.expo.dev subdomain) that was
+// never going to be on a list built for a GitHub Pages website. /track/
+// routes are deliberately meant to be called from anywhere the site's
+// own frontend runs, same reasoning. Wrapped in a request-aware
+// middleware since the plain `cors({origin: fn})` origin callback has
+// no access to req.path on its own — this is what actually lets the
+// two policies differ by route instead of picking one for the whole API.
+const openCors = cors({ origin: true });
+app.use((req, res, next) => {
+  if(req.path.startsWith('/admin/') || req.path.startsWith('/track/')){
+    return openCors(req, res, next);
+  }
+  return strictCors(req, res, next);
+});
 
 // Explicit size cap — the largest legitimate payload this API ever
 // receives is a full blueprint snapshot restore, which is still well
