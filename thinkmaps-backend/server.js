@@ -2082,6 +2082,38 @@ app.delete('/blueprints/:id', requireAuth, async (req, res) => {
 // restore: deleting a group cascades to its own group_versions and
 // options automatically, so this only needs to delete the GROUP rows
 // themselves — everything hanging off them cleans up on its own.
+// Walks DOWNWARD from any starting group, entirely in-memory against a
+// pre-fetched snapshot (same maps already built for ancestor-walking
+// elsewhere in this file) — collects every group beneath it, at any
+// depth, plus every OPTION that spawned one of those groups. That
+// second list is the actual fix for "the picked option still shows as
+// activated after reset": the original reset only ever deleted the
+// child groups, never touched is_selected on the option that spawned
+// them, so a freshly-reset root still displayed its old pick as chosen.
+function collectDescendantGroupIds(startGroupId, snapshot){
+  const descendantGroupIds = [];
+  const spawningOptionIds = [];
+
+  function walk(groupId){
+    const versions = snapshot.versionsByGroupId.get(groupId) || [];
+    for(const version of versions){
+      const options = snapshot.optionsByVersionId.get(version.id) || [];
+      for(const option of options){
+        const childGroups = snapshot.groupsBySpawnedFrom.get(option.id) || [];
+        if(childGroups.length === 0) continue;
+        spawningOptionIds.push(option.id);
+        for(const childGroup of childGroups){
+          descendantGroupIds.push(childGroup.id);
+          walk(childGroup.id);
+        }
+      }
+    }
+  }
+
+  walk(startGroupId);
+  return { descendantGroupIds, spawningOptionIds };
+}
+
 app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
   try {
     if(await requireProOrReject(req, res)) return;
@@ -2089,17 +2121,69 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     const blueprint = await getOwnedBlueprint(req.params.id, req.user.id);
     if(!blueprint) return res.status(404).json({ error: 'Blueprint not found.' });
 
-    // The true root group has no spawned_from_option_id at all — every
-    // OTHER group in this blueprint was spawned from some option
-    // somewhere, directly or indirectly, so deleting every group WITH
-    // a spawned_from_option_id is exactly "everything except the root."
-    const { error } = await supabase
-      .from('groups')
-      .delete()
-      .eq('blueprint_id', req.params.id)
-      .not('spawned_from_option_id', 'is', null);
+    // Optional — if the person ctrl+clicked (long-pressed on mobile) a
+    // specific group before hitting Reset, this resets back to THAT
+    // group instead of the true beginning: everything below it gets
+    // cleared, everything at or above it (including whatever led to it)
+    // stays exactly as it was. Omitted entirely, this resets to the
+    // blueprint's actual root, matching the original all-the-way-back
+    // behavior.
+    const { targetGroupId } = req.body || {};
 
-    if(error) throw error;
+    const timestamp = new Date().toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+    });
+
+    // Auto-snapshot BEFORE any destructive change — this is what makes
+    // "reset" genuinely reversible instead of a one-way door. Reuses the
+    // exact same save path as a manually-named snapshot; this one just
+    // gets an automatic name instead of asking the person to type one
+    // in the middle of what should be a single, fast action.
+    const preResetGraph = await fetchFullBlueprintGraph(blueprint.id);
+    await supabase.from('blueprint_snapshots').insert({
+      blueprint_id: blueprint.id,
+      user_id: req.user.id,
+      name: `Before reset — ${timestamp}`,
+      snapshot_data: preResetGraph
+    });
+
+    const snapshot = await fetchBlueprintSnapshot(blueprint.id);
+
+    let rootGroupId = targetGroupId;
+    if(!rootGroupId){
+      const trueRoot = snapshot.groups.find(g => !g.spawned_from_option_id);
+      if(!trueRoot) return res.status(404).json({ error: "Could not find this blueprint's starting point." });
+      rootGroupId = trueRoot.id;
+    } else if(!snapshot.groupsById.has(targetGroupId)){
+      return res.status(404).json({ error: 'That group could not be found in this blueprint.' });
+    }
+
+    const { descendantGroupIds, spawningOptionIds } = collectDescendantGroupIds(rootGroupId, snapshot);
+
+    if(descendantGroupIds.length > 0){
+      const { error: deleteError } = await supabase.from('groups').delete().in('id', descendantGroupIds);
+      if(deleteError) throw deleteError;
+    }
+
+    // The actual bug fix — without this, the option that spawned
+    // everything just deleted still shows as picked/activated, even
+    // though nothing downstream of it exists anymore.
+    if(spawningOptionIds.length > 0){
+      const { error: updateError } = await supabase.from('options').update({ is_selected: false }).in('id', spawningOptionIds);
+      if(updateError) throw updateError;
+    }
+
+    // Auto-snapshot AFTER the reset too — symmetric with the "before"
+    // one above, so going back to the FRESH post-reset state is exactly
+    // as available as undoing the reset entirely, not just one
+    // direction of it.
+    const postResetGraph = await fetchFullBlueprintGraph(blueprint.id);
+    await supabase.from('blueprint_snapshots').insert({
+      blueprint_id: blueprint.id,
+      user_id: req.user.id,
+      name: `After reset — ${timestamp}`,
+      snapshot_data: postResetGraph
+    });
 
     res.status(200).json({ reset: true });
   } catch (err) {
