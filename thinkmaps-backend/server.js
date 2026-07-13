@@ -2129,6 +2129,7 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     // blueprint's actual root, matching the original all-the-way-back
     // behavior.
     const { targetGroupId } = req.body || {};
+    console.log(`[ThinkMaps] Reset requested for blueprint ${blueprint.id} — targetGroupId: ${targetGroupId || '(none, resetting to true root)'}`);
 
     const timestamp = new Date().toLocaleString('en-US', {
       month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
@@ -2140,12 +2141,22 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     // gets an automatic name instead of asking the person to type one
     // in the middle of what should be a single, fast action.
     const preResetGraph = await fetchFullBlueprintGraph(blueprint.id);
-    await supabase.from('blueprint_snapshots').insert({
+    const { error: preSnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
       name: `Before reset — ${timestamp}`,
       snapshot_data: preResetGraph
     });
+    if(preSnapshotError){
+      // Previously unchecked entirely — a failure here left zero trace,
+      // the route just continued on as if the snapshot had been saved.
+      // Logged, not thrown: a failed pre-reset snapshot is a real
+      // problem worth knowing about, but shouldn't block the actual
+      // reset the person asked for.
+      console.error('[ThinkMaps] Reset: pre-reset snapshot insert FAILED:', preSnapshotError.message);
+    } else {
+      console.log('[ThinkMaps] Reset: pre-reset snapshot saved successfully.');
+    }
 
     const snapshot = await fetchBlueprintSnapshot(blueprint.id);
 
@@ -2155,10 +2166,12 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
       if(!trueRoot) return res.status(404).json({ error: "Could not find this blueprint's starting point." });
       rootGroupId = trueRoot.id;
     } else if(!snapshot.groupsById.has(targetGroupId)){
+      console.error(`[ThinkMaps] Reset: targetGroupId ${targetGroupId} was sent but doesn't exist in this blueprint's snapshot.`);
       return res.status(404).json({ error: 'That group could not be found in this blueprint.' });
     }
 
     const { descendantGroupIds, spawningOptionIds } = collectDescendantGroupIds(rootGroupId, snapshot);
+    console.log(`[ThinkMaps] Reset: resetting from group ${rootGroupId} — ${descendantGroupIds.length} descendant group(s) to delete, ${spawningOptionIds.length} option(s) to un-select.`);
 
     if(descendantGroupIds.length > 0){
       const { error: deleteError } = await supabase.from('groups').delete().in('id', descendantGroupIds);
@@ -2178,15 +2191,21 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     // as available as undoing the reset entirely, not just one
     // direction of it.
     const postResetGraph = await fetchFullBlueprintGraph(blueprint.id);
-    await supabase.from('blueprint_snapshots').insert({
+    const { error: postSnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
       name: `After reset — ${timestamp}`,
       snapshot_data: postResetGraph
     });
+    if(postSnapshotError){
+      console.error('[ThinkMaps] Reset: post-reset snapshot insert FAILED:', postSnapshotError.message);
+    } else {
+      console.log('[ThinkMaps] Reset: post-reset snapshot saved successfully.');
+    }
 
     res.status(200).json({ reset: true });
   } catch (err) {
+    console.error(`[ThinkMaps] Reset failed for blueprint ${req.params.id}:`, err.message);
     res.status(500).json({ error: 'Could not reset this blueprint.', detail: err.message });
   }
 });
