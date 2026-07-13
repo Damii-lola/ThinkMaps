@@ -86,7 +86,9 @@ app.use(helmet({
 // on the internet the way `cors()` with no options allows. Includes
 // both the GitHub Pages origin and localhost for local development.
 const ALLOWED_ORIGINS = [
-  'https://damii-lola.github.io',
+  'https://www.thinkmaps.org',
+  'https://thinkmaps.org',
+  'https://damii-lola.github.io', // kept during the migration — anything still linking to the old GitHub Pages URL shouldn't suddenly break
   'http://localhost:3000',
   'http://127.0.0.1:3000',
   'http://localhost:5500',
@@ -2269,7 +2271,7 @@ async function applyProUpgrade(profile, matchLogSuffix, tier = 'pro'){
       <h1 style="margin:0 0 8px 0; font-family:Georgia,'Times New Roman',serif; font-size:22px; font-weight:bold; color:#1F1B16;">Thank you for subscribing 🎉</h1>
       <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Hi ${escapeHtmlServer(profile.username || '')}, thank you for upgrading to ThinkMaps ${tierLabel} — we genuinely appreciate it. Your payment went through and your account is already fully upgraded, no further steps needed on your end.</p>
       <p style="margin:0 0 16px 0; font-size:14.5px; line-height:1.6; color:#6B6358;">Unlimited blueprints, the full idea toolkit, and everything else in the ${tierLabel} plan is live on your account right now, through <strong>${expiresLabel}</strong>. This is a one-time payment for one month, not an auto-renewing subscription — nothing will be charged again automatically. To keep ${tierLabel} going after that, just come back and pay again for another month whenever you're ready.</p>
-      <a href="https://damii-lola.github.io/ThinkMaps/thinkmaps-web/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
+      <a href="https://www.thinkmaps.org/dashboard.html" style="display:inline-block; background-color:#D97757; color:#FAF6F1; font-size:13.5px; font-weight:600; text-decoration:none; padding:11px 20px; border-radius:8px;">Go to your dashboard</a>
     `;
     await sendPlainEmail({
       to: profile.email,
