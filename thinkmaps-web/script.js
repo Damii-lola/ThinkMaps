@@ -1869,7 +1869,7 @@ async function initPasteIdeaPage(){
   const charCountEl = document.getElementById('pasteIdeaCharCount');
 
   textarea?.addEventListener('input', () => {
-    if(charCountEl) charCountEl.textContent = `${textarea.value.length} / 4000`;
+    if(charCountEl) charCountEl.textContent = `${textarea.value.length} / 12000`;
   });
 
   submitBtn?.addEventListener('click', async () => {
