@@ -53,6 +53,25 @@ const requestMetrics = {
 };
 const REQUEST_METRICS_MAX = 2000; // rolling window — old entries just fall off
 
+// Matches every route that actually calls Mistral and therefore has a
+// real, expected floor of at least a second or two — waiting on an LLM
+// isn't a performance bug to fix, it's the nature of the work. Blending
+// these into the same average as a plain database lookup (which should
+// be near-instant) was making the WHOLE api look slower than it really
+// is for anything that isn't generation. Checked against req.path,
+// which Express already resolves with real values substituted in
+// (e.g. /options/abc123/activate), so this matches on the stable part
+// of each path rather than needing the literal route pattern.
+const AI_BOUND_PATH_MARKERS = [
+  '/activate', '/retry', '/random-branch', '/random-spawned', '/combine-activate',
+  '/confirm/start', '/deeper-analysis', '/build-brief', '/pivots', '/personas',
+  '/landing-copy', '/strength-score', '/launch-checklist', '/red-team', '/spy-mode',
+  '/pasted-ideas', '/admin/assistant'
+];
+function isAiBoundPath(path){
+  return AI_BOUND_PATH_MARKERS.some(marker => path.includes(marker));
+}
+
 app.use((req, res, next) => {
   const startTime = Date.now();
   res.on('finish', () => {
@@ -61,7 +80,8 @@ app.use((req, res, next) => {
       method: req.method,
       status: res.statusCode,
       durationMs: Date.now() - startTime,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      aiBound: isAiBoundPath(req.path)
     });
     if(requestMetrics.recentRequests.length > REQUEST_METRICS_MAX){
       requestMetrics.recentRequests.shift();
@@ -958,6 +978,21 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
     const avgResponseMs = recentWindow.length
       ? Math.round(recentWindow.reduce((sum, r) => sum + r.durationMs, 0) / recentWindow.length)
       : null;
+
+    // The honest split — an AI-generation call waiting on Mistral has a
+    // real floor of a second or more no matter how fast the surrounding
+    // code is; blending that into one average with a plain profile
+    // lookup was making the whole API look slower than the actual
+    // "normal request" experience really is.
+    const aiRequests = recentWindow.filter(r => r.aiBound);
+    const nonAiRequests = recentWindow.filter(r => !r.aiBound);
+    const avgAiResponseMs = aiRequests.length
+      ? Math.round(aiRequests.reduce((sum, r) => sum + r.durationMs, 0) / aiRequests.length)
+      : null;
+    const avgNonAiResponseMs = nonAiRequests.length
+      ? Math.round(nonAiRequests.reduce((sum, r) => sum + r.durationMs, 0) / nonAiRequests.length)
+      : null;
+
     const requestsPerMinute = recentWindow.length ? Math.round((recentWindow.length / 60) * 10) / 10 : 0;
     const errorPathCounts = {};
     errorRequests.forEach(r => { errorPathCounts[`${r.status} ${r.path}`] = (errorPathCounts[`${r.status} ${r.path}`] || 0) + 1; });
@@ -1051,10 +1086,14 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
         errorsLastHour: errorRequests.length,
         errorRatePercent: recentWindow.length ? Math.round((errorRequests.length / recentWindow.length) * 1000) / 10 : 0,
         avgResponseMs,
+        avgAiResponseMs,
+        avgNonAiResponseMs,
+        aiRequestsLastHour: aiRequests.length,
         requestsPerMinute,
         writeRequestsLastHour: writeRequests.length,
         commonErrorPages,
-        bugToTrafficRatioPercent: recentWindow.length ? Math.round((errorRequests.length / recentWindow.length) * 10000) / 100 : 0
+        bugToTrafficRatioPercent: recentWindow.length ? Math.round((errorRequests.length / recentWindow.length) * 10000) / 100 : 0,
+        responseTimeNote: 'avgResponseMs blends everything together. avgAiResponseMs is just the routes that actually call Mistral (activate, retry, deeper-analysis, personas, etc.) — those have a real floor of a second or more, that\'s expected. avgNonAiResponseMs is everything else — plain lookups, dashboard loads, auth — and is the number that actually reflects backend/database speed.'
       },
       security: {
         failedLogins24h: failedLogins24h || 0
