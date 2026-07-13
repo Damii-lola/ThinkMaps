@@ -2739,7 +2739,7 @@ async function resetBlueprint(targetGroupId){
     if(!res) return;
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
-      showToast(body.error || 'Could not reset this blueprint.');
+      showToast(body.detail ? `${body.error} (${body.detail})` : (body.error || 'Could not reset this blueprint.'));
       return;
     }
     showToast('Reset — the previous state was saved automatically, find it under Snapshots anytime.');
