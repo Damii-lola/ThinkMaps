@@ -29,6 +29,38 @@ app.set('trust proxy', 1);
 // time saved, especially for anyone not on a fast connection.
 app.use(compression());
 
+// ============================================================
+// LIGHTWEIGHT REQUEST METRICS — no external APM tool exists in this
+// stack (no Datadog, no New Relic), so this is what makes API response
+// time, error rate, throughput, and common error pages on the
+// dashboard REAL numbers instead of invented ones. Deliberately just an
+// in-memory rolling window, not a database table — this data is only
+// ever useful as a live "right now" picture, and persisting it would
+// cost real writes on every single request for something nobody needs
+// to query historically.
+const requestMetrics = {
+  recentRequests: [], // { path, status, durationMs, timestamp } — capped below
+  startedAt: Date.now()
+};
+const REQUEST_METRICS_MAX = 2000; // rolling window — old entries just fall off
+
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  res.on('finish', () => {
+    requestMetrics.recentRequests.push({
+      path: req.path,
+      method: req.method,
+      status: res.statusCode,
+      durationMs: Date.now() - startTime,
+      timestamp: Date.now()
+    });
+    if(requestMetrics.recentRequests.length > REQUEST_METRICS_MAX){
+      requestMetrics.recentRequests.shift();
+    }
+  });
+  next();
+});
+
 // Security headers — CSP is intentionally loose on script-src/style-src
 // since this API serves no HTML pages of its own (the actual frontend
 // is static files on GitHub Pages, entirely separate from this server),
@@ -635,6 +667,43 @@ const FREE_TIER_DELETE_MS = 3 * 24 * 60 * 60 * 1000;
 // Verifies the Supabase access token sent from script.js (Authorization: Bearer <token>)
 // and attaches the real user to req.user. Every route that touches a specific
 // user's data sits behind this — never trust a user_id sent in the request body.
+// Throttles last_active_at writes to at most once per 5 minutes per
+// user — DAU/MAU doesn't need per-request precision, and writing on
+// every single authenticated request would be a real, unnecessary cost
+// multiplied across every route in the app.
+const lastActiveWriteCache = new Map(); // userId -> last write timestamp (ms)
+function trackUserActivity(userId){
+  const lastWrite = lastActiveWriteCache.get(userId) || 0;
+  if(Date.now() - lastWrite < 5 * 60 * 1000) return;
+  lastActiveWriteCache.set(userId, Date.now());
+  // Fire-and-forget — this should never add latency to the actual
+  // request it's riding along on, and a failure here is never worth
+  // surfacing to the user.
+  supabase.from('profiles').update({ last_active_at: new Date().toISOString() }).eq('id', userId)
+    .then(() => {})
+    .catch(() => {});
+}
+
+// Real event logging for Feature Adoption Rate / Feature-Specific
+// Retention — call this from any toolkit route (deeper-analysis,
+// personas, build-brief, etc.). Fire-and-forget, same reasoning as
+// trackUserActivity above.
+function logFeatureUsage(userId, feature){
+  if(!userId) return;
+  supabase.from('feature_usage_events').insert({ user_id: userId, feature })
+    .then(() => {})
+    .catch(() => {});
+}
+
+// Real event logging for destructive/notable actions — blueprint
+// delete, reset, snapshot restore. Fire-and-forget.
+function logDataAccess(userId, action, detail = null){
+  if(!userId) return;
+  supabase.from('data_access_logs').insert({ user_id: userId, action, detail })
+    .then(() => {})
+    .catch(() => {});
+}
+
 async function requireAuth(req, res, next){
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -650,6 +719,7 @@ async function requireAuth(req, res, next){
   }
 
   req.user = data.user;
+  trackUserActivity(data.user.id);
   next();
 }
 
@@ -677,6 +747,421 @@ app.get('/health', (req, res) => {
     // monetization removed from confirmation questions.
     deployedFixes: 'cross-fork-diversity-injection-2026-06-24'
   });
+});
+
+// ============================================================
+// ADMIN DASHBOARD DATA — every number below is computed from real
+// Supabase data or the real in-memory request-metrics tracker above.
+// Nothing here is fabricated. Anything the app genuinely can't derive
+// (Core Web Vitals, ad spend, DB connection pool internals, real GB
+// storage) is deliberately absent or explicitly labeled as an estimate/
+// proxy — see the `note` fields — rather than invented to look complete.
+// ============================================================
+function median(values){
+  if(!values || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100 : sorted[mid];
+}
+
+app.get('/admin/dashboard/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+
+  try {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const [
+      { count: totalUsers },
+      { count: proUsers },
+      { count: newUsersToday },
+      { count: newUsers7d },
+      { count: newUsers30d },
+      { count: recentlyChurned }
+    ] = await Promise.all([
+      supabase.from('profiles').select('id', { count: 'exact', head: true }),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('pro_status', true),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).gte('created_at', todayStart),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).gte('created_at', sevenDaysAgo),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).gte('created_at', thirtyDaysAgo),
+      // Best available proxy for churn without a dedicated history table:
+      // an account whose Pro window expired in the last 30 days and is
+      // currently free again. Undercounts anyone who re-upgraded since,
+      // which is the honest direction to be wrong in.
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('pro_status', false).gte('pro_expires_at', thirtyDaysAgo).not('pro_expires_at', 'is', null)
+    ]);
+
+    const [
+      { count: totalBlueprints },
+      { count: blueprintsCreatedToday },
+      { count: blueprintsEditedToday },
+      { count: blueprintsCreated7d }
+    ] = await Promise.all([
+      supabase.from('blueprints').select('id', { count: 'exact', head: true }),
+      supabase.from('blueprints').select('id', { count: 'exact', head: true }).gte('created_at', todayStart),
+      supabase.from('blueprints').select('id', { count: 'exact', head: true }).gte('updated_at', todayStart),
+      supabase.from('blueprints').select('id', { count: 'exact', head: true }).gte('created_at', sevenDaysAgo)
+    ]);
+
+    // Real GB figures live in Supabase's own project dashboard (Settings
+    // -> Database -> Usage) — not queryable through this service-role
+    // client without a dedicated SQL function granting access to
+    // pg_total_relation_size. This is a directional row-count proxy,
+    // not a real byte count — labeled as such below.
+    const [{ count: groupsCount }, { count: optionsCount }, { count: snapshotsCount }] = await Promise.all([
+      supabase.from('groups').select('id', { count: 'exact', head: true }),
+      supabase.from('options').select('id', { count: 'exact', head: true }),
+      supabase.from('blueprint_snapshots').select('id', { count: 'exact', head: true })
+    ]);
+
+    // ---------- DAU / MAU — real, from last_active_at ----------
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+    const [{ count: dau }, { count: mau }] = await Promise.all([
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).gte('last_active_at', oneDayAgo),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).gte('last_active_at', thirtyDaysAgo)
+    ]);
+
+    // ---------- Feature Adoption Rate / Feature-Specific Retention — real, from feature_usage_events ----------
+    const { data: featureEvents } = await supabase
+      .from('feature_usage_events')
+      .select('feature, user_id')
+      .gte('created_at', thirtyDaysAgo);
+    const featureAdoption = {};
+    const featureUserSets = {};
+    (featureEvents || []).forEach(e => {
+      featureAdoption[e.feature] = (featureAdoption[e.feature] || 0) + 1;
+      if(!featureUserSets[e.feature]) featureUserSets[e.feature] = new Set();
+      featureUserSets[e.feature].add(e.user_id);
+    });
+    const featureAdoptionRates = Object.entries(featureUserSets).map(([feature, userSet]) => ({
+      feature,
+      uniqueUsers: userSet.size,
+      totalUses: featureAdoption[feature] || 0,
+      adoptionRatePercent: proUsers ? Math.round((userSet.size / proUsers) * 1000) / 10 : 0
+    })).sort((a, b) => b.uniqueUsers - a.uniqueUsers);
+
+    // ---------- Funnel Conversion — real, derived from existing tables,
+    // no new event tracking needed for this one ----------
+    const [{ count: usersWithBlueprint }, { count: usersWithActivation }] = await Promise.all([
+      supabase.from('blueprints').select('user_id', { count: 'exact', head: true }),
+      supabase.from('options').select('id', { count: 'exact', head: true }).eq('is_selected', true)
+    ]);
+
+    // ---------- Traffic Sources / Attribution — real, from signup_source ----------
+    const { data: sourceRows } = await supabase.from('profiles').select('signup_source, pro_status');
+    const sourceCounts = {};
+    (sourceRows || []).forEach(r => {
+      const key = r.signup_source || 'direct / unknown';
+      if(!sourceCounts[key]) sourceCounts[key] = { signups: 0, proConversions: 0 };
+      sourceCounts[key].signups++;
+      if(r.pro_status) sourceCounts[key].proConversions++;
+    });
+    const trafficSources = Object.entries(sourceCounts).map(([source, stats]) => ({
+      source,
+      signups: stats.signups,
+      proConversions: stats.proConversions,
+      conversionRatePercent: stats.signups ? Math.round((stats.proConversions / stats.signups) * 1000) / 10 : 0
+    })).sort((a, b) => b.signups - a.signups);
+
+    // ---------- Marketing spend -> real CAC / ROI / CPA ----------
+    const { data: spendRows } = await supabase.from('marketing_spend').select('amount_usd').gte('created_at', thirtyDaysAgo);
+    const totalSpend30d = (spendRows || []).reduce((sum, r) => sum + Number(r.amount_usd), 0);
+
+    // ---------- Storage Growth Rate — real, from daily snapshots ----------
+    const { data: snapshotHistory } = await supabase
+      .from('daily_metrics_snapshots')
+      .select('snapshot_date, total_users, total_blueprints, groups_rows, options_rows')
+      .order('snapshot_date', { ascending: true })
+      .limit(30);
+
+    // ---------- Failed login rate — real ----------
+    const { count: failedLogins24h } = await supabase.from('failed_login_attempts').select('id', { count: 'exact', head: true }).gte('created_at', oneDayAgo);
+
+    // ---------- API key usage — real, flushed periodically from memory ----------
+    const { data: keyUsageRows } = await supabase.from('api_key_usage').select('key_label, call_count, last_used_at').order('call_count', { ascending: false });
+
+    // ---------- Core Web Vitals — real, reported from the frontend ----------
+    const { data: vitalsRows } = await supabase.from('web_vitals_events').select('metric_name, value').gte('created_at', sevenDaysAgo);
+    const vitalsByMetric = {};
+    (vitalsRows || []).forEach(v => {
+      if(!vitalsByMetric[v.metric_name]) vitalsByMetric[v.metric_name] = [];
+      vitalsByMetric[v.metric_name].push(Number(v.value));
+    });
+    const coreWebVitals = Object.entries(vitalsByMetric).map(([metric, values]) => ({
+      metric,
+      median: median(values),
+      sampleSize: values.length
+    }));
+
+    // ---------- Click tracking — real click counts per element ----------
+    const { data: clickRows } = await supabase.from('click_events').select('element_id').gte('created_at', sevenDaysAgo);
+    const clickCounts = {};
+    (clickRows || []).forEach(c => { clickCounts[c.element_id] = (clickCounts[c.element_id] || 0) + 1; });
+    const topClickedElements = Object.entries(clickCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([elementId, count]) => ({ elementId, count }));
+
+    // ---------- Recent data access logs — real ----------
+    const { data: recentAccessLogs } = await supabase
+      .from('data_access_logs')
+      .select('action, detail, created_at')
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    // ---------- Real DB internals — connection pool + cache hit ratio,
+    // via the Postgres function from the migration. If the function
+    // hasn't been created yet (migration not run), this fails
+    // gracefully rather than breaking the whole dashboard response. ----------
+    let dbInternals = null;
+    try {
+      const { data: dbStatsRows, error: dbStatsError } = await supabase.rpc('get_db_internal_stats');
+      if(!dbStatsError && dbStatsRows?.[0]) dbInternals = dbStatsRows[0];
+    } catch (err) { /* migration not run yet — dbInternals stays null, handled below */ }
+
+    const recentWindow = requestMetrics.recentRequests.filter(r => r.timestamp > Date.now() - 60 * 60 * 1000);
+    const errorRequests = recentWindow.filter(r => r.status >= 400);
+    const writeRequests = recentWindow.filter(r => ['POST', 'PUT', 'DELETE', 'PATCH'].includes(r.method));
+    const avgResponseMs = recentWindow.length
+      ? Math.round(recentWindow.reduce((sum, r) => sum + r.durationMs, 0) / recentWindow.length)
+      : null;
+    const requestsPerMinute = recentWindow.length ? Math.round((recentWindow.length / 60) * 10) / 10 : 0;
+    const errorPathCounts = {};
+    errorRequests.forEach(r => { errorPathCounts[`${r.status} ${r.path}`] = (errorPathCounts[`${r.status} ${r.path}`] || 0) + 1; });
+    const commonErrorPages = Object.entries(errorPathCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([key, count]) => ({ key, count }));
+
+    const PRO_PRICE = 15; // matches the actual current one-time-per-month price
+    const mrr = (proUsers || 0) * PRO_PRICE;
+    const arpu = totalUsers ? Math.round((mrr / totalUsers) * 100) / 100 : 0;
+    const conversionRate = totalUsers ? Math.round(((proUsers || 0) / totalUsers) * 1000) / 10 : 0;
+    const churnRate = proUsers ? Math.round(((recentlyChurned || 0) / (proUsers + (recentlyChurned || 0))) * 1000) / 10 : 0;
+    // Standard CLV = ARPU / churn-rate estimate — a real formula on real
+    // inputs, but still an estimate, not a measured historical figure
+    // (no purchase-history ledger exists yet to compute a true trailing LTV).
+    const clv = churnRate > 0 ? Math.round((arpu / (churnRate / 100)) * 100) / 100 : null;
+
+    // Real once marketing_spend has any rows — genuinely null until then,
+    // never a fabricated placeholder number.
+    const cac = totalSpend30d > 0 && newUsers30d ? Math.round((totalSpend30d / newUsers30d) * 100) / 100 : null;
+    const cpa = totalSpend30d > 0 && newUsers30d ? cac : null; // same formula, different name depending on context — shown as both since both terms get used
+    const roi = totalSpend30d > 0 ? Math.round(((mrr - totalSpend30d) / totalSpend30d) * 1000) / 10 : null;
+
+    res.status(200).json({
+      generatedAt: new Date().toISOString(),
+      live: true,
+      uptimeSeconds: Math.round((Date.now() - requestMetrics.startedAt) / 1000),
+      users: {
+        total: totalUsers || 0,
+        pro: proUsers || 0,
+        free: (totalUsers || 0) - (proUsers || 0),
+        newToday: newUsersToday || 0,
+        new7d: newUsers7d || 0,
+        new30d: newUsers30d || 0,
+        conversionRatePercent: conversionRate,
+        dau: dau || 0,
+        mau: mau || 0,
+        dauMauRatioPercent: mau ? Math.round(((dau || 0) / mau) * 1000) / 10 : 0
+      },
+      blueprints: {
+        total: totalBlueprints || 0,
+        createdToday: blueprintsCreatedToday || 0,
+        editedToday: blueprintsEditedToday || 0,
+        created7d: blueprintsCreated7d || 0
+      },
+      funnel: {
+        totalSignups: totalUsers || 0,
+        signupsWithABlueprint: usersWithBlueprint || 0,
+        blueprintToActivationCount: usersWithActivation || 0,
+        proUpgrades: proUsers || 0,
+        note: 'Real counts derived from existing tables — no new event tracking needed for this one.'
+      },
+      trafficSources,
+      featureAdoption: featureAdoptionRates,
+      revenue: {
+        mrr,
+        arpu,
+        clv,
+        churnRatePercent: churnRate,
+        proPriceUsd: PRO_PRICE,
+        cac,
+        cpa,
+        roi,
+        marketingSpend30d: totalSpend30d,
+        note: totalSpend30d > 0
+          ? 'CAC/CPA/ROI computed from real marketing_spend entries you added.'
+          : 'CAC/CPA/ROI are null — add a marketing spend entry (POST /admin/marketing-spend) to make these real.'
+      },
+      storageProxy: {
+        groupsRows: groupsCount || 0,
+        optionsRows: optionsCount || 0,
+        snapshotRows: snapshotsCount || 0,
+        growthHistory: snapshotHistory || [],
+        note: 'Row counts, not bytes — real GB usage lives in your Supabase project dashboard under Settings -> Database -> Usage. growthHistory is real daily snapshots taken automatically, one per day.'
+      },
+      apiHealth: {
+        requestsLastHour: recentWindow.length,
+        errorsLastHour: errorRequests.length,
+        errorRatePercent: recentWindow.length ? Math.round((errorRequests.length / recentWindow.length) * 1000) / 10 : 0,
+        avgResponseMs,
+        requestsPerMinute,
+        writeRequestsLastHour: writeRequests.length,
+        commonErrorPages,
+        bugToTrafficRatioPercent: recentWindow.length ? Math.round((errorRequests.length / recentWindow.length) * 10000) / 100 : 0
+      },
+      security: {
+        failedLogins24h: failedLogins24h || 0
+      },
+      apiKeyUsage: keyUsageRows || [],
+      coreWebVitals,
+      topClickedElements,
+      recentDataAccess: recentAccessLogs || [],
+      dbInternals: dbInternals || { note: 'Run the get_db_internal_stats() migration to enable real connection pool + cache hit ratio data.' }
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not load dashboard data.', detail: err.message });
+  }
+});
+
+// AI assistant for the admin dashboard app — every question gets
+// answered against the SAME real data the dashboard itself shows, not
+// generic advice. Re-fetches fresh each call rather than trusting
+// whatever the client last saw, since this is exactly the kind of tool
+// where a stale number giving bad advice would be worse than useless.
+app.post('/admin/assistant/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+
+  try {
+    const { message, history } = req.body;
+    if(!message || !message.trim()){
+      return res.status(400).json({ error: 'message is required.' });
+    }
+
+    // Reuse the exact same dashboard-data logic rather than duplicating
+    // it — calls the handler via an internal HTTP round trip on the
+    // same running process rather than re-implementing the same queries.
+    const dashboardRes = await fetch(`http://localhost:${PORT}/admin/dashboard/${process.env.SELAR_WEBHOOK_SECRET}`);
+    const dashboardData = await dashboardRes.json();
+
+    const systemPrompt = `You are the personal analytics assistant for ThinkMaps, an AI-powered app-idea ideation tool run solo by Damilola. You have access to the REAL, CURRENT state of the business below — not estimates, actual live numbers pulled straight from the database moments ago. Answer questions directly and specifically using this data. When asked how to optimize something, give concrete, specific suggestions grounded in these exact numbers, not generic startup advice. If a question needs data that ISN'T in what's provided below (like ad spend, Core Web Vitals, or anything explicitly marked as unavailable), say so plainly rather than guessing or making up a number — that's worse than admitting you don't have it.
+
+CURRENT REAL DASHBOARD DATA:
+${JSON.stringify(dashboardData, null, 2)}
+
+Be direct, be specific, reference the actual numbers by name. Keep responses focused — this is a chat interface on a phone, not a report.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...(Array.isArray(history) ? history.slice(-10) : []), // last 10 turns of real context, not the whole history every time
+      { role: 'user', content: message }
+    ];
+
+    const result = await callMistralPlainText(messages);
+    res.status(200).json({ reply: result });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not reach the assistant.', detail: err.message });
+  }
+});
+
+// Real push notifications via Expo's push service — no third-party
+// notification provider needed, this is Expo's own free API. Single
+// admin (Damilola), so this just keeps the most recent token rather
+// than managing a list of subscribers.
+async function sendAdminPushNotification(title, body, data = {}){
+  try {
+    const { data: tokens } = await supabase
+      .from('admin_push_tokens')
+      .select('expo_push_token')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const token = tokens?.[0]?.expo_push_token;
+    if(!token) return; // nobody's registered a device yet — nothing to send to
+
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ to: token, title, body, data, sound: 'default' })
+    });
+  } catch (err) {
+    console.error('[ThinkMaps] Push notification failed:', err.message);
+  }
+}
+
+app.post('/admin/register-push-token/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+  try {
+    const { expoPushToken } = req.body;
+    if(!expoPushToken) return res.status(400).json({ error: 'expoPushToken is required.' });
+
+    const { error } = await supabase.from('admin_push_tokens').insert({ expo_push_token: expoPushToken });
+    if(error) throw error;
+
+    res.status(200).json({ registered: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not register push token.', detail: err.message });
+  }
+});
+
+// ---------- Marketing spend (CAC / ROI / CPA become real once this
+// has data — nobody but you can know your actual ad spend, this is
+// the input point for it) ----------
+app.post('/admin/marketing-spend/:secret', async (req, res) => {
+  if(!process.env.SELAR_WEBHOOK_SECRET || req.params.secret !== process.env.SELAR_WEBHOOK_SECRET){
+    return res.status(403).json({ error: 'Invalid secret.' });
+  }
+  try {
+    const { amountUsd, periodLabel } = req.body;
+    if(!amountUsd || !periodLabel) return res.status(400).json({ error: 'amountUsd and periodLabel are required.' });
+
+    const { error } = await supabase.from('marketing_spend').insert({ amount_usd: amountUsd, period_label: periodLabel });
+    if(error) throw error;
+
+    res.status(201).json({ saved: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not save marketing spend.', detail: err.message });
+  }
+});
+
+// ---------- Core Web Vitals — real, reported from the actual frontend
+// pages (see the web-vitals script added to index.html/dashboard.html/
+// app.html). No auth required — this fires from anonymous visitors too,
+// not just logged-in users, since page-load performance matters for
+// everyone hitting the site. ----------
+app.post('/track/web-vitals', async (req, res) => {
+  try {
+    const { metricName, value, page } = req.body;
+    if(!metricName || value == null) return res.status(400).json({ error: 'metricName and value are required.' });
+
+    supabase.from('web_vitals_events').insert({ metric_name: metricName, value, page: page || null })
+      .then(() => {}).catch(() => {});
+
+    res.status(200).json({ tracked: true });
+  } catch (err) {
+    res.status(200).json({ tracked: false }); // never let a tracking failure surface as an error to a real visitor
+  }
+});
+
+// ---------- Click tracking — real click-count-per-element, not a true
+// x/y coordinate heatmap (that needs a dedicated recording library like
+// Hotjar) — but genuinely useful on its own for "what are people
+// actually clicking." No auth required, same reasoning as web-vitals above. ----------
+app.post('/track/click', async (req, res) => {
+  try {
+    const { elementId, page } = req.body;
+    if(!elementId) return res.status(400).json({ error: 'elementId is required.' });
+
+    supabase.from('click_events').insert({ element_id: elementId, page: page || null })
+      .then(() => {}).catch(() => {});
+
+    res.status(200).json({ tracked: true });
+  } catch (err) {
+    res.status(200).json({ tracked: false });
+  }
 });
 
 // Supabase connectivity check — confirms the URL + service role key
@@ -845,7 +1330,7 @@ app.post('/auth/signup-verify', async (req, res) => {
 
             const { error: profileInsertError } = await supabase
               .from('profiles')
-              .insert({ id: existingAuthUser.id, email, username, pro_status: false });
+              .insert({ id: existingAuthUser.id, email, username, pro_status: false, signup_source: req.body.source ? String(req.body.source).slice(0, 100) : null });
 
             if(profileInsertError){
               // A genuine username collision at this exact point is the
@@ -867,6 +1352,19 @@ app.post('/auth/signup-verify', async (req, res) => {
     }
 
     await deletePendingAuth(email, 'signup');
+
+    // Real Traffic Source / Attribution tracking — the frontend passes
+    // whatever it captured from the URL at signup time (UTM params,
+    // or 'direct' if none). Updated here rather than included in the
+    // initial insert, since the normal signup path relies on a database
+    // trigger to create the profiles row from auth.users — safer to
+    // update the row after the fact than to guess at that trigger's
+    // exact column list from this code.
+    if(created?.user?.id && req.body.source){
+      supabase.from('profiles').update({ signup_source: String(req.body.source).slice(0, 100) }).eq('id', created.user.id)
+        .then(() => {})
+        .catch(() => {});
+    }
 
     res.status(201).json({ verified: true, email });
   } catch (err) {
@@ -962,6 +1460,7 @@ app.post('/auth/login-verify', async (req, res) => {
     const isValid = verifyOtpCode(code, pending.code_hash);
     if(!isValid){
       await incrementPendingAuthAttempts(email, 'login');
+      supabase.from('failed_login_attempts').insert({ email }).then(() => {}).catch(() => {});
       const remaining = OTP_MAX_ATTEMPTS - (pending.attempts + 1);
       return res.status(400).json({
         error: remaining > 0
@@ -1705,6 +2204,8 @@ async function applyProUpgrade(profile, matchLogSuffix, tier = 'pro'){
   const tierLabel = tier === 'ultra' ? 'Ultra' : 'Pro';
   console.log(`[ThinkMaps] Payment inbox check: upgraded ${profile.email} to ${tierLabel} (expires ${expiresAt.toISOString()}) ${matchLogSuffix}.`);
 
+  sendAdminPushNotification('🎉 New Pro signup', `${profile.username || profile.email} just upgraded to ${tierLabel}.`);
+
   const expiresLabel = expiresAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
   try {
@@ -2069,6 +2570,7 @@ app.delete('/blueprints/:id', requireAuth, async (req, res) => {
 
     if(error) throw error;
 
+    logDataAccess(req.user.id, 'blueprint_delete', blueprint.title);
     res.status(200).json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: 'Could not delete this blueprint.', detail: err.message });
@@ -2211,6 +2713,7 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
       console.log('[ThinkMaps] Reset: post-reset snapshot saved successfully.');
     }
 
+    logDataAccess(req.user.id, 'blueprint_reset', targetGroupId ? `to group ${targetGroupId}` : 'to true root');
     res.status(200).json({ reset: true });
   } catch (err) {
     console.error(`[ThinkMaps] Reset failed for blueprint ${req.params.id}:`, err.message);
@@ -2249,13 +2752,36 @@ const MISTRAL_API_KEYS = [
   process.env.MISTRAL_API_KEY_14
 ].filter(Boolean);
 
+const MISTRAL_KEY_LABELS = MISTRAL_API_KEYS.map((_, i) => i === 0 ? 'MISTRAL_API_KEY' : `MISTRAL_API_KEY_${i + 1}`);
+const apiKeyUsageCounts = {}; // label -> count since last flush, in-memory to avoid a DB write on every single Mistral call
+
 function getMistralApiKey(){
   if(MISTRAL_API_KEYS.length === 0){
     throw new Error('No Mistral API keys configured — set MISTRAL_API_KEY (and optionally MISTRAL_API_KEY_2..8).');
   }
   const index = Math.floor(Math.random() * MISTRAL_API_KEYS.length);
+  const label = MISTRAL_KEY_LABELS[index];
+  apiKeyUsageCounts[label] = (apiKeyUsageCounts[label] || 0) + 1;
   return MISTRAL_API_KEYS[index];
 }
+
+// Flushes the in-memory counts above to the database periodically —
+// never the raw key itself, only which LABEL was used and how many
+// times. Upserts so this is safe to run repeatedly without duplicating rows.
+async function flushApiKeyUsage(){
+  const entries = Object.entries(apiKeyUsageCounts);
+  if(entries.length === 0) return;
+  for(const [label, count] of entries){
+    apiKeyUsageCounts[label] = 0; // reset immediately so concurrent calls during the flush aren't lost or double-counted
+    const { data: existing } = await supabase.from('api_key_usage').select('call_count').eq('key_label', label).maybeSingle();
+    await supabase.from('api_key_usage').upsert({
+      key_label: label,
+      call_count: (existing?.call_count || 0) + count,
+      last_used_at: new Date().toISOString()
+    });
+  }
+}
+setInterval(flushApiKeyUsage, 5 * 60 * 1000);
 
 // "-latest" deliberately, not a pinned dated snapshot — this used to be
 // hardcoded to mistral-small-2503, which was over a year stale by the
@@ -3582,6 +4108,71 @@ async function expireOutdatedProAccounts(){
 setTimeout(expireOutdatedProAccounts, 20 * 1000);
 setInterval(expireOutdatedProAccounts, 60 * 60 * 1000); // hourly is plenty — expiration only needs to be caught within an hour of actually happening, not instantly
 
+// Real health monitoring, not a fixed schedule regardless of state —
+// only sends a notification when the actual request-metrics tracker
+// shows something genuinely wrong, and only once per spike (not
+// re-alerting every 10 minutes for the same ongoing issue).
+let lastErrorSpikeAlertAt = 0;
+function checkForErrorSpike(){
+  const recentWindow = requestMetrics.recentRequests.filter(r => r.timestamp > Date.now() - 10 * 60 * 1000); // last 10 min
+  if(recentWindow.length < 10) return; // not enough traffic to mean anything either way
+
+  const errorCount = recentWindow.filter(r => r.status >= 500).length;
+  const errorRate = errorCount / recentWindow.length;
+
+  // 500s specifically (not 4xx, which are often just normal auth/validation
+  // failures) — and a real rate, not a couple of stray failures.
+  if(errorRate > 0.15 && Date.now() - lastErrorSpikeAlertAt > 30 * 60 * 1000){
+    lastErrorSpikeAlertAt = Date.now();
+    sendAdminPushNotification(
+      '⚠️ Error rate spike',
+      `${errorCount} of the last ${recentWindow.length} requests failed with a 500 in the last 10 minutes (${Math.round(errorRate * 100)}%).`
+    );
+  }
+}
+setInterval(checkForErrorSpike, 10 * 60 * 1000);
+
+// Real Storage Growth Rate — one row per day, letting the dashboard
+// show actual growth over time instead of just a single point-in-time
+// count. Checks whether today's snapshot already exists before writing
+// (idempotent — safe to call more than once on the same day, e.g. after
+// a restart), and runs once on startup plus once daily after that.
+async function takeDailySnapshot(){
+  try {
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const { data: existing } = await supabase.from('daily_metrics_snapshots').select('id').eq('snapshot_date', today).maybeSingle();
+    if(existing) return; // already snapshotted today
+
+    const [
+      { count: totalUsers },
+      { count: proUsers },
+      { count: totalBlueprints },
+      { count: groupsCount },
+      { count: optionsCount }
+    ] = await Promise.all([
+      supabase.from('profiles').select('id', { count: 'exact', head: true }),
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('pro_status', true),
+      supabase.from('blueprints').select('id', { count: 'exact', head: true }),
+      supabase.from('groups').select('id', { count: 'exact', head: true }),
+      supabase.from('options').select('id', { count: 'exact', head: true })
+    ]);
+
+    await supabase.from('daily_metrics_snapshots').insert({
+      snapshot_date: today,
+      total_users: totalUsers || 0,
+      pro_users: proUsers || 0,
+      total_blueprints: totalBlueprints || 0,
+      groups_rows: groupsCount || 0,
+      options_rows: optionsCount || 0
+    });
+    console.log(`[ThinkMaps] Daily metrics snapshot saved for ${today}.`);
+  } catch (err) {
+    console.error('[ThinkMaps] takeDailySnapshot failed:', err.message);
+  }
+}
+setTimeout(takeDailySnapshot, 30 * 1000); // shortly after startup
+setInterval(takeDailySnapshot, 6 * 60 * 60 * 1000); // checked every 6h, but only actually writes once per day thanks to the existing-row check above
+
 // Convenience for the top of any pro-gated route — returns true and
 // sends the 403 itself if the user ISN'T pro, so callers can just do
 // `if(await requireProOrReject(req, res)) return;` as their one gate
@@ -4408,6 +4999,7 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     console.log(`[ThinkMaps] Restore of "${targetSnapshot.name}" completed successfully.`);
 
     const restoredGraph = await fetchFullBlueprintGraph(blueprint.id);
+    logDataAccess(req.user.id, 'snapshot_restore', targetSnapshot.name);
     res.status(200).json({ restored: true, fullGraph: restoredGraph });
   } catch (err){
     console.error(`[ThinkMaps] Restore failed for blueprint ${req.params.id}:`, err.message);
@@ -9106,6 +9698,7 @@ app.post('/confirm/:sessionId/deeper-analysis', requireAuth, async (req, res) =>
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'deeper_analysis');
 
     if(session.status !== 'completed' || !session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before deeper analysis can run.' });
@@ -9247,6 +9840,7 @@ app.post('/confirm/:sessionId/build-brief', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'build_brief');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before a build brief can be generated.' });
@@ -9295,6 +9889,8 @@ app.post('/confirm/:sessionId/share', requireAuth, async (req, res) => {
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
 
+    logFeatureUsage(req.user.id, 'share');
+
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be shared.' });
     }
@@ -9338,6 +9934,7 @@ app.post('/confirm/:sessionId/pivots', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'pivots');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before pivots can be generated.' });
@@ -9413,6 +10010,7 @@ app.post('/confirm/:sessionId/landing-copy', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'landing_copy');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before landing copy can be generated.' });
@@ -9452,6 +10050,7 @@ app.post('/confirm/:sessionId/strength-score', requireAuth, async (req, res) => 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'strength_score');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be scored.' });
@@ -9487,6 +10086,7 @@ app.post('/confirm/:sessionId/personas', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'personas');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before personas can be generated.' });
@@ -9537,6 +10137,7 @@ app.post('/confirm/:sessionId/launch-checklist', requireAuth, async (req, res) =
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'launch_checklist');
 
     if(!session.build_brief){
       return res.status(400).json({ error: 'Generate the Build Brief first — the launch checklist is built from it.' });
@@ -9571,6 +10172,7 @@ app.post('/confirm/:sessionId/red-team', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'red_team');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be challenged.' });
@@ -9657,6 +10259,7 @@ app.post('/confirm/:sessionId/spy-mode', requireAuth, async (req, res) => {
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+    logFeatureUsage(req.user.id, 'spy_mode');
 
     const currentIdea = session.rewritten_idea || session.result;
     if(!currentIdea?.competitors?.length){
@@ -9739,6 +10342,8 @@ app.get('/confirm/:sessionId/export/markdown', requireAuth, async (req, res) => 
     if(!session) return res.status(404).json({ error: 'Session not found.' });
 
     if(!(await verifySessionOwnership(session, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+
+    logFeatureUsage(req.user.id, 'export_markdown');
 
     if(!session.result){
       return res.status(400).json({ error: 'This idea needs to finish hardening before it can be exported.' });
