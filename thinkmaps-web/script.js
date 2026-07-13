@@ -1763,6 +1763,10 @@ const canvasState = {
   pan: { x: 0, y: 0 },
   zoom: 1,
   hasCenteredOnce: false,
+  // Which group (if any) has been ctrl+clicked/long-pressed as the
+  // Reset target — null means Reset goes all the way back to the true
+  // beginning, matching the default behavior before this existed.
+  resetTargetGroupId: null,
   // Whichever option the person most recently clicked/dropped onto —
   // drives the progress counter and breadcrumb trail, recomputed fresh
   // after every graph reload rather than incrementally maintained, so it
@@ -2671,7 +2675,6 @@ function renderResetBlueprintButton(){
   btn.type = 'button';
   btn.id = 'resetBlueprintBtn';
   btn.className = 'zoom-btn reset-blueprint-btn';
-  btn.title = canvasState.isPro ? 'Reset this blueprint' : 'Reset blueprint — Pro feature';
   btn.innerHTML = '↺';
   if(canvasState.isPro) btn.classList.add('pro-glow-btn');
   btn.addEventListener('click', () => {
@@ -2679,22 +2682,68 @@ function renderResetBlueprintButton(){
       showToast('Resetting a blueprint back to its starting point is a Pro feature.');
       return;
     }
-    if(!confirm('Reset this blueprint? Every group, option, and retry you\'ve made gets wiped back to just the starting picker. The blueprint itself stays — only what you\'ve explored gets cleared. This can\'t be undone.')) return;
-    resetBlueprint();
+
+    const targetId = canvasState.resetTargetGroupId;
+    const targetGroup = targetId ? canvasState.groups.find(g => g.id === targetId) : null;
+
+    const confirmMessage = targetGroup
+      ? `Reset back to "${targetGroup.label}"? Everything explored past this point gets cleared — this group and everything leading to it stays exactly as it is. Saved automatically as a snapshot first, so you can go back either way anytime from Snapshots.`
+      : `Reset this blueprint back to the very beginning? Every group, option, and retry you've made gets cleared. Saved automatically as a snapshot first, so you can go back either way anytime from Snapshots.`;
+
+    if(!confirm(confirmMessage)) return;
+    resetBlueprint(targetId);
   });
   controls.appendChild(btn);
+  updateResetButtonState();
 }
 
-async function resetBlueprint(){
+// Reflects whether a target is currently selected — separate from the
+// initial render above so it can be called again from toggleResetTarget
+// without needing to rebuild the whole button.
+function updateResetButtonState(){
+  const btn = document.getElementById('resetBlueprintBtn');
+  if(!btn) return;
+  const targetId = canvasState.resetTargetGroupId;
+  const targetGroup = targetId ? canvasState.groups.find(g => g.id === targetId) : null;
+
+  if(!canvasState.isPro){
+    btn.title = 'Reset blueprint — Pro feature';
+  } else if(targetGroup){
+    btn.title = `Reset to "${targetGroup.label}" (ctrl+click it again to clear this, or click Reset directly for the full beginning)`;
+    btn.classList.add('reset-btn-targeted');
+  } else {
+    btn.title = 'Reset this blueprint — ctrl+click (or long-press) any group first to reset to just that point instead of the very beginning';
+    btn.classList.remove('reset-btn-targeted');
+  }
+}
+
+// Ctrl+click (desktop) or long-press (mobile) a group's title to mark it
+// as where Reset should go back to, instead of the true beginning.
+// Clicking the SAME group again clears the selection back to "reset
+// everything." Selecting a DIFFERENT group simply replaces the previous
+// selection — there's only ever one target at a time.
+function toggleResetTarget(groupId){
+  canvasState.resetTargetGroupId = (canvasState.resetTargetGroupId === groupId) ? null : groupId;
+  renderCanvas();
+  updateResetButtonState();
+  const targetGroup = canvasState.groups.find(g => g.id === canvasState.resetTargetGroupId);
+  showToast(targetGroup ? `Reset target set to "${targetGroup.label}"` : 'Reset target cleared — Reset now goes back to the very beginning');
+}
+
+async function resetBlueprint(targetGroupId){
   try {
-    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/reset`, { method: 'POST', body: JSON.stringify({}) });
+    const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/reset`, {
+      method: 'POST',
+      body: JSON.stringify(targetGroupId ? { targetGroupId } : {})
+    });
     if(!res) return;
     if(!res.ok){
       const body = await res.json().catch(() => ({}));
       showToast(body.error || 'Could not reset this blueprint.');
       return;
     }
-    showToast('Blueprint reset — back to the starting point.');
+    showToast('Reset — the previous state was saved automatically, find it under Snapshots anytime.');
+    canvasState.resetTargetGroupId = null;
     await loadGraph();
   } catch (err) {
     showToast('Could not reach the server. Try again.');
@@ -3362,6 +3411,7 @@ function renderGroups(visible, infoByGroupId){
     if(isGenerateIdeasNode) classNames.push('generate-ideas-node');
     if(isCustomIdeaNode) classNames.push('custom-idea-node');
     if(isCheckpointNode) classNames.push('checkpoint-node');
+    if(canvasState.resetTargetGroupId === group.id) classNames.push('reset-target-selected');
     card.className = classNames.join(' ');
     card.dataset.groupId = group.id;
     card.style.left = `${group.position_x || 0}px`;
@@ -3591,13 +3641,13 @@ function clearMultiSelectStage(){
 const LONG_PRESS_DURATION_MS = 480;
 const LONG_PRESS_MOVE_CANCEL_PX = 12;
 
-function setupLongPressStaging(optEl, optionId, groupId){
+function setupLongPress(el, onLongPress){
   let pressTimer = null;
   let startX = 0;
   let startY = 0;
   let fired = false;
 
-  optEl.addEventListener('touchstart', (e) => {
+  el.addEventListener('touchstart', (e) => {
     if(e.touches.length !== 1) return; // a pinch or multi-finger gesture isn't a long-press attempt
     fired = false;
     const t = e.touches[0];
@@ -3605,13 +3655,13 @@ function setupLongPressStaging(optEl, optionId, groupId){
     startY = t.clientY;
     pressTimer = setTimeout(() => {
       fired = true;
-      optEl.dataset.suppressClick = '1';
+      el.dataset.suppressClick = '1';
       if(navigator.vibrate) navigator.vibrate(35); // small haptic confirmation the hold registered
-      toggleMultiSelectStage(optionId, groupId);
+      onLongPress();
     }, LONG_PRESS_DURATION_MS);
   }, { passive: true });
 
-  optEl.addEventListener('touchmove', (e) => {
+  el.addEventListener('touchmove', (e) => {
     if(!pressTimer) return;
     const t = e.touches[0];
     if(!t) return;
@@ -3623,7 +3673,7 @@ function setupLongPressStaging(optEl, optionId, groupId){
     }
   }, { passive: true });
 
-  optEl.addEventListener('touchend', () => {
+  el.addEventListener('touchend', () => {
     if(pressTimer){
       clearTimeout(pressTimer);
       pressTimer = null;
@@ -3633,16 +3683,20 @@ function setupLongPressStaging(optEl, optionId, groupId){
       // the ONE synthetic click this exact touch is about to generate —
       // clearing it shortly after means a genuinely separate later tap
       // on the same element still works normally.
-      setTimeout(() => { delete optEl.dataset.suppressClick; }, 400);
+      setTimeout(() => { delete el.dataset.suppressClick; }, 400);
     }
   });
 
-  optEl.addEventListener('touchcancel', () => {
+  el.addEventListener('touchcancel', () => {
     if(pressTimer){
       clearTimeout(pressTimer);
       pressTimer = null;
     }
   });
+}
+
+function setupLongPressStaging(optEl, optionId, groupId){
+  setupLongPress(optEl, () => toggleMultiSelectStage(optionId, groupId));
 }
 
 function wireGroupEvents(){
@@ -3653,6 +3707,26 @@ function wireGroupEvents(){
     if(dragHandle){
       dragHandle.addEventListener('mousedown', (e) => startGroupDrag(e, groupId));
       dragHandle.addEventListener('touchstart', (e) => startGroupDrag(e, groupId), { passive: false });
+    }
+
+    // Ctrl+click (desktop) or long-press (mobile) the group's title to
+    // mark it as the Reset target — resetting then clears everything
+    // BELOW this group instead of the whole blueprint. Scoped to the
+    // title specifically, not the whole draggable header, so it reads
+    // as a deliberate action on THIS group's identity, not an accidental
+    // side effect of grabbing the header to reposition the card.
+    const titleEl = card.querySelector('.canvas-group-title');
+    const groupData = canvasState.groups.find(g => g.id === groupId);
+    const isRootGroup = groupData && !groupData.spawned_from_option_id;
+    if(titleEl && !isRootGroup){
+      titleEl.addEventListener('click', (e) => {
+        if(e.ctrlKey || e.metaKey){
+          e.stopPropagation();
+          e.preventDefault();
+          toggleResetTarget(groupId);
+        }
+      });
+      setupLongPress(titleEl, () => toggleResetTarget(groupId));
     }
 
     card.querySelectorAll('.canvas-option').forEach(optEl => {
@@ -4226,6 +4300,12 @@ function setupCanvasInteractions(){
 
 
 function startGroupDrag(e, groupId){
+  // Ctrl/Cmd+mousedown on the header is a different gesture now — marking
+  // this group as the reset target, not repositioning it. Handled by the
+  // click listener wired in wireGroupEvents below; this just needs to get
+  // out of the way rather than starting a drag underneath it.
+  if(e.ctrlKey || e.metaKey) return;
+
   e.stopPropagation();
   e.preventDefault();
   // Dragging is intentionally allowed even on a locked blueprint —
