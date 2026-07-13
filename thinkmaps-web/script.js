@@ -4639,6 +4639,12 @@ async function handleOptionActivate(optionId){
           }
         } else if(event.type === 'error'){
           alert(event.error || 'Could not activate that option.');
+          // Whatever caused this — a genuinely stale option ID, a
+          // partially-failed reset/restore, anything — leaving the old
+          // cards on screen after an error means the person keeps
+          // clicking on something that doesn't match the real server
+          // state anymore. Reloading shows what's ACTUALLY there now.
+          await loadGraph();
           return;
         }
       }
@@ -4661,6 +4667,14 @@ async function handleOptionActivate(optionId){
         } else {
           await loadGraph();
         }
+      } else if(res){
+        // Previously silent — a failed response here left zero
+        // feedback and stale option cards still on screen. Now shows
+        // the real reason and reloads to sync with what the server
+        // actually has, matching the primary streaming path's own fix.
+        const body = await res.json().catch(() => ({}));
+        alert(body.error || 'Could not activate that option.');
+        await loadGraph();
       }
     } catch(fallbackErr){
       alert('Something went wrong activating that option.');
