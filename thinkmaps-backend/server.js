@@ -8414,7 +8414,7 @@ app.post('/pasted-ideas', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'mode must be "as_is" or "refurbish".' });
     }
 
-    const trimmedIdea = rawIdea.trim().slice(0, 4000); // generous cap — long enough for a real paragraph or two, not unbounded
+    const trimmedIdea = rawIdea.trim().slice(0, 12000); // generous cap — room for a genuinely detailed multi-paragraph pitch, not unbounded
     const structuredIdea = await structurePastedIdea(trimmedIdea, mode);
 
     const pathSummary = `User-submitted idea (pasted directly, not built through the canvas — ${mode === 'refurbish' ? 'refurbished by AI from the original' : 'used as originally written'}): ${trimmedIdea.slice(0, 300)}`;
