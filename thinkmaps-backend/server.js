@@ -11,6 +11,15 @@ const { NICHE_PATHWAYS } = require('./niche_pathways');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Selar's own API secret token (distinct from SELAR_WEBHOOK_SECRET
+// below, which is this server's OWN secret for protecting its admin
+// routes — this one authenticates OUTBOUND calls to Selar's actual
+// API). Stored and ready to use — not yet wired into a specific
+// verification call, since I don't have confirmed documentation for
+// Selar's exact endpoint shapes to build against without guessing.
+// Set SELAR_API_TOKEN in Render's environment variables to this value.
+const SELAR_API_TOKEN = process.env.SELAR_API_TOKEN; // e.g. sat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
 // Render sits behind a reverse proxy — without this, req.ip (and every
 // rate limiter keyed on it below) sees Render's internal proxy address
 // for every single request rather than the real visitor's IP, which
@@ -962,6 +971,18 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
     // (no purchase-history ledger exists yet to compute a true trailing LTV).
     const clv = churnRate > 0 ? Math.round((arpu / (churnRate / 100)) * 100) / 100 : null;
 
+    // Real Total Revenue — the actual sum of every logged payment event,
+    // genuinely distinct from MRR above (which only reflects CURRENT
+    // recurring value from active Pro accounts right now, not money
+    // actually collected over time, including from anyone who's since
+    // downgraded). Only counts from whenever payment_events started
+    // existing — there was never a discrete payment log before that
+    // table did, so this can't retroactively recover anything earned
+    // before this migration ran.
+    const { data: paymentRows } = await supabase.from('payment_events').select('amount_usd');
+    const totalRevenue = (paymentRows || []).reduce((sum, p) => sum + Number(p.amount_usd), 0);
+    const { count: totalPaymentCount } = await supabase.from('payment_events').select('id', { count: 'exact', head: true });
+
     // Real once marketing_spend has any rows — genuinely null until then,
     // never a fabricated placeholder number.
     const cac = totalSpend30d > 0 && newUsers30d ? Math.round((totalSpend30d / newUsers30d) * 100) / 100 : null;
@@ -1000,6 +1021,8 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
       trafficSources,
       featureAdoption: featureAdoptionRates,
       revenue: {
+        totalRevenue,
+        totalPaymentCount: totalPaymentCount || 0,
         mrr,
         arpu,
         clv,
@@ -1011,7 +1034,8 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
         marketingSpend30d: totalSpend30d,
         note: totalSpend30d > 0
           ? 'CAC/CPA/ROI computed from real marketing_spend entries you added.'
-          : 'CAC/CPA/ROI are null — add a marketing spend entry (POST /admin/marketing-spend) to make these real.'
+          : 'CAC/CPA/ROI are null — add a marketing spend entry (POST /admin/marketing-spend) to make these real.',
+        totalRevenueNote: 'The actual sum of every real payment ever logged — different from MRR, which is only current recurring value. Only counts from when payment tracking started; earlier upgrades made before that existed aren\'t retroactively recoverable.'
       },
       storageProxy: {
         groupsRows: groupsCount || 0,
@@ -2224,6 +2248,17 @@ async function applyProUpgrade(profile, matchLogSuffix, tier = 'pro'){
 
   const tierLabel = tier === 'ultra' ? 'Ultra' : 'Pro';
   console.log(`[ThinkMaps] Payment inbox check: upgraded ${profile.email} to ${tierLabel} (expires ${expiresAt.toISOString()}) ${matchLogSuffix}.`);
+
+  // Real payment event, logged once per actual upgrade — this is the
+  // whole reason Total Revenue can be an honest, non-MRR number.
+  // Fire-and-forget, same reasoning as the other event loggers: this
+  // should never be able to block or fail the actual upgrade itself.
+  const PRICE_BY_TIER = { pro: 15, ultra: 25 };
+  supabase.from('payment_events').insert({
+    user_id: profile.id,
+    amount_usd: PRICE_BY_TIER[tier] || PRICE_BY_TIER.pro,
+    tier
+  }).then(() => {}).catch(() => {});
 
   sendAdminPushNotification('🎉 New Pro signup', `${profile.username || profile.email} just upgraded to ${tierLabel}.`);
 
