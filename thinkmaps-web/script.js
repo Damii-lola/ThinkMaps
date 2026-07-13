@@ -403,6 +403,7 @@ async function handleOtpResend(e){
   if(btn){
     btn.disabled = true;
     btn.textContent = 'Sending…';
+    btn.classList.add('btn-loading');
   }
 
   try {
@@ -440,7 +441,7 @@ async function handleOtpResend(e){
     // Brief cooldown so the resend button can't be hammered — otp.dev
     // rate limits aside, this is just a sane UX floor on top of that.
     setTimeout(() => {
-      if(btn){ btn.disabled = false; if(btn.textContent !== 'Resend code') btn.textContent = 'Resend code'; }
+      if(btn){ btn.disabled = false; if(btn.textContent !== 'Resend code') btn.textContent = 'Resend code'; btn.classList.remove('btn-loading'); }
     }, 15000);
   }
 }
@@ -1351,7 +1352,7 @@ function wireSettingsUsernameForm(){
     }
 
     const submitBtn = form.querySelector('button[type="submit"]');
-    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; }
+    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; submitBtn.classList.add('btn-loading'); }
 
     try {
       const res = await authedFetch('/profile/username', {
@@ -1377,7 +1378,7 @@ function wireSettingsUsernameForm(){
     } catch (err){
       if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
     } finally {
-      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Save'; }
+      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Save'; submitBtn.classList.remove('btn-loading'); }
     }
   });
 }
@@ -1423,7 +1424,7 @@ function wireSettingsPasswordForm(){
     }
 
     const submitBtn = form.querySelector('button[type="submit"]');
-    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Updating…'; }
+    if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Updating…'; submitBtn.classList.add('btn-loading'); }
 
     try {
       const res = await authedFetch('/profile/password', {
@@ -1445,7 +1446,7 @@ function wireSettingsPasswordForm(){
     } catch (err){
       if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
     } finally {
-      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Update password'; }
+      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Update password'; submitBtn.classList.remove('btn-loading'); }
     }
   });
 }
@@ -1886,6 +1887,7 @@ async function initPasteIdeaPage(){
     submitBtn.disabled = true;
     const originalText = submitBtn.textContent;
     submitBtn.textContent = mode === 'refurbish' ? 'Refurbishing your idea…' : 'Processing your idea…';
+    submitBtn.classList.add('btn-loading');
 
     try {
       const res = await authedFetch('/pasted-ideas', {
@@ -1899,6 +1901,7 @@ async function initPasteIdeaPage(){
         if(errorEl) errorEl.textContent = body.error || 'Could not process that idea.';
         submitBtn.disabled = false;
         submitBtn.textContent = originalText;
+        submitBtn.classList.remove('btn-loading');
         return;
       }
 
@@ -1907,6 +1910,7 @@ async function initPasteIdeaPage(){
       if(errorEl) errorEl.textContent = 'Could not reach the server. Try again.';
       submitBtn.disabled = false;
       submitBtn.textContent = originalText;
+      submitBtn.classList.remove('btn-loading');
     }
   });
 }
@@ -2837,7 +2841,7 @@ async function saveCurrentSnapshot(){
 async function restoreSnapshot(snapshotId, btn){
   if(!confirm('Restore this snapshot? Your current state will be saved automatically first, so nothing is lost.')) return;
 
-  if(btn){ btn.disabled = true; btn.textContent = 'Restoring…'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Restoring…'; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/blueprints/${canvasState.blueprintId}/snapshots/${snapshotId}/restore`, {
@@ -2848,7 +2852,7 @@ async function restoreSnapshot(snapshotId, btn){
     const body = await res.json();
     if(!res.ok){
       showToast(body.error || 'Could not restore this snapshot.');
-      if(btn){ btn.disabled = false; btn.textContent = 'Restore'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Restore'; btn.classList.remove('btn-loading'); }
       return;
     }
 
@@ -2863,7 +2867,7 @@ async function restoreSnapshot(snapshotId, btn){
     showToast('Snapshot restored — your previous state was saved automatically.');
   } catch (err) {
     showToast('Could not reach the server. Try again.');
-    if(btn){ btn.disabled = false; btn.textContent = 'Restore'; }
+    if(btn){ btn.disabled = false; btn.textContent = 'Restore'; btn.classList.remove('btn-loading'); }
   }
 }
 
@@ -2939,6 +2943,41 @@ function computeVisibleGroups(){
 
   walk(rootGroup.id);
   return visible;
+}
+
+// The frontend half of the activation speed fix — merges a small delta
+// into the existing canvasState instead of replacing groups/
+// groupVersions/options wholesale on every single activation. Before
+// this, every click re-sent and re-applied the ENTIRE blueprint's graph
+// even though only a handful of rows actually changed; this appends the
+// new rows and surgically patches just the specific existing rows that
+// changed (sibling freeze state, the newly-selected option) by ID.
+function mergeGraphDelta(delta){
+  if(!delta) return;
+
+  if(delta.groups?.length) canvasState.groups.push(...delta.groups);
+  if(delta.groupVersions?.length) canvasState.groupVersions.push(...delta.groupVersions);
+  if(delta.options?.length) canvasState.options.push(...delta.options);
+
+  // Existing groups whose is_frozen actually changed (a sibling branch
+  // getting grayed out, or un-grayed on reactivation) — replaced in
+  // place by ID rather than appended, since these rows already exist.
+  if(delta.updatedGroups?.length){
+    for(const updated of delta.updatedGroups){
+      const idx = canvasState.groups.findIndex(g => g.id === updated.id);
+      if(idx !== -1) canvasState.groups[idx] = updated;
+    }
+  }
+
+  // The option(s) just clicked (or combined) — marked selected locally
+  // rather than needing a fetch to learn what the backend already told
+  // it happened.
+  if(delta.selectedOptionIds?.length){
+    for(const optId of delta.selectedOptionIds){
+      const opt = canvasState.options.find(o => o.id === optId);
+      if(opt) opt.is_selected = true;
+    }
+  }
 }
 
 function renderCanvas(){
@@ -4500,7 +4539,15 @@ async function handleOptionActivate(optionId){
         } else if(event.type === 'done'){
           canvasState.lastActivatedOptionId = optionId;
           canvasState.multiSelectStagedIds.clear();
-          if(event.fullGraph){
+          if(event.delta){
+            mergeGraphDelta(event.delta);
+            renderPathProgress();
+            renderCanvas();
+            maybeAutoFrameCompletedPath();
+          } else if(event.fullGraph){
+            // Older response shape, kept as a defensive fallback —
+            // shouldn't be reachable against the current backend, but
+            // safer than silently doing nothing if it ever is.
             canvasState.groups = event.fullGraph.groups;
             canvasState.groupVersions = event.fullGraph.groupVersions;
             canvasState.options = event.fullGraph.options;
@@ -4508,7 +4555,7 @@ async function handleOptionActivate(optionId){
             renderCanvas();
             maybeAutoFrameCompletedPath();
           } else {
-            await loadGraph(); // fallback if full graph wasn't returned
+            await loadGraph(); // fallback if neither was returned
           }
         } else if(event.type === 'error'){
           alert(event.error || 'Could not activate that option.');
@@ -6384,7 +6431,7 @@ async function buildPivotInstead(pivot, btn){
     return;
   }
 
-  if(btn){ btn.disabled = true; btn.textContent = 'Starting new blueprint…'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Starting new blueprint…'; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/blueprints/${confirmState.blueprintId}/pivot-into`, {
@@ -6395,13 +6442,13 @@ async function buildPivotInstead(pivot, btn){
     const body = await res.json();
     if(!res.ok){
       showToast(body.error || 'Could not start a new blueprint from this pivot.');
-      if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; btn.classList.remove('btn-loading'); }
       return;
     }
     window.location.href = `app.html?blueprint=${body.blueprint.id}`;
   } catch (err) {
     showToast('Could not reach the server. Try again.');
-    if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; }
+    if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; btn.classList.remove('btn-loading'); }
   }
 }
 
@@ -6690,7 +6737,7 @@ async function submitRedTeamRebuttal(angle, btn){
     return;
   }
 
-  if(btn){ btn.disabled = true; btn.textContent = 'Evaluating…'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Evaluating…'; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/confirm/${confirmState.sessionId}/red-team/respond`, {
@@ -6701,14 +6748,14 @@ async function submitRedTeamRebuttal(angle, btn){
     const body = await res.json();
     if(!res.ok){
       showToast(body.error || 'Could not evaluate your response.');
-      if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; btn.classList.remove('btn-loading'); }
       return;
     }
     confirmState.redTeam = body.redTeam;
     renderRedTeam(body.redTeam);
   } catch (err) {
     showToast('Could not reach the server. Try again.');
-    if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; }
+    if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; btn.classList.remove('btn-loading'); }
   }
 }
 
@@ -6788,7 +6835,7 @@ function renderSpyMode(spyMode){
 }
 
 async function stealFromSpyMode(competitorName, attackVector, btn){
-  if(btn){ btn.disabled = true; btn.textContent = 'Adding to build brief…'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Adding to build brief…'; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/confirm/${confirmState.sessionId}/spy-mode/steal`, {
@@ -6799,7 +6846,7 @@ async function stealFromSpyMode(competitorName, attackVector, btn){
     const body = await res.json();
     if(!res.ok){
       showToast(body.error || 'Could not add this to the build brief.');
-      if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; btn.classList.remove('btn-loading'); }
       return;
     }
     confirmState.buildBrief = body.buildBrief;
@@ -6818,7 +6865,7 @@ async function stealFromSpyMode(competitorName, attackVector, btn){
     }
   } catch (err) {
     showToast('Could not reach the server. Try again.');
-    if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; }
+    if(btn){ btn.disabled = false; btn.textContent = 'Steal This'; btn.classList.remove('btn-loading'); }
   }
 }
 
@@ -6986,7 +7033,7 @@ function renderExportSection(){
 // exposing the access token in a URL (which query-string auth would do).
 async function downloadMarkdownExport(){
   const btn = document.getElementById('downloadMarkdownBtn');
-  if(btn){ btn.disabled = true; btn.textContent = 'Downloading…'; }
+  if(btn){ btn.disabled = true; btn.textContent = 'Downloading…'; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/confirm/${confirmState.sessionId}/export/markdown`);
@@ -7013,6 +7060,6 @@ async function downloadMarkdownExport(){
   } catch (err) {
     showToast('Could not reach the server. Try again.');
   } finally {
-    if(btn){ btn.disabled = false; btn.textContent = 'Download Markdown'; }
+    if(btn){ btn.disabled = false; btn.textContent = 'Download Markdown'; btn.classList.remove('btn-loading'); }
   }
 }
