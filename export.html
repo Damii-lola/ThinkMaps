@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Export — ThinkMaps</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico" />
+<link rel="icon" type="image/png" sizes="16x16" href="image/favicon-16x16.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="image/favicon-32x32.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="image/apple-touch-icon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=2">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+
+<header class="site no-print">
+  <nav class="bar">
+    <a href="dashboard.html" class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </a>
+    <div class="nav-cta">
+      <button class="btn btn-primary" id="printBtn" type="button">Print / Save as PDF</button>
+    </div>
+  </nav>
+</header>
+
+<main class="wrap export-wrap" id="exportRoot">
+  <p id="exportLoading">Loading…</p>
+</main>
+
+<script>
+const API_BASE_URL = 'https://thinkmaps.onrender.com';
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str || '';
+  return div.innerHTML;
+}
+
+let cachedConfig = null;
+async function getSupabaseConfig(){
+  if(cachedConfig) return cachedConfig;
+  const res = await fetch(`${API_BASE_URL}/config`);
+  cachedConfig = await res.json();
+  return cachedConfig;
+}
+
+async function authedFetch(path){
+  const config = await getSupabaseConfig();
+  const sb = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+  const { data } = await sb.auth.getSession();
+  if(!data?.session){
+    window.location.href = 'auth.html';
+    return null;
+  }
+  return fetch(`${API_BASE_URL}${path}`, {
+    headers: { 'Authorization': `Bearer ${data.session.access_token}` }
+  });
+}
+
+async function loadExport(){
+  const root = document.getElementById('exportRoot');
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get('session');
+  const view = params.get('view') || 'full';
+
+  if(!sessionId){
+    root.innerHTML = '<p class="confirm-error">Missing session — this link is incomplete.</p>';
+    return;
+  }
+
+  try {
+    const res = await authedFetch(`/confirm/${sessionId}/export/data`);
+    if(!res) return;
+    if(!res.ok){
+      const body = await res.json().catch(() => ({}));
+      root.innerHTML = `<p class="confirm-error">${escapeHtml(body.error || 'Could not load export data.')}</p>`;
+      return;
+    }
+    const data = await res.json();
+
+    if(view === 'personas'){
+      renderPersonasExport(data);
+    } else {
+      renderFullExport(data);
+    }
+  } catch (err) {
+    root.innerHTML = '<p class="confirm-error">Could not reach the server. Try again.</p>';
+  }
+}
+
+function renderFullExport(data){
+  const root = document.getElementById('exportRoot');
+  const idea = data.idea;
+
+  const competitorsHtml = (idea.competitors || []).map(c => `
+    <div class="export-competitor">
+      <strong>${escapeHtml(c.name)}</strong>
+      ${c.pros?.length ? `<p><em>Works well:</em> ${c.pros.map(escapeHtml).join('; ')}</p>` : ''}
+      ${c.cons?.length ? `<p><em>Falls short:</em> ${c.cons.map(escapeHtml).join('; ')}</p>` : ''}
+    </div>
+  `).join('');
+
+  const strengthHtml = data.strengthScore ? `
+    <section class="export-section">
+      <h2>Idea Strength Score</h2>
+      ${[
+        ['Market Clarity', data.strengthScore.marketClarity],
+        ['Competitive Gap', data.strengthScore.competitiveGap],
+        ['Personal Fit', data.strengthScore.personalFit],
+        ['Technical Feasibility', data.strengthScore.technicalFeasibility]
+      ].map(([label, dim]) => dim ? `<p><strong>${label}: ${dim.score}/10</strong> — ${escapeHtml(dim.explanation)}</p>` : '').join('')}
+    </section>
+  ` : '';
+
+  const buildBriefHtml = data.buildBrief ? `
+    <section class="export-section">
+      <h2>Build Brief</h2>
+      <p>${escapeHtml(data.buildBrief.overview || '')}</p>
+      ${(data.buildBrief.mvpScope || []).map((m, i) => `<p><strong>${i + 1}. ${escapeHtml(m.title)}</strong> — ${escapeHtml(m.description)}</p>`).join('')}
+    </section>
+  ` : '';
+
+  const landingCopyHtml = data.landingCopy ? `
+    <section class="export-section export-landing-mockup">
+      <h2>Landing Page Copy</h2>
+      <div class="export-landing-page">
+        <h1>${escapeHtml(data.landingCopy.heroHeadline)}</h1>
+        <p class="export-landing-sub">${escapeHtml(data.landingCopy.subHeadline)}</p>
+        <ul>${(data.landingCopy.featureBullets || []).map(b => `<li>${escapeHtml(b)}</li>`).join('')}</ul>
+        <div class="export-landing-cta">${escapeHtml(data.landingCopy.ctaOptions?.medium || '')}</div>
+      </div>
+    </section>
+  ` : '';
+
+  const checklistHtml = data.launchChecklist?.weeks?.length ? `
+    <section class="export-section">
+      <h2>Launch Checklist</h2>
+      ${data.launchChecklist.weeks.map(w => `
+        <h3>Week ${w.weekNumber} — ${escapeHtml(w.title)}</h3>
+        <ul>${(w.tasks || []).map(t => `<li>${escapeHtml(t.task)}</li>`).join('')}</ul>
+      `).join('')}
+    </section>
+  ` : '';
+
+  root.innerHTML = `
+    <div class="export-cover">
+      <span class="export-cover-eyebrow">ThinkMaps</span>
+      <h1 class="export-cover-title">${escapeHtml(idea.name)}</h1>
+      <p class="export-cover-oneliner">${escapeHtml(idea.oneLiner)}</p>
+      <p class="export-cover-date">Generated ${new Date(data.generatedAt).toLocaleDateString()}</p>
+    </div>
+
+    <section class="export-section">
+      <h2>Core Problem</h2>
+      <p>${escapeHtml(idea.coreProblem)}</p>
+      <h2>Target Audience</h2>
+      <p>${escapeHtml(idea.targetAudience || '')}</p>
+    </section>
+
+    ${competitorsHtml ? `<section class="export-section"><h2>Competitive Landscape</h2>${competitorsHtml}<p><strong>How this idea wins:</strong> ${escapeHtml(idea.competitiveEdge || '')}</p></section>` : ''}
+
+    ${buildBriefHtml}
+    ${strengthHtml}
+    ${landingCopyHtml}
+    ${checklistHtml}
+
+    <p class="export-footer">Generated with ThinkMaps on ${new Date(data.generatedAt).toLocaleDateString()}</p>
+  `;
+}
+
+function renderPersonasExport(data){
+  const root = document.getElementById('exportRoot');
+  const personas = data.personas?.personas || [];
+
+  if(!personas.length){
+    root.innerHTML = '<p class="confirm-error">No personas have been generated for this idea yet.</p>';
+    return;
+  }
+
+  root.innerHTML = personas.map(p => `
+    <div class="export-persona-page">
+      <div class="export-persona-header">
+        <div class="export-persona-avatar">${escapeHtml((p.name || '?').split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase())}</div>
+        <div>
+          <h1>${escapeHtml(p.name)}, ${escapeHtml(String(p.age || ''))}</h1>
+          <p class="export-persona-occupation">${escapeHtml(p.occupation || '')}</p>
+        </div>
+      </div>
+      <h2>Daily Routine</h2>
+      <p>${escapeHtml(p.dailyRoutine || '')}</p>
+      <h2>Top Frustrations</h2>
+      <ul>${(p.topFrustrations || []).map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>
+      <h2>Already Tried</h2>
+      <p>${escapeHtml(p.alreadyTried || '')}</p>
+      <h2>Would Pay If</h2>
+      <p>${escapeHtml(p.wouldPayIf || '')}</p>
+      <blockquote>&ldquo;${escapeHtml(p.quote || '')}&rdquo;</blockquote>
+    </div>
+  `).join('');
+}
+
+document.getElementById('printBtn')?.addEventListener('click', () => window.print());
+loadExport();
+</script>
+</body>
+</html>

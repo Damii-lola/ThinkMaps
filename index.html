@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>ThinkMaps — Build your perfect app idea blueprint</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico" />
+<link rel="icon" type="image/png" sizes="16x16" href="image/favicon-16x16.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="image/favicon-32x32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="image/favicon-192x192.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="image/apple-touch-icon.png" />
+<link rel="manifest" href="image/site.webmanifest" />
+<meta name="theme-color" content="#D97757" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=6">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+
+<header class="site">
+  <nav class="bar">
+    <div class="logo">
+      <svg class="logo-mark" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+        <circle cx="9" cy="3" r="2" fill="#D97757"/>
+        <circle cx="3" cy="14" r="2" fill="#1F1B16"/>
+        <circle cx="15" cy="14" r="2" fill="#1F1B16"/>
+        <path d="M9 5L3 12M9 5L15 12" stroke="#D97757" stroke-width="1.2"/>
+      </svg>
+      ThinkMaps
+    </div>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#idea">Output</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <div class="nav-cta" id="navCta">
+      <a href="auth.html" class="btn btn-ghost">Sign in</a>
+      <a href="auth.html" class="btn btn-primary">Start a blueprint</a>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap hero-inner">
+      <span class="eyebrow">An ideation canvas for builders</span>
+      <h1>Map your next app, before you build the wrong one.</h1>
+      <p class="sub">ThinkMaps turns app-idea hunting into a visual, branching graph — grounded in real research instead of guesses — so you validate before you write a line of code.</p>
+      <div class="hero-ctas">
+        <a href="auth.html" class="btn btn-primary">Start your blueprint for free</a>
+        <a href="#demo" class="hint-link">See how branching works ↓</a>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <div class="graph-demo" id="demo">
+        <div class="graph-canvas" id="graphCanvas">
+          <svg class="graph-lines" id="graphLines"></svg>
+          <div class="node-row" id="rootRow">
+            <button class="node-pill" data-niche="fitness" aria-pressed="false">Fitness</button>
+            <button class="node-pill" data-niche="finance" aria-pressed="false">Finance &amp; Commerce</button>
+            <button class="node-pill" data-niche="productivity" aria-pressed="false">Productivity</button>
+            <button class="node-pill" data-niche="entertainment" aria-pressed="false">Entertainment</button>
+          </div>
+          <div class="child-row" id="childRow"></div>
+        </div>
+        <div class="frozen-lane" id="frozenLane"></div>
+        <p class="graph-caption" id="graphCaption">Click a niche to branch the graph — pick another, and this one freezes in place, not gone.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section" id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">How a blueprint grows</span>
+        <h2>Four moves, repeated until the graph knows what you're building.</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="8" r="3" fill="#D97757"/><circle cx="6" cy="24" r="2.4" stroke="#1F1B16"/><circle cx="16" cy="24" r="2.4" stroke="#1F1B16"/><circle cx="26" cy="24" r="2.4" stroke="#1F1B16"/><path d="M16 11V20M16 20L6 22M16 20L26 22" stroke="#AEA99D"/></svg>
+          <div class="num">01</div>
+          <h3>Pick a niche</h3>
+          <p class="muted">Start from six AI-suggested niches, or type your own to take the graph somewhere nobody's mapped yet.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="13" width="9" height="6" rx="2" stroke="#1F1B16"/><rect x="19" y="13" width="9" height="6" rx="2" stroke="#1F1B16"/><path d="M13 16H19" stroke="#D97757"/></svg>
+          <div class="num">02</div>
+          <h3>Add context</h3>
+          <p class="muted">Connect to Sub-Niche, Audience, and Monetization groups — each click narrows the graph toward something real.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="8" cy="16" r="3" fill="#D97757"/><circle cx="24" cy="8" r="2.4" stroke="#AEA99D"/><circle cx="24" cy="24" r="2.4" stroke="#1F1B16"/><path d="M11 16L24 8" stroke="#AEA99D" stroke-dasharray="2 2"/><path d="M11 16L24 24" stroke="#D97757"/></svg>
+          <div class="num">03</div>
+          <h3>Branch freely</h3>
+          <p class="muted">Explore a path, then rewind and try another. The old branch grays out and waits — it's never deleted.</p>
+        </div>
+        <div class="step">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 6a7 7 0 0 0-4 12.7V22h8v-3.3A7 7 0 0 0 16 6Z" stroke="#1F1B16"/><path d="M13 26h6" stroke="#1F1B16"/></svg>
+          <div class="num">04</div>
+          <h3>Catch the insight</h3>
+          <p class="muted">As the graph fills in, insight bubbles surface the pain points your path keeps running into.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section features" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Everything past the first sketch</span>
+        <h2>The graph is the start. Validation and shipping are built in.</h2>
+      </div>
+      <div class="feature-grid">
+        <div class="feature">
+          <span class="eyebrow">Personal context</span>
+          <h3>Founder Profile</h3>
+          <p>Your skills, stack, time, and risk tolerance sit in a floating panel and quietly steer every suggestion toward something you can actually build.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Memory</span>
+          <h3>Version history &amp; snapshots</h3>
+          <p>Name a snapshot any time. Roll back, diff two versions side by side, and read an AI summary of what changed and why it matters.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Together</span>
+          <h3>Real-time collaboration</h3>
+          <p>Invite a co-founder into the same graph. Everyone edits, comments, and branches live, with clear marks for who touched what.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Stress test</span>
+          <h3>Red Team mode</h3>
+          <p>Hand any idea a brutally honest review — market risk, technical traps, validation gaps — before you fall in love with it.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Sources</span>
+          <h3>Research transparency</h3>
+          <p>Every claim traces back to a Reddit thread, an App Store review, or a forum post. Raw quotes and confidence scores, always visible.</p>
+        </div>
+        <div class="feature">
+          <span class="eyebrow">Ship it</span>
+          <h3>Export superpowers</h3>
+          <p>One click out to Notion, Obsidian, Markdown, a polished PDF, or a prompt that's ready to paste into Cursor or Lovable.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- IDEA OUTPUT -->
+  <section class="section" id="idea">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">From graph to idea</span>
+        <h2>What comes out the other end of a finished blueprint.</h2>
+      </div>
+      <div class="idea-wrap">
+        <div class="idea-card">
+          <span class="idea-tag">Sample idea card — illustrative</span>
+          <h3>Shiftwell</h3>
+          <p class="idea-oneliner">Recovery and sleep tracking built around rotating shifts, not a fixed 9-to-5.</p>
+
+          <div class="idea-block">
+            <div class="lbl">Core problem</div>
+            <p class="muted">Existing fitness apps assume a regular daytime schedule. Shift workers fall out of every streak, every reminder, every "morning routine" — the app is fighting their clock instead of reading it.</p>
+          </div>
+          <div class="idea-block">
+            <div class="lbl">10x upgrade</div>
+            <p class="muted">A schedule-aware engine that re-times reminders, fasting windows, and sleep targets around the next shift, not the calendar date.</p>
+          </div>
+          <div class="idea-block">
+            <div class="lbl">Monetization</div>
+            <p class="muted">Free tracking, paid schedule-sync with wearables and employer roster imports — tested at $6.99 and $9.99.</p>
+          </div>
+          <p class="idea-note">Scoped MVP, validation kit, and build prompts included with every generated idea.</p>
+        </div>
+
+        <div class="radar-panel">
+          <h4>Scored against the 10-question framework</h4>
+          <svg viewBox="0 0 200 200" aria-hidden="true">
+            <polygon points="100,30 160,65 160,135 100,170 39,135 39,65" fill="none" stroke="#DAD5C7"/>
+            <polygon points="100,53 140,77 140,123 100,147 60,123 60,77" fill="none" stroke="#DAD5C7"/>
+            <polygon points="100,77 120,88 120,112 100,123 80,112 80,88" fill="none" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="30" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="65" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="160" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="100" y2="170" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="135" stroke="#DAD5C7"/>
+            <line x1="100" y1="100" x2="39" y2="65" stroke="#DAD5C7"/>
+            <polygon points="100,37 142,76 149,128 100,142 52,128 58,76" fill="#D97757" fill-opacity="0.22" stroke="#D97757" stroke-width="2"/>
+          </svg>
+          <div class="radar-legend">
+            <span>Problem severity <b>9</b></span>
+            <span>Differentiation <b>7</b></span>
+            <span>Founder fit <b>8</b></span>
+            <span>Monetization <b>6</b></span>
+            <span>Market timing <b>8</b></span>
+            <span>Feasibility <b>7</b></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section class="section" id="pricing">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Pricing</span>
+        <h2>Map for free. Pay when you need the whole toolkit.</h2>
+        <p class="muted pricing-subhead">Pro is a one-time payment for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically.</p>
+      </div>
+      <div class="pricing-grid" id="pricingGrid">
+        <div class="plan" id="freePlanCard">
+          <span class="ptag">Free</span>
+          <h3>One blueprint, 30 minutes</h3>
+          <div class="price">$0</div>
+          <ul>
+            <li>One full Blueprint Graph</li>
+            <li>30 minutes to edit, then read-only</li>
+            <li>Deleted automatically after 3 days</li>
+            <li>Full canvas exploration &amp; idea hardening</li>
+            <li>Shareable one-pager &amp; print/PDF</li>
+          </ul>
+          <a href="auth.html" class="btn btn-ghost" data-track="pricing-start-free">Start free</a>
+        </div>
+        <div class="plan pro" id="proPlanCard">
+          <span class="ptag">Pro</span>
+          <h3>For builders who iterate</h3>
+          <div class="price">$15<sup>/month, one-time</sup></div>
+          <ul>
+            <li>Unlimited blueprints, no edit lock, never deleted</li>
+            <li>Combine multiple selections into one fused idea</li>
+            <li>Market Intel &amp; Risk Analysis</li>
+            <li>AI-found fixes for surfaced risks</li>
+            <li>Detailed Build Brief for your MVP</li>
+            <li>Suggest Changes — revise with your own feedback</li>
+          </ul>
+          <button type="button" class="hint-link pro-more-btn" id="proPlanMoreBtn">See everything Pro includes →</button>
+          <a href="auth.html" class="btn btn-primary" id="proPlanGoProBtn" data-track="pricing-go-pro">Go Pro</a>
+        </div>
+      </div>
+      <p class="muted pricing-expiry-note">Pro lasts exactly one month from the day you pay, then your account automatically returns to the Free plan — nothing to cancel, nothing charged without you doing it yourself.</p>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta-band">
+    <div class="wrap">
+      <span class="eyebrow">Ready when you are</span>
+      <h2>Stop scrolling app-idea threads. Start mapping one.</h2>
+      <a href="auth.html" class="btn btn-primary">Start your blueprint for free</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <div class="logo">ThinkMaps</div>
+    <div class="foot-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <span class="api-status" id="apiStatus"><span class="dot"></span><span class="label">Checking backend…</span></span>
+  </div>
+  <div class="wrap foot-fine">© 2026 ThinkMaps. Built for builders.</div>
+</footer>
+
+<script src="script.js?v=6"></script>
+<script src="feedback.js?v=4"></script>
+</body>
+</html>
