@@ -4330,12 +4330,15 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     // named so it's obviously distinguishable from ones the person saved
     // deliberately.
     const currentState = await fetchFullBlueprintGraph(blueprint.id);
-    await supabase.from('blueprint_snapshots').insert({
+    const { error: safetySnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
       name: `Before restoring "${targetSnapshot.name}"`,
       snapshot_data: currentState
     });
+    if(safetySnapshotError){
+      console.error('[ThinkMaps] Restore: pre-restore safety snapshot FAILED:', safetySnapshotError.message);
+    }
 
     // Wipe the current live graph — groups cascade-delete their own
     // group_versions and options (same cascade the existing DELETE
@@ -4353,11 +4356,29 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     console.log(`[ThinkMaps] Restoring snapshot "${targetSnapshot.name}" — ${snap.groups?.length || 0} group(s), ${snap.groupVersions?.length || 0} version(s), ${snap.options?.length || 0} option(s).`);
 
     if(snap.groups?.length){
-      const { error: groupsInsertError } = await supabase.from('groups').insert(snap.groups);
-      // None of these 3 inserts were ever checked before — if one
+      // groups.spawned_from_option_id is a foreign key into options — but
+      // options don't exist yet at this point in the restore (they're
+      // inserted further below, after group_versions). Inserting a
+      // group with its REAL spawned_from_option_id here would violate
+      // that FK immediately, since it points at an option row that
+      // doesn't exist until later in this same restore — a genuine
+      // circular dependency (groups -> options -> group_versions ->
+      // groups) that a single insert-everything-at-once pass can never
+      // satisfy in any order. This is the actual cause of every restore
+      // failing with "violates foreign key constraint
+      // groups_spawned_from_option_id_fkey" — confirmed directly from
+      // the real Postgres error in Render's logs, not a guess.
+      //
+      // Fix: insert every group with that one field stripped to null
+      // first, then restore the real values in a final update pass
+      // once group_versions AND options both have their rows back —
+      // breaking the cycle instead of trying to satisfy it in one shot.
+      const groupsWithoutSpawnRef = snap.groups.map(g => ({ ...g, spawned_from_option_id: null }));
+      const { error: groupsInsertError } = await supabase.from('groups').insert(groupsWithoutSpawnRef);
+      // None of these inserts were checked before this fix — if one
       // silently failed, the delete above had already wiped the live
       // blueprint, leaving it genuinely empty with zero trace of why.
-      // That's exactly what "restore takes me to a blank screen" looks
+      // That's exactly what "restore takes me to a blank screen" looked
       // like from the outside.
       if(groupsInsertError) throw new Error(`Restoring groups failed: ${groupsInsertError.message}`);
     }
@@ -4368,6 +4389,20 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     if(snap.options?.length){
       const { error: optionsInsertError } = await supabase.from('options').insert(snap.options);
       if(optionsInsertError) throw new Error(`Restoring options failed: ${optionsInsertError.message}`);
+    }
+
+    // Second half of the fix above — every option row exists again now,
+    // so each group's real spawned_from_option_id can finally be
+    // restored without violating the FK. Not a hot path (restore is a
+    // rare, deliberate action), so N individual updates here is fine —
+    // correctness matters far more than speed for this one.
+    const groupsNeedingSpawnRef = (snap.groups || []).filter(g => g.spawned_from_option_id);
+    for(const g of groupsNeedingSpawnRef){
+      const { error: spawnRefError } = await supabase
+        .from('groups')
+        .update({ spawned_from_option_id: g.spawned_from_option_id })
+        .eq('id', g.id);
+      if(spawnRefError) throw new Error(`Restoring group relationships failed: ${spawnRefError.message}`);
     }
 
     console.log(`[ThinkMaps] Restore of "${targetSnapshot.name}" completed successfully.`);
