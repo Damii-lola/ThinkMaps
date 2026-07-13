@@ -3957,7 +3957,7 @@ function setCanvasBusy(isBusy, message){
   const indicator = document.getElementById('canvasBusyIndicator');
   if(viewport) viewport.classList.toggle('busy', isBusy);
   if(indicator){
-    indicator.style.display = isBusy ? 'block' : 'none';
+    indicator.style.display = isBusy ? 'flex' : 'none';
     if(isBusy) indicator.textContent = message || 'Thinking…';
   }
 }
