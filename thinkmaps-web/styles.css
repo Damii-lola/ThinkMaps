@@ -1864,6 +1864,20 @@ body.canvas-page .path-progress-bar{ flex-shrink:0; }
 
 /* ---------- Canvas reset button ---------- */
 .reset-blueprint-btn{ font-size:16px; }
+.reset-blueprint-btn.reset-btn-targeted{
+  background:var(--accent); color:#FAF6F1; border-color:var(--accent);
+}
+
+/* The group currently selected as the Reset target — same accent
+   treatment already used elsewhere on the canvas for "this is the thing
+   an action will apply to" (matches the tour spotlight's own color),
+   so it reads consistently rather than introducing a new visual language. */
+.canvas-group.reset-target-selected{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+  box-shadow:0 0 0 5px rgba(217,119,87,0.15);
+}
+.canvas-group.reset-target-selected .canvas-group-title{ cursor:pointer; }
 
 /* ---------- Paste-idea FAB (stacked above the feedback FAB) ---------- */
 .paste-idea-fab{
