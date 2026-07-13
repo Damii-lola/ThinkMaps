@@ -10,6 +10,107 @@ const API_BASE_URL = 'https://thinkmaps.onrender.com';
 // link is the only thing the frontend needs to know about payment at all.
 const PRO_PAYMENT_URL = 'https://selar.com/thinkmaps';
 
+// Real Traffic Source capture — reads UTM params if present, falls back
+// to the referrer domain, falls back to 'direct'. Stored in localStorage
+// (not sessionStorage) so it survives the actual multi-page navigation
+// from landing on index.html through to completing signup on auth.html,
+// which are two separate page loads in this app, not a single-page flow.
+function captureSignupSource(){
+  try {
+    if(localStorage.getItem('thinkmaps_signup_source')) return; // already captured this visit — don't overwrite with a later page's blank referrer
+    const params = new URLSearchParams(window.location.search);
+    const utmSource = params.get('utm_source');
+    let source = 'direct';
+    if(utmSource){
+      source = utmSource;
+    } else if(document.referrer){
+      try { source = new URL(document.referrer).hostname; } catch (e) { /* malformed referrer — stays 'direct' */ }
+    }
+    localStorage.setItem('thinkmaps_signup_source', source);
+  } catch (e) { /* localStorage unavailable (private browsing, etc.) — source just won't be captured this time */ }
+}
+
+// =====================================================================
+// REAL CORE WEB VITALS — using the browser's native PerformanceObserver
+// API directly rather than pulling in the web-vitals library from a
+// CDN. This measures the same underlying browser signals that library
+// wraps (LCP, CLS, TTFB), reported to the new /track/web-vitals
+// endpoint. Wrapped in feature-detection and try/catch throughout —
+// PerformanceObserver support varies slightly across browsers, and a
+// tracking failure should NEVER be able to break the actual page for
+// a real visitor.
+// =====================================================================
+function initWebVitalsTracking(){
+  try {
+    const page = window.location.pathname;
+    const reportVital = (metricName, value) => {
+      fetch(`${API_BASE_URL}/track/web-vitals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metricName, value: Math.round(value * 100) / 100, page })
+      }).catch(() => {}); // never let a tracking failure surface to a real visitor
+    };
+
+    // TTFB — Time to First Byte, from the Navigation Timing API, which
+    // has near-universal support and needs no observer at all.
+    const [navEntry] = performance.getEntriesByType('navigation');
+    if(navEntry) reportVital('TTFB', navEntry.responseStart);
+
+    // LCP — Largest Contentful Paint. Reported once, on the LAST entry
+    // seen before the page is hidden/unloaded, since LCP can still
+    // change as more content loads in.
+    if('PerformanceObserver' in window){
+      let latestLCP = null;
+      const lcpObserver = new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        latestLCP = entries[entries.length - 1];
+      });
+      lcpObserver.observe({ type: 'largest-contentful-paint', buffered: true });
+
+      // CLS — Cumulative Layout Shift, summed across the page's whole
+      // lifetime, excluding shifts the browser itself flags as caused
+      // by recent user input (a real shift you caused by scrolling
+      // shouldn't count against layout stability).
+      let clsValue = 0;
+      const clsObserver = new PerformanceObserver((list) => {
+        for(const entry of list.getEntries()){
+          if(!entry.hadRecentInput) clsValue += entry.value;
+        }
+      });
+      clsObserver.observe({ type: 'layout-shift', buffered: true });
+
+      const reportFinal = () => {
+        if(latestLCP) reportVital('LCP', latestLCP.startTime);
+        reportVital('CLS', clsValue);
+      };
+      // visibilitychange (tab backgrounded) is the standard, reliable
+      // point to report — 'beforeunload' fires inconsistently on
+      // mobile browsers and shouldn't be relied on alone.
+      document.addEventListener('visibilitychange', () => {
+        if(document.visibilityState === 'hidden') reportFinal();
+      }, { once: true });
+    }
+  } catch (err) {
+    // Vitals tracking failing should never be visible to a real visitor.
+  }
+}
+
+// Lightweight click tracking — any element with data-track="some-name"
+// gets a real click logged. NOT a true x/y coordinate heatmap (that
+// needs a dedicated recording library like Hotjar), but a genuine,
+// useful "what's actually getting clicked" signal on its own.
+function initClickTracking(){
+  document.addEventListener('click', (e) => {
+    const tracked = e.target.closest('[data-track]');
+    if(!tracked) return;
+    fetch(`${API_BASE_URL}/track/click`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ elementId: tracked.dataset.track, page: window.location.pathname })
+    }).catch(() => {});
+  });
+}
+
 // Supabase client setup — the URL and anon key are NOT hardcoded here.
 // They're fetched from server.js's /config route, which reads them from
 // Render's env vars. Both values are public-safe (RLS does the real protecting),
@@ -45,6 +146,9 @@ async function getSupabaseClient(){
 
 document.addEventListener('DOMContentLoaded', () => {
   checkBackendStatus();
+  captureSignupSource();
+  initWebVitalsTracking();
+  initClickTracking();
   initGraphDemo();
   initAuthPage();
   initDashboardPage();
@@ -458,12 +562,13 @@ async function handleOtpSubmit(e){
   }
 
   const endpoint = otpState.mode === 'signup' ? '/auth/signup-verify' : '/auth/login-verify';
+  const capturedSource = otpState.mode === 'signup' ? (localStorage.getItem('thinkmaps_signup_source') || 'direct') : undefined;
 
   try {
     const res = await fetch(`${API_BASE_URL}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: otpState.email, code })
+      body: JSON.stringify({ email: otpState.email, code, ...(capturedSource ? { source: capturedSource } : {}) })
     });
     const body = await res.json();
 
