@@ -4545,10 +4545,21 @@ function startLineDrag(e, optionId, groupId, optionIndex){
   const group = canvasState.groups.find(g => g.id === groupId);
   if(!group) return;
 
-  const groupOptions = getGroupOptionsArray(groupId);
-  const startX = (group.position_x || 0) + CARD_WIDTH;
-  const startY = computeRowCenterY(group, groupOptions, optionIndex);
   const pt = getEventPoint(e);
+
+  // The line now genuinely starts wherever the drag was actually
+  // started — this used to be hardcoded to the dot's fixed geometric
+  // position (group position + row math), which only became a visible
+  // problem once the trigger area was expanded to the whole option row:
+  // grabbing anywhere except the exact dot made the line appear to jump
+  // to a completely different spot than the actual cursor or finger.
+  // Same clientX/clientY -> world-coordinate conversion the moving end
+  // already uses in updateLineDragPreview, so both ends of the line are
+  // computed the same way.
+  const viewport = document.getElementById('canvasViewport');
+  const rect = viewport ? viewport.getBoundingClientRect() : { left: 0, top: 0 };
+  const startX = (pt.clientX - rect.left - canvasState.pan.x) / canvasState.zoom;
+  const startY = (pt.clientY - rect.top - canvasState.pan.y) / canvasState.zoom;
 
   lineDragState = {
     optionId,
