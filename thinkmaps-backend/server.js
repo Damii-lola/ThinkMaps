@@ -183,6 +183,23 @@ const authLimiter = rateLimit({
 });
 app.use('/auth/', authLimiter);
 
+// Pure IP-based, NOT keyed by identifier — this is deliberately
+// different from authLimiter above. authLimiter's IP+email keying
+// means someone rotating a different disposable email on every attempt
+// gets a FRESH counter every single time, effectively unlimited. This
+// caps total signup attempts from one IP regardless of which email is
+// used each time — the actual mechanism that would otherwise defeat
+// the free-tier per-email abuse prevention: just keep making new
+// accounts with new throwaway emails.
+const signupIpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many signup attempts from this network. Please try again later.' }
+});
+app.use('/auth/signup-start', signupIpLimiter);
+
 // Every canvas activation and every toolkit feature (build brief,
 // deeper analysis, pivots, personas, strength score, red team, spy
 // mode, launch checklist, landing copy) calls Mistral — real API cost
@@ -463,6 +480,31 @@ function escapeHtmlServer(str){
 //     unlimited guesses before this).
 // ============================================================
 const ENCRYPTION_KEY_RAW = process.env.ENCRYPTION_KEY; // 32-byte key, hex-encoded (64 hex chars)
+// Gmail specifically ignores dots in the local part of an address, and
+// treats everything after a '+' as an alias suffix — both route to the
+// exact same inbox. Without normalizing this, someone could bypass the
+// free-tier abuse check below by signing up as test@gmail.com, then
+// t.est@gmail.com, then test+2@gmail.com, all landing in the same real
+// inbox. Deliberately scoped to gmail.com/googlemail.com only — other
+// providers don't reliably share this behavior, and blindly stripping
+// dots from every address would incorrectly conflate genuinely
+// different addresses elsewhere.
+function normalizeEmailForAbuseCheck(rawEmail){
+  const email = (rawEmail || '').toLowerCase().trim();
+  const atIndex = email.indexOf('@');
+  if(atIndex === -1) return email;
+  const local = email.slice(0, atIndex);
+  const domain = email.slice(atIndex + 1);
+
+  if(domain === 'gmail.com' || domain === 'googlemail.com'){
+    const withoutAlias = local.split('+')[0];
+    const withoutDots = withoutAlias.replace(/\./g, '');
+    return `${withoutDots}@gmail.com`;
+  }
+
+  return email;
+}
+
 const OTP_PENDING_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const OTP_MAX_ATTEMPTS = 5;
 // New accounts get this long to sign back in without re-doing OTP —
@@ -998,7 +1040,7 @@ app.get('/admin/dashboard/:secret', async (req, res) => {
     errorRequests.forEach(r => { errorPathCounts[`${r.status} ${r.path}`] = (errorPathCounts[`${r.status} ${r.path}`] || 0) + 1; });
     const commonErrorPages = Object.entries(errorPathCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([key, count]) => ({ key, count }));
 
-    const PRO_PRICE = 15; // matches the actual current one-time-per-month price
+    const PRO_PRICE = 7.5; // matches the actual current one-time-per-month price
     const mrr = (proUsers || 0) * PRO_PRICE;
     const arpu = totalUsers ? Math.round((mrr / totalUsers) * 100) / 100 : 0;
     const conversionRate = totalUsers ? Math.round(((proUsers || 0) / totalUsers) * 1000) / 10 : 0;
@@ -1684,10 +1726,26 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       return { ...bp, isLocked, lockReason: isLocked ? 'free_tier_expired' : null, minutesRemaining, daysUntilDeletion };
     });
 
+    let canCreateNew = effectivePro || blueprints.length === 0;
+    if(canCreateNew && !effectivePro && blueprints.length === 0){
+      // Matches the real enforcement in POST /blueprints — a UI hint
+      // that says "you can create one" when the actual attempt would
+      // fail is worse than just being accurate here.
+      const email = normalizeEmailForAbuseCheck(req.user.email);
+      if(email){
+        const { data: alreadyUsed } = await supabase
+          .from('used_free_tier_emails')
+          .select('email')
+          .eq('email', email)
+          .maybeSingle();
+        if(alreadyUsed) canCreateNew = false;
+      }
+    }
+
     res.status(200).json({
       profile: { ...profile, pro_status: effectivePro, plan_tier: effectivePro ? (profile.plan_tier || 'pro') : 'free' },
       blueprints: enrichedBlueprints,
-      canCreateNew: effectivePro || blueprints.length === 0,
+      canCreateNew,
       showDashboardTour: !profile.has_seen_dashboard_tour
     });
   } catch (err) {
@@ -2295,7 +2353,7 @@ async function applyProUpgrade(profile, matchLogSuffix, tier = 'pro'){
   // whole reason Total Revenue can be an honest, non-MRR number.
   // Fire-and-forget, same reasoning as the other event loggers: this
   // should never be able to block or fail the actual upgrade itself.
-  const PRICE_BY_TIER = { pro: 15, ultra: 25 };
+  const PRICE_BY_TIER = { pro: 7.5, ultra: 25 };
   supabase.from('payment_events').insert({
     user_id: profile.id,
     amount_usd: PRICE_BY_TIER[tier] || PRICE_BY_TIER.pro,
@@ -2576,8 +2634,15 @@ app.post('/feedback', requireAuth, async (req, res) => {
 // Creates a new blueprint. Free tier gets exactly one, ever — this is the
 // one place that rule is actually enforced, server-side, not just hidden in the UI.
 app.post('/blueprints', requireAuth, async (req, res) => {
+  let claimedEmailThisRequest = false;
+  let email = null;
+
   try {
     const userId = req.user.id;
+    // Gmail-aware normalization — dots and +aliases in a gmail.com
+    // address all route to the same real inbox, so this closes that
+    // specific bypass on top of the plain case-insensitive matching.
+    email = normalizeEmailForAbuseCheck(req.user.email);
 
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
@@ -2600,6 +2665,32 @@ app.post('/blueprints', requireAuth, async (req, res) => {
           error: 'Free tier allows one blueprint. Upgrade to Pro for unlimited blueprints.'
         });
       }
+
+      // The actual fix — this is what a live count on the CURRENT
+      // account can never catch: an email that already used its one
+      // free blueprint on a NOW-DELETED account. This check has
+      // nothing to do with what's live right now; it's asking "has
+      // this specific email ever done this before," full stop.
+      //
+      // Claimed via a real INSERT, not upsert — relying on the primary
+      // key constraint to reject a genuine duplicate atomically. A
+      // plain SELECT-then-decide check has a real (if narrow) race: two
+      // simultaneous requests from the same account could both read
+      // "not used yet" before either finishes writing. Claiming first,
+      // atomically, means the second request in that race hits a real
+      // database conflict instead of a stale read.
+      if (email) {
+        const { error: claimError } = await supabase.from('used_free_tier_emails').insert({ email });
+        if (claimError) {
+          if (claimError.code === '23505') { // unique_violation — genuinely already claimed
+            return res.status(403).json({
+              error: 'This email has already used its free blueprint. Upgrade to Pro for unlimited blueprints, or use a different email to try the free tier.'
+            });
+          }
+          throw claimError;
+        }
+        claimedEmailThisRequest = true;
+      }
     }
 
     const title = ((req.body && req.body.title) || 'Untitled Blueprint').toString().trim().slice(0, 80) || 'Untitled Blueprint';
@@ -2614,6 +2705,13 @@ app.post('/blueprints', requireAuth, async (req, res) => {
 
     res.status(201).json({ blueprint: newBlueprint });
   } catch (err) {
+    // The claim above already committed even if blueprint creation
+    // itself then failed for some unrelated reason — roll it back so a
+    // real failure doesn't permanently cost someone their one
+    // legitimate free blueprint.
+    if (claimedEmailThisRequest && email) {
+      supabase.from('used_free_tier_emails').delete().eq('email', email).then(() => {}).catch(() => {});
+    }
     res.status(500).json({ error: 'Could not create blueprint.', detail: err.message });
   }
 });
@@ -5542,6 +5640,9 @@ app.post('/groups/:id/custom-option', requireAuth, async (req, res) => {
 
     const { label } = req.body;
     if(!label || !label.trim()) return res.status(400).json({ error: 'Label is required.' });
+    if(label.trim().length > 200){
+      return res.status(400).json({ error: 'Keep it under 200 characters — a canvas option is meant to be short, not a full description.' });
+    }
 
     const { data: group } = await supabase.from('groups').select('current_version_number').eq('id', req.params.id).single();
 
