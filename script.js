@@ -475,7 +475,7 @@ async function handleSignInStart(e){
     }
 
     if(body.graceLogin){
-      // Account created less than 10 minutes ago — server already
+      // Account created less than 5 minutes ago — server already
       // decided OTP isn't needed this once, hands back a real session
       // directly instead of the "sent" acknowledgment that would
       // normally trigger the OTP screen.
@@ -1039,6 +1039,38 @@ async function initDashboardPage(){
   renderPasteIdeaButton();
   await loadDashboard();
   await maybeHandlePaymentRedirect();
+
+  if(dashboardState.showDashboardTour){
+    startTour('dashboard', getDashboardTourSteps(), { mandatory: true });
+    markServerTourSeen('dashboard');
+  }
+}
+
+// Shown once, ever, the first time someone opens their dashboard — the
+// three real starting points, since none of them are self-explanatory
+// from the icons alone.
+function getDashboardTourSteps(){
+  return [
+    {
+      title: 'Welcome to ThinkMaps',
+      text: "Quick look at your three starting points — pick whichever matches where you're actually at."
+    },
+    {
+      selector: '#newBlueprintBtn',
+      title: 'Start a blueprint',
+      text: "The full canvas experience — explore a niche, make real decisions one at a time, and watch an idea take shape from nothing. Start here if you don't have a specific idea yet."
+    },
+    {
+      selector: '#pasteIdeaFab',
+      title: 'Already have an idea?',
+      text: "Paste it in directly instead of building it through the canvas — ThinkMaps structures it and runs it through the same toolkit either way."
+    },
+    {
+      selector: '#feedbackFab',
+      title: 'Something feel off?',
+      text: 'This goes straight to the person building ThinkMaps, not a support queue. Bug, idea, complaint — whatever it is.'
+    }
+  ];
 }
 
 // Selar's post-purchase redirect lands here with ?email=...&fullname=...
@@ -1101,7 +1133,8 @@ async function loadDashboard(){
       throw new Error('Could not load your dashboard.');
     }
 
-    const { profile, blueprints, canCreateNew } = await res.json();
+    const { profile, blueprints, canCreateNew, showDashboardTour } = await res.json();
+    dashboardState.showDashboardTour = !!showDashboardTour;
 
     if(greetingEl){
       greetingEl.textContent = `Welcome back, ${profile.username || profile.email}`;
@@ -2596,15 +2629,28 @@ async function initAppPage(){
   setupBlueprintTitleEditing();
   await loadGraph();
   renderTourReopenButton();
-  // Tracked per BLUEPRINT, not per account — "seen once, ever, anywhere"
-  // was the actual bug: once dismissed on any one blueprint, a brand
-  // new blueprint would never trigger it again, since the account-wide
-  // flag already said "seen." A new blueprint genuinely being opened
-  // for the first time is what should trigger this, every time.
-  const canvasTourKey = `canvas_${canvasState.blueprintId}`;
-  const alreadySeen = hasSeenTour(canvasTourKey);
-  console.log(`[ThinkMaps] Canvas tour check — blueprintId: ${canvasState.blueprintId}, key: ${canvasTourKey}, alreadySeen: ${alreadySeen}`);
-  if(!alreadySeen) startTour(canvasTourKey, getCanvasTourSteps(), { mandatory: true });
+
+  // Exactly two tours, ever, account-wide — not per blueprint, not
+  // per browser. If somehow both would apply on the same load (an
+  // existing user upgrades to Pro and immediately opens a brand new
+  // blueprint for the first time), the Pro-specific tour takes
+  // priority — it's the more useful one in that exact moment, and the
+  // basics tour can show on whatever canvas they open next instead.
+  if(canvasState.showFirstProBlueprintTour){
+    startTour('first_pro_blueprint', getProTourSteps(), { mandatory: true });
+    markServerTourSeen('first_pro_blueprint');
+  } else if(canvasState.showFirstBlueprintTour){
+    startTour('first_blueprint', getCanvasTourSteps(), { mandatory: true });
+    markServerTourSeen('first_blueprint');
+  }
+}
+
+// Distinct name from the existing local-storage markTourSeen (used
+// internally by startTour for every OTHER tour in the app) — this one
+// specifically persists server-side, account-wide, for the two tours
+// that need to survive a device switch and never trigger again anywhere.
+function markServerTourSeen(tourType){
+  authedFetch('/profile/mark-tour-seen', { method: 'POST', body: JSON.stringify({ tourType }) }).catch(() => {});
 }
 
 // Defined as functions (not a plain array) so mobile-specific wording —
@@ -2614,14 +2660,14 @@ function getCanvasTourSteps(){
   return [
     {
       title: 'Welcome to your Blueprint Graph',
-      text: "This is your canvas — a quick tour of the basics. Watch the little cursor — it'll show you exactly what to do."
+      text: "This is your canvas, where an idea takes shape one real decision at a time. Quick tour of the basics — watch the little cursor, it'll show you exactly what to do."
     },
     {
       selector: '#canvasViewport',
       title: 'Pan around',
       text: isCoarsePointer()
-        ? 'Drag anywhere on the canvas with your finger to pan around.'
-        : 'Click and drag anywhere on the canvas (not on a card) to pan around.',
+        ? 'Drag anywhere on the empty canvas with your finger to pan around.'
+        : 'Click and drag anywhere on the empty canvas (not on a card) to pan around.',
       demo: 'pan'
     },
     {
@@ -2635,36 +2681,56 @@ function getCanvasTourSteps(){
     {
       selector: '.canvas-option',
       title: 'Pick a direction',
-      text: 'Click any option to activate it — this spawns new groups branching off your choice, building your path deeper.',
+      text: 'Click any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.',
       demo: 'activate'
     },
     {
       selector: '.canvas-option',
       title: 'Or drag to connect',
-      text: "You can also click and drag from an option straight onto another option in a group it already spawned — dropping it there activates that one instead of clicking it directly.",
+      text: "You can also click and drag from an option straight onto another option in a group it already spawned — dropping it there activates that one instead of clicking it directly. Useful once your canvas has some depth to it.",
       demo: 'dragActivate'
     },
     {
       selector: '.canvas-group-footer',
-      title: 'Not quite right?',
-      text: "Retry regenerates this group's options, Random picks one for you, +Custom lets you type your own idea instead of picking one.",
+      title: "Not quite right? You've got options",
+      text: "Retry regenerates this whole group with fresh options. Random picks one for you if you're stuck. +Custom lets you type your own idea instead of picking one — your own instinct always counts too.",
       demo: 'groupFooter'
     },
-    // Function, not a plain object — evaluated fresh every time the
-    // tour starts (same pattern the mobile-wording steps already use),
-    // so this reflects the account's CURRENT Pro status rather than
-    // whatever it was the first time the tour ever ran. Returns null
-    // for free accounts, which startTour's existing
-    // .filter(Boolean) already drops silently — no separate gating
-    // logic needed beyond that.
-    () => canvasState.isPro ? {
+    {
+      title: "When you're ready",
+      text: "Once your path goes deep enough, a \"Generate Ideas\" card appears — that's where this turns into a real, hardened idea: a name, the actual pitch, competitive research, and a full toolkit to pressure-test it before you build anything."
+    }
+  ];
+}
+
+// Shown once, the first blueprint canvas opened after becoming Pro —
+// the features that only matter once you're actually using them, not
+// crammed into the basics tour behind a runtime Pro check.
+function getProTourSteps(){
+  return [
+    {
+      title: "You're Pro now — a few things just got a lot more powerful",
+      text: "Same canvas, same basics — this is just the extra layer Pro unlocks. Quick tour."
+    },
+    {
       selector: '.canvas-option',
-      title: 'Select multiple at once (Pro)',
+      title: 'Combine multiple options at once',
       text: isCoarsePointer()
-        ? 'Long-press an option, then tap others to select several — combine them into one fused idea.'
-        : 'Hold Ctrl and click multiple options to select several — combine them into one fused idea.',
+        ? 'Long-press an option, then tap others to select several — combine them into one fused idea instead of picking just one direction.'
+        : 'Hold Ctrl and click multiple options to select several — combine them into one fused idea instead of picking just one direction.',
       demo: 'combine'
-    } : null
+    },
+    {
+      selector: '.reset-blueprint-btn',
+      title: 'Reset — all the way, or just part way',
+      text: isCoarsePointer()
+        ? 'Long-press any group first to target it specifically — Reset then clears everything past THAT point, keeping everything before it. Skip that and Reset goes all the way back to the beginning instead.'
+        : 'Ctrl+click any group first to target it specifically — Reset then clears everything past THAT point, keeping everything before it. Skip that and Reset goes all the way back to the beginning instead.'
+    },
+    {
+      title: 'Snapshots — nothing is ever really lost',
+      text: 'Save a named checkpoint anytime from the canvas controls, and restore it later whenever you want. Resets and restores also save an automatic checkpoint of their own first, so even those are never a one-way door.'
+    }
   ];
 }
 
@@ -2682,7 +2748,13 @@ function renderTourReopenButton(){
   btn.className = 'zoom-btn';
   btn.title = 'Replay the tour';
   btn.innerHTML = '?';
-  btn.addEventListener('click', () => startTour(`canvas_${canvasState.blueprintId}`, getCanvasTourSteps()));
+  btn.addEventListener('click', () => {
+    if(canvasState.isPro){
+      startTour('first_pro_blueprint', getProTourSteps());
+    } else {
+      startTour('first_blueprint', getCanvasTourSteps());
+    }
+  });
   controls.appendChild(btn);
 }
 
@@ -2703,6 +2775,8 @@ async function loadGraph(){
     canvasState.groups = data.groups;
     canvasState.groupVersions = data.groupVersions;
     canvasState.options = data.options;
+    canvasState.showFirstBlueprintTour = !!data.showFirstBlueprintTour;
+    canvasState.showFirstProBlueprintTour = !!data.showFirstProBlueprintTour;
 
     renderSnapshotsButton();
     renderResetBlueprintButton();
@@ -2936,10 +3010,14 @@ function renderSnapshotsList(snapshots){
     return;
   }
 
-  listEl.innerHTML = snapshots.map(s => `
+  const isAuto = s => s.name.startsWith('Auto-save:');
+  const manual = snapshots.filter(s => !isAuto(s));
+  const auto = snapshots.filter(isAuto);
+
+  const rowHtml = s => `
     <div class="snapshot-row" data-snapshot-id="${s.id}">
       <div class="snapshot-row-info">
-        <span class="snapshot-row-name">${escapeHtml(s.name)}</span>
+        <span class="snapshot-row-name">${escapeHtml(isAuto(s) ? s.name.replace('Auto-save: ', '') : s.name)}</span>
         <span class="snapshot-row-meta">${new Date(s.createdAt).toLocaleString()} · ${s.groupCount} group${s.groupCount === 1 ? '' : 's'}</span>
       </div>
       <div class="snapshot-row-actions">
@@ -2947,7 +3025,28 @@ function renderSnapshotsList(snapshots){
         <button class="btn btn-ghost snapshot-delete-btn" type="button" data-id="${s.id}" title="Delete snapshot">✕</button>
       </div>
     </div>
-  `).join('');
+  `;
+
+  let html = '';
+  if(manual.length > 0){
+    html += `<div class="snapshot-group">${manual.map(rowHtml).join('')}</div>`;
+  }
+  if(auto.length > 0){
+    // Collapsed by default when there are ALSO manual checkpoints, so
+    // the person's own named ones are what they actually see first —
+    // open by default only when auto-saves are the only thing there is.
+    html += `
+      <details class="snapshot-auto-group" ${manual.length === 0 ? 'open' : ''}>
+        <summary>Automatic checkpoints (${auto.length}) — saved before/after resets and restores</summary>
+        <div class="snapshot-group">${auto.map(rowHtml).join('')}</div>
+      </details>
+    `;
+  }
+  if(manual.length === 0 && auto.length === 0){
+    html = `<p class="muted snapshots-empty">No snapshots yet — save your first checkpoint above.</p>`;
+  }
+
+  listEl.innerHTML = html;
 
   listEl.querySelectorAll('.snapshot-restore-btn').forEach(btn => {
     btn.addEventListener('click', () => restoreSnapshot(btn.dataset.id, btn));
@@ -6382,7 +6481,7 @@ function getToolkitTourSteps(){
     {
       selector: '#pivotsCard',
       title: 'Pivot Generator',
-      text: 'Three genuinely different directions for this same idea — a different audience, a different business model, a different scope. "Build This Instead" starts a fresh blueprint carrying that pivot forward.',
+      text: 'Three genuinely different directions for this same idea — a different audience, a different business model, a different scope. "Build This Instead" turns that pivot into a complete, separate idea of its own — your original stays exactly as it is.',
       demo: 'cardButton'
     },
     {
@@ -6620,31 +6719,26 @@ function renderPivots(pivots){
 }
 
 async function buildPivotInstead(pivot, btn){
-  if(!confirmState.blueprintId){
-    // A pasted idea has no source blueprint at all — "Build This
-    // Instead" specifically means "start a new canvas blueprint
-    // carrying this pivot forward FROM an existing one," which doesn't
-    // have anywhere to attach for an idea that was never built through
-    // the canvas in the first place.
-    showToast("This idea wasn't built from a blueprint, so there's nothing to carry the pivot forward from — try pasting the pivoted idea in fresh on the Paste Your Own Idea page instead.");
-    return;
-  }
-
-  if(btn){ btn.disabled = true; btn.textContent = 'Starting new blueprint…'; btn.classList.add('btn-loading'); }
+  if(btn){ btn.disabled = true; btn.textContent = 'Building this idea…'; btn.classList.add('btn-loading'); }
 
   try {
-    const res = await authedFetch(`/blueprints/${confirmState.blueprintId}/pivot-into`, {
+    const res = await authedFetch(`/confirm/${confirmState.sessionId}/pivot-into`, {
       method: 'POST',
       body: JSON.stringify({ pivot })
     });
     if(!res) return;
     const body = await res.json();
     if(!res.ok){
-      showToast(body.error || 'Could not start a new blueprint from this pivot.');
+      showToast(body.error || 'Could not build this pivot into a new idea.');
       if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; btn.classList.remove('btn-loading'); }
       return;
     }
-    window.location.href = `app.html?blueprint=${body.blueprint.id}`;
+    // The original idea is completely untouched — this is a genuinely
+    // separate, standalone session, not a variant of the one currently
+    // open. Lands in the confirm/toolkit view directly, same as any
+    // other already-hardened idea, since the pivot arrives fully
+    // expanded rather than needing canvas exploration from scratch.
+    window.location.href = `confirm.html?session=${body.sessionId}`;
   } catch (err) {
     showToast('Could not reach the server. Try again.');
     if(btn){ btn.disabled = false; btn.textContent = 'Build This Instead'; btn.classList.remove('btn-loading'); }
@@ -6720,6 +6814,92 @@ function renderPersonas(personasResult){
 }
 
 // ---------- 4. Landing Page Copy Generator ----------
+// Carrd has no public API for programmatically creating or pre-filling
+// a site — there's no way to reach INTO Carrd from here and build
+// something on their platform directly. This is the honest, actually-
+// achievable version of that ask: a real, complete, ThinkMaps-styled
+// standalone landing page built from the actual copy, using the app's
+// real color palette — genuinely downloadable, ready to host anywhere
+// (including as a direct reference to paste sections into Carrd by hand).
+function generateLandingPageHtml(lc, ideaName){
+  const featuresHtml = (lc.featureBullets || []).map(b => `<li>${escapeHtml(b)}</li>`).join('');
+  const howItWorksHtml = (lc.howItWorks || []).map((s, i) => `
+    <div class="step">
+      <div class="step-num">${i + 1}</div>
+      <p>${escapeHtml(s)}</p>
+    </div>
+  `).join('');
+  const faqHtml = (lc.objectionHandling || []).map(qa => `
+    <div class="faq-item">
+      <p class="faq-q">${escapeHtml(qa.question)}</p>
+      <p class="faq-a">${escapeHtml(qa.answer)}</p>
+    </div>
+  `).join('');
+  const ctaText = lc.ctaOptions?.medium || lc.ctaOptions?.cautious || 'Get started';
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(ideaName || 'Landing Page')}</title>
+<style>
+  :root{ --accent:#D97757; --accent-deep:#B85C3E; --ink:#1F1B16; --ink-muted:#6B6358; --bg:#FAF9F5; --cream:#FAF6F1; --line:#E8E2D8; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:-apple-system,'Inter',sans-serif; background:var(--bg); color:var(--ink); line-height:1.6; }
+  .wrap{ max-width:760px; margin:0 auto; padding:0 24px; }
+  header{ padding:80px 0 60px; text-align:center; }
+  h1{ font-size:clamp(32px,5vw,52px); font-weight:700; letter-spacing:-1px; margin:0 0 20px; }
+  .sub{ font-size:19px; color:var(--ink-muted); max-width:560px; margin:0 auto 32px; }
+  .btn{ display:inline-block; background:var(--accent); color:#FAF6F1; padding:14px 32px; border-radius:10px; text-decoration:none; font-weight:600; font-size:15px; }
+  .btn:hover{ background:var(--accent-deep); }
+  section{ padding:48px 0; border-top:1px solid var(--line); }
+  h2{ font-size:24px; margin:0 0 20px; }
+  .problem{ font-size:17px; color:var(--ink-muted); max-width:600px; }
+  .features{ list-style:none; padding:0; display:grid; gap:14px; }
+  .features li{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 20px; font-size:15px; }
+  .step{ display:flex; gap:16px; align-items:flex-start; margin-bottom:20px; }
+  .step-num{ background:var(--accent); color:#FAF6F1; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; flex-shrink:0; }
+  .faq-item{ margin-bottom:20px; }
+  .faq-q{ font-weight:600; margin:0 0 4px; }
+  .faq-a{ color:var(--ink-muted); margin:0; font-size:14.5px; }
+  footer{ text-align:center; padding:60px 0; }
+  .footer-cta{ font-size:20px; font-weight:600; margin-bottom:20px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>${escapeHtml(lc.heroHeadline || '')}</h1>
+      <p class="sub">${escapeHtml(lc.subHeadline || '')}</p>
+      <a href="#" class="btn">${escapeHtml(ctaText)}</a>
+    </header>
+    ${lc.problemAgitation ? `<section><p class="problem">${escapeHtml(lc.problemAgitation)}</p></section>` : ''}
+    ${featuresHtml ? `<section><h2>What you get</h2><ul class="features">${featuresHtml}</ul></section>` : ''}
+    ${howItWorksHtml ? `<section><h2>How it works</h2>${howItWorksHtml}</section>` : ''}
+    ${faqHtml ? `<section><h2>Common questions</h2>${faqHtml}</section>` : ''}
+    <footer>
+      ${lc.footerCta ? `<p class="footer-cta">${escapeHtml(lc.footerCta)}</p>` : ''}
+      <a href="#" class="btn">${escapeHtml(ctaText)}</a>
+    </footer>
+  </div>
+</body>
+</html>`;
+}
+
+function downloadLandingPageTemplate(lc, ideaName){
+  const html = generateLandingPageHtml(lc, ideaName);
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${(ideaName || 'landing-page').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.html`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function renderLandingCopySection(){
   const el = document.getElementById('landingCopyCard');
   if(!el) return;
@@ -6832,12 +7012,16 @@ function renderLandingCopy(lc){
     </div>
     <div class="toolkit-card-actions">
       <button class="btn btn-secondary" id="copyLandingCopyBtn" type="button">Copy All</button>
-      <a href="https://carrd.co" target="_blank" rel="noopener" class="btn btn-ghost">Open Carrd</a>
+      <button class="btn btn-primary" id="downloadLandingTemplateBtn" type="button">Download Full Template</button>
     </div>
-    <p class="muted lc-carrd-explainer">Carrd is a free, no-code, one-page website builder — paste this copy straight into it and you'll have a real, live landing page in about 20 minutes, no coding or design work needed. It's what a lot of solo founders use to launch fast before building the actual product.</p>
+    <p class="muted lc-carrd-explainer">The download is a complete, ready-to-host page built from this copy, styled with ThinkMaps' own colors — open it directly in a browser, or use it as a real reference to paste sections into a builder like <a href="https://carrd.co" target="_blank" rel="noopener">Carrd</a> by hand (Carrd doesn't offer a way to pre-fill a site automatically, so this is the fastest real starting point).</p>
   `;
   el.classList.add('result-section-enter');
 
+  const downloadBtn = document.getElementById('downloadLandingTemplateBtn');
+  if(downloadBtn){
+    downloadBtn.addEventListener('click', () => downloadLandingPageTemplate(lc, confirmState.rewrittenIdea?.name || confirmState.result?.name));
+  }
   el.querySelectorAll('.lc-copy-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const success = await copyTextRobustly(btn.dataset.copy);
@@ -6900,20 +7084,23 @@ function renderRedTeam(redTeam){
     <div class="toolkit-card-head"><h4>Challenge This Idea</h4></div>
     <div class="red-team-angles">
       ${redTeam.angles.map((a) => {
-        const existing = rebuttals[a.angle];
+        const thread = rebuttals[a.angle]?.messages || [];
+        const threadHtml = thread.map(m => `
+          <div class="red-team-chat-bubble red-team-chat-${escapeHtml(m.role)}">${escapeHtml(m.content)}</div>
+        `).join('');
         return `
-        <details class="red-team-angle">
+        <details class="red-team-angle" ${thread.length > 0 ? 'open' : ''}>
           <summary>
             <span class="red-team-angle-label">${escapeHtml(a.label)}</span>
-            ${existing ? `<span class="red-team-verdict red-team-verdict-${escapeHtml(existing.verdict)}">${escapeHtml(existing.verdict)}</span>` : ''}
+            ${thread.length > 0 ? `<span class="red-team-verdict red-team-verdict-active">${thread.filter(m => m.role === 'user').length} response${thread.filter(m => m.role === 'user').length === 1 ? '' : 's'}</span>` : ''}
           </summary>
           <div class="red-team-angle-body">
             <p class="red-team-critique">${escapeHtml(a.critique)}</p>
             <p class="red-team-question"><strong>Answer this:</strong> ${escapeHtml(a.pointedQuestion)}</p>
+            <div class="red-team-chat-thread" data-angle="${escapeHtml(a.angle)}">${threadHtml}</div>
             <div class="red-team-rebuttal-box">
-              <textarea class="revise-textarea red-team-rebuttal-input" data-angle="${escapeHtml(a.angle)}" placeholder="How would you respond to this?" rows="3">${existing ? escapeHtml(existing.rebuttal) : ''}</textarea>
-              <button class="btn btn-secondary red-team-submit-btn" type="button" data-angle="${escapeHtml(a.angle)}">Submit Response</button>
-              ${existing ? `<p class="red-team-response"><strong>Verdict:</strong> ${escapeHtml(existing.response)}</p>` : ''}
+              <textarea class="revise-textarea red-team-rebuttal-input" data-angle="${escapeHtml(a.angle)}" placeholder="How would you respond to this?" rows="2"></textarea>
+              <button class="btn btn-secondary red-team-submit-btn" type="button" data-angle="${escapeHtml(a.angle)}">Send</button>
             </div>
           </div>
         </details>
@@ -6926,35 +7113,64 @@ function renderRedTeam(redTeam){
   el.querySelectorAll('.red-team-submit-btn').forEach(btn => {
     btn.addEventListener('click', () => submitRedTeamRebuttal(btn.dataset.angle, btn));
   });
+  // Enter submits (Shift+Enter for a new line), matching how every
+  // other chat interface behaves — not just a button to click.
+  el.querySelectorAll('.red-team-rebuttal-input').forEach(textarea => {
+    textarea.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' && !e.shiftKey){
+        e.preventDefault();
+        const btn = el.querySelector(`.red-team-submit-btn[data-angle="${textarea.dataset.angle}"]`);
+        submitRedTeamRebuttal(textarea.dataset.angle, btn);
+      }
+    });
+  });
 }
 
 async function submitRedTeamRebuttal(angle, btn){
   const textarea = document.querySelector(`.red-team-rebuttal-input[data-angle="${angle}"]`);
-  const rebuttal = (textarea?.value || '').trim();
-  if(!rebuttal){
-    showToast('Write a response before submitting.');
+  const message = (textarea?.value || '').trim();
+  if(!message){
+    showToast('Write a response before sending.');
     return;
   }
 
-  if(btn){ btn.disabled = true; btn.textContent = 'Evaluating…'; btn.classList.add('btn-loading'); }
+  // Clears immediately, before the network call — same as any real chat
+  // interface, so the person can keep typing their next message right
+  // away instead of waiting on a round trip first.
+  if(textarea) textarea.value = '';
+
+  // Optimistically show the user's own message right away, plus a
+  // typing indicator, rather than leaving the thread frozen until the
+  // reply comes back.
+  const thread = document.querySelector(`.red-team-chat-thread[data-angle="${angle}"]`);
+  if(thread){
+    thread.insertAdjacentHTML('beforeend', `<div class="red-team-chat-bubble red-team-chat-user">${escapeHtml(message)}</div><div class="red-team-chat-bubble red-team-chat-assistant red-team-chat-typing" id="redTeamTyping">…</div>`);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  if(btn){ btn.disabled = true; btn.classList.add('btn-loading'); }
 
   try {
     const res = await authedFetch(`/confirm/${confirmState.sessionId}/red-team/respond`, {
       method: 'POST',
-      body: JSON.stringify({ angle, rebuttal })
+      body: JSON.stringify({ angle, message })
     });
     if(!res) return;
     const body = await res.json();
     if(!res.ok){
-      showToast(body.error || 'Could not evaluate your response.');
-      if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; btn.classList.remove('btn-loading'); }
+      showToast(body.error || 'Could not send that message.');
+      document.getElementById('redTeamTyping')?.remove();
+      if(btn){ btn.disabled = false; btn.classList.remove('btn-loading'); }
+      if(textarea) textarea.value = message; // hand the message back so nothing's lost
       return;
     }
     confirmState.redTeam = body.redTeam;
     renderRedTeam(body.redTeam);
   } catch (err) {
     showToast('Could not reach the server. Try again.');
-    if(btn){ btn.disabled = false; btn.textContent = 'Submit Response'; btn.classList.remove('btn-loading'); }
+    document.getElementById('redTeamTyping')?.remove();
+    if(btn){ btn.disabled = false; btn.classList.remove('btn-loading'); }
+    if(textarea) textarea.value = message;
   }
 }
 
