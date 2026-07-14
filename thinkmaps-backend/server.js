@@ -468,8 +468,8 @@ const OTP_MAX_ATTEMPTS = 5;
 // New accounts get this long to sign back in without re-doing OTP —
 // covers the common "just signed up, immediately has to log back in
 // for some reason" case without weakening security long-term, since
-// it only ever applies in the first 10 minutes of an account's life.
-const NEW_ACCOUNT_GRACE_MS = 10 * 60 * 1000;
+// it only ever applies in the first 5 minutes of an account's life.
+const NEW_ACCOUNT_GRACE_MS = 5 * 60 * 1000;
 
 function getEncryptionKey(){
   if(!ENCRYPTION_KEY_RAW){
@@ -1619,7 +1619,7 @@ app.get('/dashboard', requireAuth, async (req, res) => {
 
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('username, email, pro_status, plan_tier, pro_expires_at')
+      .select('username, email, pro_status, plan_tier, pro_expires_at, has_seen_dashboard_tour')
       .eq('id', userId)
       .single();
 
@@ -1687,7 +1687,8 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     res.status(200).json({
       profile: { ...profile, pro_status: effectivePro, plan_tier: effectivePro ? (profile.plan_tier || 'pro') : 'free' },
       blueprints: enrichedBlueprints,
-      canCreateNew: effectivePro || blueprints.length === 0
+      canCreateNew: effectivePro || blueprints.length === 0,
+      showDashboardTour: !profile.has_seen_dashboard_tour
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load dashboard.', detail: err.message });
@@ -2730,10 +2731,6 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     const { targetGroupId } = req.body || {};
     console.log(`[ThinkMaps] Reset requested for blueprint ${blueprint.id} — targetGroupId: ${targetGroupId || '(none, resetting to true root)'}`);
 
-    const timestamp = new Date().toLocaleString('en-US', {
-      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
-    });
-
     // Auto-snapshot BEFORE any destructive change — this is what makes
     // "reset" genuinely reversible instead of a one-way door. Reuses the
     // exact same save path as a manually-named snapshot; this one just
@@ -2743,7 +2740,7 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     const { error: preSnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
-      name: `Before reset — ${timestamp}`,
+      name: 'Auto-save: before reset',
       snapshot_data: preResetGraph
     });
     if(preSnapshotError){
@@ -2801,7 +2798,7 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     const { error: postSnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
-      name: `After reset — ${timestamp}`,
+      name: 'Auto-save: after reset',
       snapshot_data: postResetGraph
     });
     if(postSnapshotError){
@@ -2809,6 +2806,8 @@ app.post('/blueprints/:id/reset', requireAuth, async (req, res) => {
     } else {
       console.log('[ThinkMaps] Reset: post-reset snapshot saved successfully.');
     }
+
+    await pruneOldAutoSnapshots(blueprint.id);
 
     logDataAccess(req.user.id, 'blueprint_reset', targetGroupId ? `to group ${targetGroupId}` : 'to true root');
     res.status(200).json({ reset: true });
@@ -3823,8 +3822,18 @@ async function generateGroupOptions(pathContext, { isRetry = false, isRoot = fal
   });
 
   // Semantic layer on top — same reasoning as generateCandidateBatch's
-  // own version of this check.
-  const finalOptions = await filterThematicDuplicates(dedupedOptions, existingLabels);
+  // own version of this check. Same floor protection too: if semantic
+  // filtering would drop this group below a reasonable minimum, skip it
+  // and keep the exact-match-deduped list instead. Retry is actually the
+  // MOST likely place this shows up in practice — it's a group with real
+  // history behind it already, so there's more for the semantic check to
+  // flag as "too similar," and a Retry that comes back with only one
+  // option would be an obviously broken result to land on.
+  const semanticFiltered = await filterThematicDuplicates(dedupedOptions, existingLabels);
+  const MIN_OPTIONS_PER_GROUP = 3;
+  const finalOptions = semanticFiltered.length < Math.min(MIN_OPTIONS_PER_GROUP, dedupedOptions.length)
+    ? dedupedOptions
+    : semanticFiltered;
 
   return { ...result, options: finalOptions };
 }
@@ -3978,7 +3987,7 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   const result = await callMistralWithStreaming([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: 'Generate now.' }
-  ], isPro ? 1100 : 800, onToken);
+  ], isPro ? 1700 : 800, onToken);
 
   // Iterate over the ASSIGNED blocks, not whatever Mistral's "groups" array
   // happens to contain — this guarantees exactly blockNames.length groups
@@ -4019,10 +4028,27 @@ async function generateCandidateBatch(pathContext, blockNames, existingLabels = 
   // original blocks afterward, preserving which block each one belongs to.
   const flatOptions = groups.flatMap((g, groupIndex) => g.options.map(o => ({ ...o, groupIndex })));
   const survivingFlat = await filterThematicDuplicates(flatOptions, existingLabels);
-  groups = groups.map((g, groupIndex) => ({
-    ...g,
-    options: g.options.filter(o => survivingFlat.some(s => s.groupIndex === groupIndex && s.label === o.label))
-  }));
+
+  // Hard floor, applied per-group — a near-empty group defeats the
+  // whole point of offering multiple directions to explore. In a
+  // well-established niche with a lot of history, semantic filtering
+  // can end up flagging most of a fresh batch as "too similar to
+  // something already covered," which is exactly the kind of thing
+  // that produced inconsistent group sizes (fine early in a niche with
+  // little history, thin later once a lot has already been explored).
+  // If filtering would drop a group below this floor, skip semantic
+  // filtering for THAT group specifically and fall back to its
+  // exact-match-deduped list instead — a little thematic overlap with
+  // older history is a much smaller problem than a group with one real
+  // choice in it.
+  const MIN_OPTIONS_PER_GROUP = 3;
+  groups = groups.map((g, groupIndex) => {
+    const semanticSurvivors = g.options.filter(o => survivingFlat.some(s => s.groupIndex === groupIndex && s.label === o.label));
+    if(semanticSurvivors.length < Math.min(MIN_OPTIONS_PER_GROUP, g.options.length)){
+      return { ...g, options: g.options };
+    }
+    return { ...g, options: semanticSurvivors };
+  });
 
   return { groups };
 }
@@ -4897,14 +4923,58 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
       ? await supabase.from('options').select('*').in('group_version_id', versionIds).order('position', { ascending: true })
       : { data: [] };
 
+    // Real, account-level tutorial gating — replaces the old per-
+    // blueprint localStorage approach, which showed the canvas tour on
+    // EVERY new blueprint (and couldn't survive a device switch anyway,
+    // since localStorage is per-browser). Exactly two tours, ever:
+    // the very first blueprint canvas someone opens, and the first
+    // blueprint canvas they open after becoming Pro. Computed here,
+    // not mutated here — the frontend only marks a tour seen once it's
+    // actually been shown, via a separate call, so a page reload or
+    // crash right after this response can't silently burn the one
+    // chance without the person ever having seen it.
+    const { data: tourProfile } = await supabase
+      .from('profiles')
+      .select('has_seen_first_blueprint_tour, has_seen_first_pro_blueprint_tour')
+      .eq('id', req.user.id)
+      .single();
+    const showFirstBlueprintTour = !tourProfile?.has_seen_first_blueprint_tour;
+    const showFirstProBlueprintTour = isPro && !tourProfile?.has_seen_first_pro_blueprint_tour && !!blueprint.created_as_pro;
+
     res.status(200).json({
       blueprint: { id: blueprint.id, title: blueprint.title, isLocked, lockReason, isPro },
       groups,
       groupVersions: groupVersions || [],
-      options: allOptions || []
+      options: allOptions || [],
+      showFirstBlueprintTour,
+      showFirstProBlueprintTour
     });
   } catch (err) {
     res.status(500).json({ error: 'Could not load blueprint graph.', detail: err.message });
+  }
+});
+
+// The frontend calls this only once a tour has actually been shown to
+// the person — decoupled from the compute step in the graph route
+// above, so a reload or crash right after loading the canvas can never
+// silently burn the one chance without the tour ever having rendered.
+app.post('/profile/mark-tour-seen', requireAuth, async (req, res) => {
+  try {
+    const { tourType } = req.body;
+    const columnByType = {
+      first_blueprint: 'has_seen_first_blueprint_tour',
+      first_pro_blueprint: 'has_seen_first_pro_blueprint_tour',
+      dashboard: 'has_seen_dashboard_tour'
+    };
+    const column = columnByType[tourType];
+    if(!column) return res.status(400).json({ error: 'Unknown tourType.' });
+
+    const { error } = await supabase.from('profiles').update({ [column]: true }).eq('id', req.user.id);
+    if(error) throw error;
+
+    res.status(200).json({ marked: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not save tutorial progress.', detail: err.message });
   }
 });
 
@@ -5021,12 +5091,13 @@ app.post('/blueprints/:id/snapshots/:snapshotId/restore', requireAuth, async (re
     const { error: safetySnapshotError } = await supabase.from('blueprint_snapshots').insert({
       blueprint_id: blueprint.id,
       user_id: req.user.id,
-      name: `Before restoring "${targetSnapshot.name}"`,
+      name: `Auto-save: before restoring "${targetSnapshot.name}"`,
       snapshot_data: currentState
     });
     if(safetySnapshotError){
       console.error('[ThinkMaps] Restore: pre-restore safety snapshot FAILED:', safetySnapshotError.message);
     }
+    await pruneOldAutoSnapshots(blueprint.id);
 
     // Wipe the current live graph — groups cascade-delete their own
     // group_versions and options (same cascade the existing DELETE
@@ -5133,6 +5204,33 @@ app.delete('/blueprints/:id/snapshots/:snapshotId', requireAuth, async (req, res
 // making the client do a second GET /graph round trip after the AI finishes —
 // that second trip was typically another 200-400ms on top of an already-slow
 // generation call.
+// Keeps auto-generated snapshots from piling up unbounded across many
+// resets — the actual fix for "the snapshot screen gets messy." Only
+// ever touches snapshots whose name matches the auto-save convention
+// exactly; anything the person named themselves is never at risk of
+// being pruned, no matter how many auto-saves accumulate around it.
+const MAX_AUTO_SNAPSHOTS_PER_BLUEPRINT = 6;
+async function pruneOldAutoSnapshots(blueprintId){
+  try {
+    const { data: autoSnapshots } = await supabase
+      .from('blueprint_snapshots')
+      .select('id, created_at')
+      .eq('blueprint_id', blueprintId)
+      .like('name', 'Auto-save:%')
+      .order('created_at', { ascending: false });
+
+    if(!autoSnapshots || autoSnapshots.length <= MAX_AUTO_SNAPSHOTS_PER_BLUEPRINT) return;
+
+    const idsToDelete = autoSnapshots.slice(MAX_AUTO_SNAPSHOTS_PER_BLUEPRINT).map(s => s.id);
+    await supabase.from('blueprint_snapshots').delete().in('id', idsToDelete);
+  } catch (err) {
+    // Never let pruning failure block the actual reset/restore it's
+    // riding along on — worst case the list stays a bit longer, not
+    // a broken action.
+    console.error('[ThinkMaps] pruneOldAutoSnapshots failed:', err.message);
+  }
+}
+
 async function fetchFullBlueprintGraph(blueprintId){
   const { data: groups } = await supabase.from('groups').select('*').eq('blueprint_id', blueprintId);
   const groupIds = (groups || []).map(g => g.id);
@@ -8405,16 +8503,24 @@ async function structurePastedIdea(rawIdea, mode){
 
   const refurbishInstruction = `This idea is a starting point, not a fixed spec — actively strengthen it. Sharpen a vague problem into something specific, upgrade a weak differentiator into a real one, tighten unfocused scope, and fix a monetization approach that wouldn't actually work. Keep the core concept recognizable (don't replace it with a different idea entirely), but don't be shy about meaningfully improving the weak parts.`;
 
-  const systemPrompt = `You are the idea-structuring engine for ThinkMaps. Someone pasted in their own raw idea below, in their own words — not generated through ThinkMaps' own canvas. Your job: turn it into the same structured shape every other idea in this app uses.
+  // Matches the SAME complete shape used everywhere else an idea gets
+  // synthesized in this app (canvas-based idea drafts and the final
+  // hardened result) — this used to generate a shorter, differently-named
+  // shape missing targetAudience and competitiveEdge entirely, and calling
+  // the feature field tenXFeature instead of coreFeature, which is exactly
+  // why those fields showed blank: the frontend was looking for fields
+  // that were never being generated in the first place, not fields that
+  // failed to populate.
+  const systemPrompt = `You are the idea-structuring engine for ThinkMaps. Someone pasted in their own raw idea below, in their own words — not generated through ThinkMaps' own canvas. Your job: turn it into the same complete, structured shape every other idea in this app uses.
 
 ${mode === 'refurbish' ? refurbishInstruction : asIsInstruction}
 
-Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "tenXFeature": string, "monetization": string}`;
+Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "fullDescription": string}`;
 
   return callMistral([
     { role: 'system', content: systemPrompt },
     { role: 'user', content: rawIdea }
-  ], 700);
+  ], 900);
 }
 
 // ============================================================
@@ -9002,19 +9108,17 @@ Respond ONLY with valid JSON: {"angles": [{"angle": "market_risk"|"technical_tra
 // dodge, rather than just accepting whatever's typed. One exchange only
 // (no back-and-forth loop), which is enough to force real engagement
 // without turning this into an open-ended argument with the model.
-async function evaluateRedTeamRebuttal(angleLabel, critique, rebuttal){
-  const systemPrompt = `You are the same sharp, unbalanced venture capitalist persona from the Red Team critique — not a helpful assistant. The founder has written a rebuttal to your critique below. Evaluate it in 2-3 sentences: is this a real, substantive answer, or is it dodging the actual concern? Be honest and direct either way — if it's a genuinely good answer, say so plainly and specifically why; if it's dodging, say exactly what it's avoiding. Never use "however" or "that said."
+async function continueRedTeamConversation(angleLabel, critique, messageHistory){
+  const systemPrompt = `You are the same sharp, unbalanced venture capitalist persona from the Red Team critique below — not a helpful assistant, and not adversarial for its own sake either. The founder is having a real back-and-forth with you about this specific critique. For each of their messages, respond in 2-4 sentences: engage with what they actually said, push back if it's weak or dodging the real concern, and acknowledge plainly when they've made a genuinely solid point — don't manufacture disagreement once they've actually answered it. Never use "however" or "that said." Stay in character across the whole conversation, remembering what's already been said rather than repeating yourself.
 
-Original critique (${angleLabel}): ${critique}
+Original critique (${angleLabel}): ${critique}`;
 
-Founder's rebuttal: ${rebuttal}
-
-Respond ONLY with valid JSON: {"verdict": "solid"|"partial"|"dodge", "response": string}`;
-
-  return callMistral([
+  const messages = [
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: 'Evaluate the rebuttal now.' }
-  ], 300);
+    ...messageHistory.map(m => ({ role: m.role, content: m.content }))
+  ];
+
+  return callMistralPlainText(messages);
 }
 
 // =====================================================================
@@ -10057,7 +10161,33 @@ app.post('/confirm/:sessionId/pivots', requireAuth, async (req, res) => {
 // pivot's audience and problem statement, plus a pivot_context flag the
 // canvas's own generation reads (see the canvas prompt-building code)
 // so it knows not to just repeat the original idea's ground.
-app.post('/blueprints/:id/pivot-into', requireAuth, async (req, res) => {
+// Expands a pivot's compact concept (name + oneLiner + direction +
+// whyDefensible + tenXUnlock) into the SAME complete idea shape used
+// everywhere else in the app, grounded in the original idea it's
+// pivoting FROM so the result reads as a real transformation of that
+// concept, not a disconnected new idea that happens to share a pivot label.
+async function expandPivotIntoFullIdea(pivot, sourceIdea, pathSummary){
+  const systemPrompt = `You are the idea-synthesis engine for ThinkMaps. Someone hardened an original idea, then generated a PIVOT of it — a specific, deliberate transformation (${pivot.type} pivot: ${pivot.direction}). Your job: take that pivot's compact concept and expand it into a complete, concrete idea — not a vague restatement, a real idea with the same level of specificity as the original had.
+
+ORIGINAL IDEA this is pivoting FROM (for grounding and continuity — the new idea should feel like a deliberate transformation of this, not an unrelated concept):
+${JSON.stringify(sourceIdea)}
+
+THE PIVOT to expand:
+Name: ${pivot.renamedConcept?.name || ''}
+One-liner: ${pivot.renamedConcept?.oneLiner || ''}
+Direction: ${pivot.direction}
+Why this is defensible: ${pivot.whyDefensible || ''}
+The 10x unlock this pivot creates: ${pivot.tenXUnlock || ''}
+
+Respond ONLY with valid JSON: {"name": string, "oneLiner": string, "coreProblem": string, "targetAudience": string, "coreFeature": string, "monetization": string, "competitiveEdge": string, "fullDescription": string}`;
+
+  return callMistral([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: 'Expand this pivot now.' }
+  ], 900);
+}
+
+app.post('/confirm/:sessionId/pivot-into', requireAuth, async (req, res) => {
   try {
     if(await requireProOrReject(req, res)) return;
 
@@ -10066,30 +10196,53 @@ app.post('/blueprints/:id/pivot-into', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'A pivot is required.' });
     }
 
-    const sourceBlueprint = await getOwnedBlueprint(req.params.id, req.user.id);
-    if(!sourceBlueprint) return res.status(403).json({ error: 'Not your blueprint.' });
+    const { data: sourceSession } = await supabase
+      .from('confirmation_sessions')
+      .select('*')
+      .eq('id', req.params.sessionId)
+      .single();
 
-    const { data: newBlueprint, error } = await supabase
-      .from('blueprints')
+    if(!sourceSession) return res.status(404).json({ error: 'Session not found.' });
+    if(!(await verifySessionOwnership(sourceSession, req.user.id))) return res.status(403).json({ error: 'Not your session.' });
+
+    const sourceIdea = sourceSession.rewritten_idea || sourceSession.result;
+    if(!sourceIdea){
+      return res.status(400).json({ error: 'This idea needs to finish hardening before a pivot can be built into a new idea.' });
+    }
+
+    const expandedIdea = await expandPivotIntoFullIdea(pivot, sourceIdea, sourceSession.path_summary);
+
+    const pathSummary = `Pivoted from an earlier idea (${pivot.type} pivot: ${pivot.direction}). Original: ${sourceIdea.name || 'Untitled'} — ${sourceIdea.oneLiner || ''}`;
+
+    // A genuinely NEW, standalone session — blueprint_id stays null even
+    // when the source idea DID come from a canvas blueprint, and the
+    // original session is never modified in any way. This is what
+    // actually satisfies "save it elsewhere, not overriding the original" —
+    // the source idea is left completely untouched, findable exactly
+    // where it always was.
+    const { data: newSession, error } = await supabase
+      .from('confirmation_sessions')
       .insert({
         user_id: req.user.id,
-        title: pivot.renamedConcept.name || `${sourceBlueprint.title} (pivot)`,
-        created_as_pro: true,
-        pivot_context: {
-          fromBlueprintId: sourceBlueprint.id,
-          pivotType: pivot.type,
-          direction: pivot.direction,
-          audience: pivot.renamedConcept.oneLiner
-        }
+        blueprint_id: null,
+        source: 'pivot',
+        raw_idea_text: null,
+        idea_draft: expandedIdea,
+        path_summary: pathSummary,
+        answers: [],
+        status: 'completed',
+        result: expandedIdea,
+        total_questions: 0
       })
       .select()
       .single();
 
     if(error) throw error;
 
-    res.status(201).json({ blueprint: newBlueprint });
+    logDataAccess(req.user.id, 'pivot_built', `${sourceIdea.name || 'idea'} -> ${expandedIdea.name || 'pivot'}`);
+    res.status(201).json({ sessionId: newSession.id });
   } catch (err) {
-    res.status(500).json({ error: 'Could not start a new blueprint from this pivot.', detail: err.message });
+    res.status(500).json({ error: 'Could not build this pivot into a new idea.', detail: err.message });
   }
 });
 
@@ -10291,18 +10444,17 @@ app.post('/confirm/:sessionId/red-team', requireAuth, async (req, res) => {
   }
 });
 
-// One rebuttal exchange per angle — evaluates whether the founder's
-// written response is a real answer or a dodge, then stores the
-// exchange on the session's red_team.rebuttals map keyed by angle, so
-// it persists across reloads instead of vanishing the moment the page
-// refreshes.
+// Real multi-turn conversation per angle — each angle gets its own
+// persistent message thread stored on the session, so reloading the
+// page doesn't lose the conversation, and the AI sees the FULL history
+// for that angle on every turn, not just the latest message.
 app.post('/confirm/:sessionId/red-team/respond', requireAuth, async (req, res) => {
   try {
     if(await requireProOrReject(req, res)) return;
 
-    const { angle, rebuttal } = req.body;
-    if(!angle || !rebuttal || !rebuttal.trim()){
-      return res.status(400).json({ error: 'An angle and a rebuttal are both required.' });
+    const { angle, message } = req.body;
+    if(!angle || !message || !message.trim()){
+      return res.status(400).json({ error: 'An angle and a message are both required.' });
     }
 
     const { data: session } = await supabase
@@ -10324,13 +10476,18 @@ app.post('/confirm/:sessionId/red-team/respond', requireAuth, async (req, res) =
       return res.status(400).json({ error: 'Unknown angle.' });
     }
 
-    const evaluation = await evaluateRedTeamRebuttal(angleData.label, angleData.critique, rebuttal.trim());
+    const existingThread = session.red_team.rebuttals?.[angle]?.messages || [];
+    const threadWithNewMessage = [...existingThread, { role: 'user', content: message.trim() }];
+
+    const reply = await continueRedTeamConversation(angleData.label, angleData.critique, threadWithNewMessage);
+
+    const updatedThread = [...threadWithNewMessage, { role: 'assistant', content: reply }];
 
     const updatedRedTeam = {
       ...session.red_team,
       rebuttals: {
         ...(session.red_team.rebuttals || {}),
-        [angle]: { rebuttal: rebuttal.trim(), ...evaluation }
+        [angle]: { messages: updatedThread }
       }
     };
 
@@ -10338,7 +10495,7 @@ app.post('/confirm/:sessionId/red-team/respond', requireAuth, async (req, res) =
 
     res.status(200).json({ redTeam: updatedRedTeam });
   } catch (err) {
-    res.status(500).json({ error: 'Could not evaluate your rebuttal.', detail: err.message });
+    res.status(500).json({ error: 'Could not send that message.', detail: err.message });
   }
 });
 
