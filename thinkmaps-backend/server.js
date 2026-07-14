@@ -3048,6 +3048,19 @@ async function callMistral(messages, maxTokens = 350, isRetry = false){
     return callMistral(messages, retryBudget, true);
   }
 
+  // finish_reason === 'error' is a completely different signal from
+  // 'length' above — this is Mistral reporting a genuine failure on
+  // THEIR end partway through generating, not a token-budget problem at
+  // all. Previously had zero retry coverage, meaning any transient
+  // provider-side hiccup was an immediate, unrecoverable failure for
+  // whoever hit it. Retried once with the SAME token budget (more
+  // tokens doesn't address a provider error the way it addresses
+  // truncation) before actually giving up.
+  if(finishReason === 'error' && !isRetry){
+    console.log('[ThinkMaps] Mistral reported finish_reason: error — retrying once.');
+    return callMistral(messages, maxTokens, true);
+  }
+
   // Defensive: models occasionally wrap "pure JSON" in ```json fences or add
   // stray text around it even when told not to. Strip fences, then clip to
   // the outermost {...} before parsing, instead of trusting it's clean.
@@ -3140,6 +3153,14 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
     return callMistral(messages, retryBudget, true);
   }
 
+  // Same reasoning as the non-streaming path — finish_reason === 'error'
+  // is a genuine provider-side failure, not a token-budget problem, and
+  // previously had zero retry coverage on the streaming path either.
+  if(finishReason === 'error'){
+    console.log('[ThinkMaps] Mistral streaming reported finish_reason: error — retrying once non-streamed.');
+    return callMistral(messages, maxTokens, true);
+  }
+
   // Same cleanup / parse the non-streaming path does
   let cleaned = accumulated.trim();
   if(cleaned.startsWith('```')){
@@ -3156,7 +3177,7 @@ async function callMistralWithStreaming(messages, maxTokens = 350, onToken = nul
   }
 }
 
-async function callMistralPlainText(messages){
+async function callMistralPlainText(messages, isRetry = false){
   const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -3172,6 +3193,14 @@ async function callMistralPlainText(messages){
   }
 
   const data = await res.json();
+  const finishReason = data.choices?.[0]?.finish_reason;
+  // Same reasoning as callMistral above — a provider-side error here
+  // previously just silently returned whatever partial (possibly empty)
+  // content existed, with no retry at all.
+  if(finishReason === 'error' && !isRetry){
+    console.log('[ThinkMaps] Mistral plain-text call reported finish_reason: error — retrying once.');
+    return callMistralPlainText(messages, true);
+  }
   return (data.choices?.[0]?.message?.content || '').trim();
 }
 
