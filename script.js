@@ -760,7 +760,7 @@ function showProFeaturesModal(){
   overlay.id = 'proFeaturesModal';
   overlay.innerHTML = `
     <div class="modal-card pro-features-modal-card">
-      <span class="ptag">Pro — $15/month, one-time</span>
+      <span class="ptag">Pro — $7.50/month, one-time</span>
       <h3>Everything Pro includes</h3>
 
       <div class="pro-features-group">
@@ -948,7 +948,7 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
   overlay.innerHTML = `
     <div class="modal-card checkout-confirmation-card">
       <h3>You're all set — nothing to type</h3>
-      <p class="muted">Pro is a one-time payment of $15 for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
+      <p class="muted">Pro is a one-time payment of $7.50 for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
       <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml(accountUsername)} ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
       <p class="muted">If checkout also asks for your ThinkMaps username separately, use this (just in case):</p>
       <div class="checkout-username-display">
@@ -1201,7 +1201,7 @@ function showProPlanModal(){
       <div class="plan pro modal-plan-card">
         <span class="ptag">Pro</span>
         <h3>For builders who iterate</h3>
-        <div class="price">$15<sup>/month, one-time</sup></div>
+        <div class="price"><span class="price-old">$12</span><span class="price-new">$7.50</span><sup>/month, one-time</sup></div>
         <ul>
           <li>Unlimited blueprints, no edit lock, never deleted</li>
           <li>Combine multiple selections into one fused idea</li>
@@ -2101,6 +2101,11 @@ function ensureGhostCursor(){
     cursor.className = 'tour-ghost-cursor';
     document.body.appendChild(cursor);
   }
+  // Real device-appropriate visual — this used to always render as a
+  // mouse-arrow shape via clip-path regardless of device, which is
+  // exactly why it never looked right on a phone: a mouse cursor is a
+  // genuinely foreign concept when nothing but touch is involved.
+  cursor.classList.toggle('tour-cursor-touch', isCoarsePointer());
   return cursor;
 }
 
@@ -2681,13 +2686,17 @@ function getCanvasTourSteps(){
     {
       selector: '.canvas-option',
       title: 'Pick a direction',
-      text: 'Click any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.',
+      text: isCoarsePointer()
+        ? 'Tap any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.'
+        : 'Click any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.',
       demo: 'activate'
     },
     {
       selector: '.canvas-option',
       title: 'Or drag to connect',
-      text: "You can also click and drag from an option straight onto another option in a group it already spawned — dropping it there activates that one instead of clicking it directly. Useful once your canvas has some depth to it.",
+      text: isCoarsePointer()
+        ? "You can also touch and drag from an option straight onto another option in a group it already spawned — lifting your finger there activates that one instead of tapping it directly. Useful once your canvas has some depth to it."
+        : "You can also click and drag from an option straight onto another option in a group it already spawned — dropping it there activates that one instead of clicking it directly. Useful once your canvas has some depth to it.",
       demo: 'dragActivate'
     },
     {
@@ -3970,10 +3979,14 @@ function wireGroupEvents(){
 
       if(optEl.classList.contains('selected')){
         // Already active — drag FROM here to pick the next step.
-        if(dot){
-          dot.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
-          dot.addEventListener('touchstart', (e) => startLineDrag(e, optionId, groupId, optionIndex), { passive: false });
-        }
+        // Triggerable from anywhere in the row, not just the small dot —
+        // the line's visual origin is computed from the row's position
+        // (see startLineDrag), never from the actual touch point, so
+        // this doesn't change how the drag looks, just how easy it is
+        // to grab. Especially matters on mobile, where the dot alone
+        // was a genuinely tiny target.
+        optEl.addEventListener('mousedown', (e) => startLineDrag(e, optionId, groupId, optionIndex));
+        optEl.addEventListener('touchstart', (e) => startLineDrag(e, optionId, groupId, optionIndex), { passive: false });
       } else if(optEl.classList.contains('root-clickable')){
         // Root, never activated — a plain click is the bootstrap trigger,
         // since there's nothing before it to drag from. 'click' already
