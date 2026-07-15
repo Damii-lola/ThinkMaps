@@ -964,7 +964,7 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
     <div class="modal-card checkout-confirmation-card">
       <h3>You're all set — nothing to type</h3>
       <p class="muted">Pro is a one-time payment of $7.50 for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
-      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
+      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml((accountId || '').split('-')[0])}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
       <p class="muted">If checkout also asks for your ThinkMaps username separately, use this (just in case):</p>
       <div class="checkout-username-display">
         <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
@@ -993,20 +993,21 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
 
   document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
     overlay.remove();
-    // Selar's confirmed prefill parameters. fullname used to carry the
-    // username too (TMUSER-PRO <username> <accountId>) — removed after
-    // real user testing confirmed a username containing digits could
-    // break Selar's own checkout form validation (their own client-side
-    // script would throw and the page would never finish loading). Down
-    // to just the marker + profile id now: still satisfies Selar's
-    // "name needs a space in it" requirement with two words, and the
-    // UUID alone is enough — email matching and profile-id matching are
-    // both separate, already-working pathways for linking a payment
-    // back to an account, neither of which ever depended on this field
-    // containing the username at all.
+    // Selar's confirmed prefill parameters. accountId gets truncated to
+    // its first 8 characters here — real user testing confirmed the
+    // full 36-character UUID gets rejected by Selar's own Name field
+    // validation (a genuine length limit, confirmed by a working
+    // shortened test), where the earlier "just drop the username"
+    // attempt wasn't enough on its own. 8 hex characters is a clean,
+    // predictable truncation point — over 4 billion possible values,
+    // plenty as a secondary signal, especially since email matching is
+    // the primary method and is checked first regardless (see
+    // find_profile_by_id_prefix on the backend for how this gets
+    // matched back to the full UUID).
+    const shortId = (accountId || '').split('-')[0];
     const params = new URLSearchParams();
     if(accountEmail) params.set('email', accountEmail);
-    if(accountId) params.set('fullname', `TMUSER-PRO ${accountId}`.trim());
+    if(shortId) params.set('fullname', `TMUSER-PRO ${shortId}`.trim());
     params.set('add_to_cart', '1');
     const checkoutUrl = `${PRO_PAYMENT_URL}?${params.toString()}`;
     window.open(checkoutUrl, '_blank', 'noopener');
