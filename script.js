@@ -140,7 +140,22 @@ async function getSupabaseClient(){
   }
 
   const { supabaseUrl, supabaseAnonKey } = await supabaseConfigPromise;
-  supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+  // Explicit persistence config, not relying on the library's unstated
+  // default — this is what actually guarantees staying signed in
+  // survives closing the tab or the whole browser. localStorage
+  // persists across browser restarts; sessionStorage (easy to confuse
+  // it with, given the config caching above uses sessionStorage
+  // deliberately for a different reason) is wiped the moment a tab
+  // closes, which would produce exactly "signs me out when I close the
+  // site" if it were ever accidentally in play here.
+  supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: true,
+      storage: window.localStorage,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  });
   return supabaseClient;
 }
 
@@ -949,7 +964,7 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
     <div class="modal-card checkout-confirmation-card">
       <h3>You're all set — nothing to type</h3>
       <p class="muted">Pro is a one-time payment of $7.50 for one month of access — not an auto-renewing subscription. Nothing gets charged again automatically; when the month's up, just come back and pay again whenever you're ready.</p>
-      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml(accountUsername)} ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
+      <p class="muted">Your email is already filled in on the Selar checkout page. The Name field will show something like <strong>TMUSER-PRO ${escapeHtml(accountId)}</strong> — that's intentional, it's how we link your payment back to your account automatically. Please leave it as-is.</p>
       <p class="muted">If checkout also asks for your ThinkMaps username separately, use this (just in case):</p>
       <div class="checkout-username-display">
         <span id="checkoutUsernameValue">${escapeHtml(accountUsername || '(username not found — contact support)')}</span>
@@ -978,23 +993,20 @@ function showCheckoutConfirmationModal(accountEmail, accountUsername, accountId)
 
   document.getElementById('proceedCheckoutBtn')?.addEventListener('click', () => {
     overlay.remove();
-    // Selar's confirmed prefill parameters. fullname carries THREE
-    // signals at once — a fixed "TMUSER-PRO" marker, username, and
-    // profile id — since this checkout type has no address field to
-    // split any of them off into separately. Selar's Name validation
-    // was confirmed (via a real rejected attempt) to require at least a
-    // space; three words is a reasonable bet to still pass the same
-    // "contains a space" check that two words does, but this specific
-    // case hasn't been confirmed against a real checkout beyond that
-    // assumption — if it gets rejected, that's the first thing to check.
-    //
-    // Still "TMUSER-PRO", not "ThinkMaps" — the product name legitimately
-    // appears many other places in the actual notification email (plan
-    // name, footer branding), which would risk the backend extractor
-    // false-matching on one of those instead of the real encoded value.
+    // Selar's confirmed prefill parameters. fullname used to carry the
+    // username too (TMUSER-PRO <username> <accountId>) — removed after
+    // real user testing confirmed a username containing digits could
+    // break Selar's own checkout form validation (their own client-side
+    // script would throw and the page would never finish loading). Down
+    // to just the marker + profile id now: still satisfies Selar's
+    // "name needs a space in it" requirement with two words, and the
+    // UUID alone is enough — email matching and profile-id matching are
+    // both separate, already-working pathways for linking a payment
+    // back to an account, neither of which ever depended on this field
+    // containing the username at all.
     const params = new URLSearchParams();
     if(accountEmail) params.set('email', accountEmail);
-    if(accountUsername) params.set('fullname', `TMUSER-PRO ${accountUsername} ${accountId}`.trim());
+    if(accountId) params.set('fullname', `TMUSER-PRO ${accountId}`.trim());
     params.set('add_to_cart', '1');
     const checkoutUrl = `${PRO_PAYMENT_URL}?${params.toString()}`;
     window.open(checkoutUrl, '_blank', 'noopener');
@@ -2493,8 +2505,22 @@ function renderTourStep(){
   // header and canvas's own top elements live. The demo itself happens
   // in the canvas middle, so the bottom stays just as clear of it as
   // the top did.
-  caption.style.bottom = 'calc(24px + env(safe-area-inset-bottom))';
+  // Fixed anchor, every step, regardless of target — deliberately NOT
+  // computed relative to the target's position. Hugging the target
+  // dynamically is what caused the caption to land directly on top of
+  // the exact thing being demonstrated (a wide button row, a drag path
+  // between two side-by-side cards) — a consistent corner trades away
+  // "near the target" proximity for something more important here:
+  // never blocking the sightline to the actual demo happening on screen.
+  // Vertically centered on the LEFT edge specifically — not the top
+  // (that's the header and where notifications appear) and not the
+  // bottom either (that's exactly where the canvas controls — zoom,
+  // reset, snapshots — live, so pinning it there just traded one
+  // blocked area for another). Left-center is clear of both regardless
+  // of screen size.
+  caption.style.top = '50%';
   caption.style.left = '24px';
+  caption.style.transform = 'translateY(-50%)';
 
   if(target){
     // Same reasoning as the demo-start delay further down — scrollIntoView
@@ -2510,12 +2536,12 @@ function renderTourStep(){
       const captionRect = caption.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
       const fromX = captionRect.right;
-      // Top edge now, not bottom — the caption is anchored to the
-      // bottom of the screen, so most targets sit ABOVE it. Starting
-      // the line from the caption's top means it points naturally
-      // upward toward the target, instead of appearing to originate
-      // from underneath the card.
-      const fromY = captionRect.top + 20;
+      // Vertical center of the caption now, not a specific edge — the
+      // caption is vertically centered on screen, so a target could
+      // reasonably be above OR below it. Starting from the center
+      // means the line points naturally toward the target either way,
+      // rather than assuming one specific direction.
+      const fromY = captionRect.top + captionRect.height / 2;
       const toX = targetRect.left + targetRect.width / 2;
       const toY = targetRect.top + targetRect.height / 2;
 
