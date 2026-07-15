@@ -2366,6 +2366,37 @@ function stopTourDemo(){
   removeGhostCursor();
 }
 
+function advanceTourStep(){
+  if(!activeTourState) return;
+  const { steps, index } = activeTourState;
+  if(index + 1 < steps.length){
+    activeTourState.index++;
+    renderTourStep();
+  } else {
+    endTour();
+  }
+}
+
+// The core of completion-gated tour steps — called from the REAL
+// interaction code (pan-end, activate-success, combine-trigger) the
+// moment that action genuinely happens anywhere in the app. If there's
+// an active tour currently on a step waiting for exactly this action
+// type, it auto-advances — a brief pause first, so the person actually
+// sees their own action take effect before the tour jumps to the next
+// step, rather than it feeling like the tour reacted instantly and
+// oddly to something else.
+function notifyTourActionCompleted(actionType){
+  if(!activeTourState) return;
+  const step = activeTourState.steps[activeTourState.index];
+  if(step?.waitForAction !== actionType) return;
+  setTimeout(() => {
+    if(!activeTourState) return;
+    const stillOnSameStep = activeTourState.steps[activeTourState.index] === step;
+    if(!stillOnSameStep) return; // already moved on some other way — don't double-advance
+    advanceTourStep();
+  }, 650);
+}
+
 function startTour(tourId, steps, { mandatory = false } = {}){
   // Resolve steps at call time, not definition time — mobile-specific
   // wording needs to reflect the actual device the tour is running on.
@@ -2440,14 +2471,14 @@ function renderTourStep(){
       ${isMandatory ? '<span></span>' : `<button type="button" class="tour-skip-btn">Skip tour</button>`}
       <div class="tour-nav-btns">
         ${index > 0 ? `<button type="button" class="btn btn-ghost tour-back-btn">Back</button>` : ''}
-        <button type="button" class="btn btn-primary tour-next-btn">${index + 1 === steps.length ? 'Done' : 'Next'}</button>
+        ${step.waitForAction
+          ? `<span class="tour-waiting-indicator"><span class="tour-waiting-dot"></span>Try it</span>`
+          : `<button type="button" class="btn btn-primary tour-next-btn">${index + 1 === steps.length ? 'Done' : 'Next'}</button>`}
       </div>
     </div>
   `;
   document.body.appendChild(caption);
 
-  // Position near the target after a frame, once scrollIntoView has
-  // actually settled — positioning against a mid-scroll rect would be wrong.
   // Fixed anchor, every step, regardless of target — deliberately NOT
   // computed relative to the target's position. Hugging the target
   // dynamically is what caused the caption to land directly on top of
@@ -2455,7 +2486,14 @@ function renderTourStep(){
   // between two side-by-side cards) — a consistent corner trades away
   // "near the target" proximity for something more important here:
   // never blocking the sightline to the actual demo happening on screen.
-  caption.style.top = '24px';
+  // Anchored to the BOTTOM specifically, not the top — the card can
+  // realistically run 150-200px tall with title, body text, and
+  // buttons, and pinning that to the top was covering a meaningful
+  // fraction of the visible screen on a phone, right where the site
+  // header and canvas's own top elements live. The demo itself happens
+  // in the canvas middle, so the bottom stays just as clear of it as
+  // the top did.
+  caption.style.bottom = 'calc(24px + env(safe-area-inset-bottom))';
   caption.style.left = '24px';
 
   if(target){
@@ -2472,7 +2510,12 @@ function renderTourStep(){
       const captionRect = caption.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
       const fromX = captionRect.right;
-      const fromY = captionRect.bottom - 20;
+      // Top edge now, not bottom — the caption is anchored to the
+      // bottom of the screen, so most targets sit ABOVE it. Starting
+      // the line from the caption's top means it points naturally
+      // upward toward the target, instead of appearing to originate
+      // from underneath the card.
+      const fromY = captionRect.top + 20;
       const toX = targetRect.left + targetRect.width / 2;
       const toY = targetRect.top + targetRect.height / 2;
 
@@ -2493,14 +2536,7 @@ function renderTourStep(){
   }
 
   caption.querySelector('.tour-skip-btn')?.addEventListener('click', endTour);
-  caption.querySelector('.tour-next-btn')?.addEventListener('click', () => {
-    if(index + 1 < steps.length){
-      activeTourState.index++;
-      renderTourStep();
-    } else {
-      endTour();
-    }
-  });
+  caption.querySelector('.tour-next-btn')?.addEventListener('click', advanceTourStep);
   caption.querySelector('.tour-back-btn')?.addEventListener('click', () => {
     activeTourState.index--;
     renderTourStep();
@@ -2671,9 +2707,10 @@ function getCanvasTourSteps(){
       selector: '#canvasViewport',
       title: 'Pan around',
       text: isCoarsePointer()
-        ? 'Drag anywhere on the empty canvas with your finger to pan around.'
-        : 'Click and drag anywhere on the empty canvas (not on a card) to pan around.',
-      demo: 'pan'
+        ? "Drag anywhere on the empty canvas with your finger to pan around — go ahead, give it a try."
+        : "Click and drag anywhere on the empty canvas (not on a card) to pan around — go ahead, give it a try.",
+      demo: 'pan',
+      waitForAction: 'pan'
     },
     {
       selector: '.canvas-controls',
@@ -2687,9 +2724,10 @@ function getCanvasTourSteps(){
       selector: '.canvas-option',
       title: 'Pick a direction',
       text: isCoarsePointer()
-        ? 'Tap any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.'
-        : 'Click any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea.',
-      demo: 'activate'
+        ? 'Tap any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea. Try tapping one now.'
+        : 'Click any option to activate it — that becomes a real choice, and a new group of options branches off it, going one layer deeper into your idea. Try clicking one now.',
+      demo: 'activate',
+      waitForAction: 'activate'
     },
     {
       selector: '.canvas-option',
@@ -4422,6 +4460,12 @@ function setupCanvasInteractions(){
     if(isPanning){
       isPanning = false;
       viewport.classList.remove('panning');
+      // Only counts as "actually panned" for tour purposes past a real
+      // movement threshold — isPanning gets set true on plain
+      // pointerdown, before any movement at all, so without this check
+      // a simple click on empty canvas would falsely satisfy the step.
+      const movedDistance = Math.hypot(canvasState.pan.x - panStartValue.x, canvasState.pan.y - panStartValue.y);
+      if(movedDistance > 15) notifyTourActionCompleted('pan');
     }
     if(draggingGroupId){
       const group = canvasState.groups.find(g => g.id === draggingGroupId);
@@ -4847,6 +4891,7 @@ async function handleOptionActivate(optionId){
         } else if(event.type === 'done'){
           canvasState.lastActivatedOptionId = optionId;
           canvasState.multiSelectStagedIds.clear();
+          notifyTourActionCompleted('activate');
           if(event.delta){
             mergeGraphDelta(event.delta);
             renderPathProgress();
@@ -4884,6 +4929,7 @@ async function handleOptionActivate(optionId){
       if(res && res.ok){
         canvasState.lastActivatedOptionId = optionId;
         canvasState.multiSelectStagedIds.clear();
+        notifyTourActionCompleted('activate');
         const body = await res.json().catch(() => ({}));
         if(body.fullGraph){
           canvasState.groups = body.fullGraph.groups;
