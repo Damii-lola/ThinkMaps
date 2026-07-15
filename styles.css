@@ -45,6 +45,7 @@ a{ color:inherit; }
 h1,h2,h3{ font-family:var(--font-display); font-weight:600; margin:0; color:var(--ink); }
 p{ margin:0; }
 .muted{ color:var(--ink-muted); }
+.auth-spam-note{ font-size:12.5px; margin-top:-8px; }
 
 /* ---------- NAV ---------- */
 header.site{
