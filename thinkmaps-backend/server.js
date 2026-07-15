@@ -2209,6 +2209,15 @@ function extractBuyerEmailFromText(text){
 function extractThinkMapsUsernameFromText(text){
   if(!text) return null;
 
+  // New checkouts no longer embed a username in the Name field prefill
+  // at all (openPaymentCheckout in script.js dropped it after real user
+  // testing found usernames containing digits could break Selar's own
+  // checkout form validation) — this correctly returns null for any
+  // payment from that point forward, which is fine: email matching and
+  // profile-id matching (see extractProfileIdFromText below) are both
+  // separate, independent pathways that never depended on this. Kept
+  // here purely so any payment already in flight from before that
+  // change still resolves correctly.
   const labeledPatterns = [
     /thinkmaps\s*user\s*name[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
     /thinkmaps\s*username[\s:]*\n?\s*([a-zA-Z0-9_]{3,30})/i,
@@ -5012,7 +5021,29 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
     if(groupsError) throw groupsError;
 
     if(groups.length === 0){
-      const generated = await generateGroupOptions([], { isRoot: true, pivotContext: blueprint.pivot_context || null });
+      // Retried up to 2 extra times specifically for this call — every
+      // other AI call in the app just fails that one action and the
+      // person tries again; THIS one is uniquely critical, because a
+      // failure here permanently strands the blueprint at zero groups.
+      // Since the trigger condition (groups.length === 0) never
+      // changes on its own, every future attempt to open this exact
+      // blueprint would retry this exact same fragile call and could
+      // fail the exact same way again — someone could get permanently
+      // stuck on a blueprint that can never load.
+      let generated = null;
+      let lastGenerationError = null;
+      for(let attempt = 1; attempt <= 3; attempt++){
+        try {
+          generated = await generateGroupOptions([], { isRoot: true, pivotContext: blueprint.pivot_context || null });
+          break;
+        } catch (genErr) {
+          lastGenerationError = genErr;
+          console.error(`[ThinkMaps] Root generation attempt ${attempt}/3 failed for blueprint ${blueprint.id}:`, genErr.message);
+        }
+      }
+      if(!generated){
+        throw new Error(`Root generation failed after 3 attempts: ${lastGenerationError?.message}`);
+      }
 
       const { data: rootGroup, error: rootGroupError } = await supabase
         .from('groups')
@@ -5036,7 +5067,12 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
         position: index
       }));
 
-      await supabase.from('options').insert(optionRows);
+      // Previously unchecked entirely — a failure here would have
+      // silently left a real group and version in place but with zero
+      // options in it, a different but equally broken dead end, with
+      // no error surfaced and no retry.
+      const { error: optionsInsertError } = await supabase.from('options').insert(optionRows);
+      if(optionsInsertError) throw optionsInsertError;
 
       groups = [rootGroup];
     }
@@ -5077,6 +5113,7 @@ app.get('/blueprints/:id/graph', requireAuth, async (req, res) => {
       showFirstProBlueprintTour
     });
   } catch (err) {
+    console.error(`[ThinkMaps] Graph load failed for blueprint ${req.params.id}:`, err.message);
     res.status(500).json({ error: 'Could not load blueprint graph.', detail: err.message });
   }
 });
