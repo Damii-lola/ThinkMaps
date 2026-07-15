@@ -2272,8 +2272,18 @@ function extractTierFromText(text){
 // notification email's text.
 function extractProfileIdFromText(text){
   if(!text) return null;
-  const match = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-  return match ? match[0] : null;
+  // Matches an 8-character hex prefix now, not a full UUID — Selar's
+  // Name field has a genuine length limit, confirmed by real testing
+  // (a full 36-character UUID gets rejected, a short prefix doesn't),
+  // so that's all openPaymentCheckout in script.js sends anymore.
+  // Anchored to the TMUSER-PRO marker specifically, not just "any
+  // 8-character hex string anywhere in the email" — a real payment
+  // notification can easily contain other hex-looking tokens (an order
+  // ID, a transaction reference), and false-matching one of those would
+  // mean upgrading the wrong account. See find_profile_by_id_prefix
+  // below for how this gets matched back to an actual account.
+  const match = text.match(/\bTMUSER-(?:PRO|ULTRA)\s+([0-9a-f]{8})\b/i);
+  return match ? match[1] : null;
 }
 
 // Picks whichever pending-upgrade is closest in time to when the
@@ -2414,30 +2424,33 @@ for(const msgRef of messages){
       // up identifying the account, so this is shared across all of them.
       const purchasedTier = extractTierFromText(bodyText);
 
-      // ---------- Match attempt 1: Profile ID (UUID), silently carried
-      // via the "address" field prefill. The single strongest possible
-      // match — a UUID is globally unique by construction, so if one
-      // turns up in this email and matches an actual account, there is
-      // categorically zero ambiguity, not just "very likely correct."
+      // ---------- Match attempt 1: Profile ID (short hex prefix),
+      // silently carried via the "fullname" field prefill. Still a very
+      // strong match — an 8-character hex prefix has over 4 billion
+      // possible values, so a real collision between two actual
+      // accounts is astronomically unlikely, but checked for anyway
+      // rather than assumed away, since this function's whole job is
+      // deciding which account gets upgraded.
       const checkoutProfileId = extractProfileIdFromText(bodyText);
       if(checkoutProfileId){
-        const { data: idProfile } = await supabase
-          .from('profiles')
-          .select('id, username, email, pro_status')
-          .eq('id', checkoutProfileId)
-          .maybeSingle();
+        const { data: idMatches } = await supabase.rpc('find_profile_by_id_prefix', { prefix_text: checkoutProfileId });
 
-        if(idProfile){
+        if(idMatches?.length === 1){
+          const idProfile = idMatches[0];
           if(idProfile.pro_status){
-            console.log(`[ThinkMaps] Payment inbox check: ${idProfile.username} (matched by profile id) is already Pro — nothing to do.`);
+            console.log(`[ThinkMaps] Payment inbox check: ${idProfile.username} (matched by profile id prefix) is already Pro — nothing to do.`);
           } else {
-            await applyProUpgrade(idProfile, `via their account's profile id, matched directly from the checkout`, purchasedTier);
+            await applyProUpgrade(idProfile, `via their account's profile id prefix, matched directly from the checkout`, purchasedTier);
           }
           await markPaymentEmailProcessed(msgRef.id);
           continue;
         }
 
-        console.log(`[ThinkMaps] Payment inbox check: message "${subject}" had a UUID-shaped value ("${checkoutProfileId}") but it didn't match any account id — falling back to username matching.`);
+        if(idMatches?.length > 1){
+          console.error(`[ThinkMaps] Payment inbox check: prefix "${checkoutProfileId}" matched ${idMatches.length} accounts — refusing to guess, falling back to username/email matching instead.`);
+        } else {
+          console.log(`[ThinkMaps] Payment inbox check: message "${subject}" had a profile id prefix ("${checkoutProfileId}") but it didn't match any account — falling back to username matching.`);
+        }
       }
 
       // ---------- Match attempt 2: ThinkMaps username from the custom
