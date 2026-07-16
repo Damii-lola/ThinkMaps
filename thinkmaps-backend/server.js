@@ -737,25 +737,16 @@ function verifyOtpCode(code, codeHash){
   return hashOtpCode(code) === codeHash;
 }
 
-// Free tier locks a blueprint to read-only after this much time since
-// creation, unless pro_status is set. Was 7 days, then 24 hours; now 30
-// minutes. Single shared constant — both /dashboard's enrichment and
-// checkIsLocked below used to each hardcode their own copy of this
-// number, which is exactly the kind of duplication that causes one of
-// them to quietly drift out of sync on a future change.
-const FREE_TIER_LOCK_MS = 30 * 60 * 1000;
-
-// A locked free-tier blueprint isn't just read-only forever — it's
-// permanently deleted this long after creation. Deliberately a SEPARATE
-// constant from the lock window above, not derived from it, since "stop
-// editing" and "delete forever" are different product decisions that
-// could reasonably diverge later even though they happen to both be
-// fixed numbers today. Enforced lazily (see cleanupExpiredFreeBlueprints
-// below), not via a scheduled job — there's no cron/job-runner
-// infrastructure in this app, and a lazy sweep on dashboard load is
-// simple, requires no new infrastructure, and the actual deletion is
-// not so time-sensitive that "approximately on next dashboard visit" is
-// distinguishable from "exactly at 3 days" to a real person.
+// A free-tier blueprint is permanently deleted this long after creation
+// — it's never locked/read-only before that anymore (removed entirely,
+// per a direct request to make free-tier blueprints fully and
+// indefinitely editable), just eventually cleaned up. Enforced lazily
+// (see cleanupExpiredFreeBlueprints below), not via a scheduled job —
+// there's no cron/job-runner infrastructure in this app, and a lazy
+// sweep on dashboard load is simple, requires no new infrastructure,
+// and the actual deletion is not so time-sensitive that "approximately
+// on next dashboard visit" is distinguishable from "exactly at 3 days"
+// to a real person.
 const FREE_TIER_DELETE_MS = 3 * 24 * 60 * 60 * 1000;
 
 // Verifies the Supabase access token sent from script.js (Authorization: Bearer <token>)
@@ -1702,28 +1693,18 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       }
 
       // Not pro right now. A blueprint created WHILE this user had Pro
-      // locks outright, independent of the free-tier timer — it was
-      // never on that timer to begin with, so downgrading doesn't put
-      // it on one either. Only blueprints actually created on the free
-      // tier are governed by FREE_TIER_LOCK_MS/FREE_TIER_DELETE_MS.
+      // locks outright — it was never on the free tier at all, so
+      // downgrading doesn't put it on one. A blueprint actually created
+      // on the free tier is never locked at all anymore — open and
+      // editable indefinitely — only the separate 3-day auto-delete
+      // (FREE_TIER_DELETE_MS) still applies to it.
       if(bp.created_as_pro){
         return { ...bp, isLocked: true, lockReason: 'pro_required', minutesRemaining: null, daysUntilDeletion: null };
       }
 
       const ageMs = now - new Date(bp.created_at).getTime();
-      const isLocked = ageMs > FREE_TIER_LOCK_MS;
-      // Minutes, not hours — at a 30-minute window, "hours remaining"
-      // would round to a misleading 0 or 1 for nearly this entire
-      // window, which is exactly the kind of unit choice that LOOKS
-      // fine until the actual numbers involved make it useless.
-      const minutesRemaining = isLocked ? null : Math.max(0, Math.ceil((FREE_TIER_LOCK_MS - ageMs) / (60 * 1000)));
-      // Separately: how long until this blueprint is permanently
-      // deleted, regardless of whether it's already locked — locking and
-      // deleting are different moments on the free tier (see
-      // FREE_TIER_DELETE_MS above), so this is its own field, not
-      // derived from isLocked/minutesRemaining.
       const daysUntilDeletion = Math.max(0, Math.ceil((FREE_TIER_DELETE_MS - ageMs) / (24 * 60 * 60 * 1000)));
-      return { ...bp, isLocked, lockReason: isLocked ? 'free_tier_expired' : null, minutesRemaining, daysUntilDeletion };
+      return { ...bp, isLocked: false, lockReason: null, minutesRemaining: null, daysUntilDeletion };
     });
 
     let canCreateNew = effectivePro || blueprints.length === 0;
@@ -4481,9 +4462,13 @@ async function checkIsLocked(userId, blueprint, knownIsPro = null){
     return { isLocked: true, lockReason: 'pro_required' };
   }
 
-  const ageMs = Date.now() - new Date(blueprint.created_at).getTime();
-  const isLocked = ageMs > FREE_TIER_LOCK_MS;
-  return { isLocked, lockReason: isLocked ? 'free_tier_expired' : null };
+  // Free-tier blueprints are no longer time-locked at all — open and
+  // editable for as long as they exist. The only thing that still ever
+  // removes one is the separate 3-day auto-delete cleanup below
+  // (FREE_TIER_DELETE_MS), which this deliberately has nothing to do
+  // with — a blueprint either exists and is fully editable, or it's
+  // been cleaned up and doesn't exist anymore. No in-between locked state.
+  return { isLocked: false, lockReason: null };
 }
 
 // Permanently deletes any of THIS user's free-tier blueprints older than
