@@ -1177,7 +1177,7 @@ function renderProBanner(bannerEl, profile){
   } else {
     bannerEl.innerHTML = `
       <span class="eyebrow">Free plan</span>
-      One blueprint, 30 minutes to edit, then read-only — deleted after 3 days.
+      One blueprint, free to edit, deleted after 3 days.
       <button type="button" id="goProTestBtn" class="btn btn-primary">Go Pro</button>
     `;
     bannerEl.classList.remove('pro');
@@ -1454,7 +1454,7 @@ function renderSettingsPlan(){
     btnEl.textContent = 'Manage plan';
   } else {
     labelEl.innerHTML = '<span class="eyebrow">Free plan</span>';
-    descEl.textContent = 'One blueprint, 30 minutes to edit, then read-only — deleted after 3 days.';
+    descEl.textContent = 'One blueprint, free to edit, deleted after 3 days.';
     btnEl.textContent = 'Go Pro';
   }
   btnEl.style.display = 'inline-flex';
@@ -1691,15 +1691,16 @@ function renderBlueprintArea(container, blueprints, canCreateNew){
     const createdLabel = new Date(bp.created_at).toLocaleDateString();
     let statusLabel;
     if(bp.isLocked){
-      if(bp.lockReason === 'pro_required'){
-        statusLabel = 'Locked — created on Pro, upgrade to access it again';
-      } else {
-        statusLabel = bp.daysUntilDeletion != null
-          ? `Locked — read-only · deletes in ${bp.daysUntilDeletion} day(s)`
-          : 'Locked — read-only';
-      }
-    } else if(bp.minutesRemaining != null){
-      statusLabel = `${bp.minutesRemaining} minute(s) left to edit on free tier`;
+      // The only way a blueprint is ever locked now — created while
+      // Pro, Pro has since lapsed. Free-tier blueprints are never
+      // locked at all anymore, open and editable indefinitely.
+      statusLabel = 'Locked — created on Pro, upgrade to access it again';
+    } else if(bp.daysUntilDeletion != null){
+      // Still fully active and editable — the 3-day auto-delete is the
+      // one thing that was kept, so its countdown needs to stay
+      // genuinely visible rather than disappear along with the lock
+      // state it used to be shown inside.
+      statusLabel = `Active · deletes in ${bp.daysUntilDeletion} day(s)`;
     } else {
       statusLabel = 'Active';
     }
